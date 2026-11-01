@@ -33,13 +33,29 @@ typedef struct
 {
     uint32_t references, flags;
     uint64_t available, event_sequence;
-    uint32_t mss, reserved;
+    uint32_t mss;
+    int32_t error_code;
 } net_tcp_owned_status_t;
+typedef struct
+{
+    uint32_t local_ip, remote_ip;
+    uint16_t local_port, remote_port;
+    uint32_t mss, flags;
+    uint64_t receive_buffer, send_buffer;
+} net_tcp_owned_info_t;
 int net_tcp_socket_owned_snapshot(net_tcp_socket_t *socket, net_tcp_owned_status_t *out);
+int net_tcp_socket_info_owned(net_tcp_socket_t *socket, net_tcp_owned_info_t *out);
+/* A pending error has one claimant until commit or cancellation. A successful
+ * zero-error query returns generation zero and needs no release. Hold an owned
+ * socket reference throughout; never abandon a nonzero claim on a caller stack. */
+int net_tcp_socket_error_claim_owned(net_tcp_socket_t *socket, int32_t *error, uint64_t *generation);
+int net_tcp_socket_error_finish_owned(net_tcp_socket_t *socket, uint64_t generation, bool commit);
 bool net_tcp_socket_connect(net_tcp_socket_t *socket, uint32_t remote_ip, uint16_t remote_port);
 bool net_tcp_socket_send(net_tcp_socket_t *socket, const uint8_t *data, size_t len);
 size_t net_tcp_socket_available(const net_tcp_socket_t *socket);
 size_t net_tcp_socket_read(net_tcp_socket_t *socket, uint8_t *buffer, size_t capacity);
+/* Owned caller, kernel output storage; snapshot without consuming or ACKing. */
+ssize_t net_tcp_socket_peek_owned(net_tcp_socket_t *socket, uint8_t *buffer, size_t capacity);
 ssize_t net_tcp_socket_read_blocking(net_tcp_socket_t *socket, uint8_t *buffer, size_t capacity);
 ssize_t net_tcp_socket_read_blocking_timeout(net_tcp_socket_t *socket,
                                              uint8_t *buffer,

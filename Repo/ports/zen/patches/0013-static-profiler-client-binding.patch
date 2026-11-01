@@ -1,0 +1,162 @@
+--- a/tools/profiler/public/MicroGeckoProfiler.h
++++ b/tools/profiler/public/MicroGeckoProfiler.h
+@@ -21,7 +21,7 @@
+ 
+ #ifdef _WIN32
+ #  include <libloaderapi.h>
+-#else
++#elif !defined(MOZ_UPROFILER_STATIC)
+ #  include <dlfcn.h>
+ #endif
+ 
+@@ -31,37 +31,47 @@
+ #  define CallerPC() __builtin_extract_return_addr(__builtin_return_address(0))
+ #endif  // !defined(CallerPC)
+ 
+-extern MOZ_EXPORT void uprofiler_register_thread(const char* aName,
++// Static clients bind optional profiler exports at ELF link time. The
++// implementation keeps strong definitions; only clients use weak references.
++#if defined(MOZ_UPROFILER_STATIC) && !defined(MOZ_UPROFILER_IMPLEMENTATION)
++#  define UPROFILER_EXPORT MOZ_EXPORT __attribute__((weak))
++#else
++#  define UPROFILER_EXPORT MOZ_EXPORT
++#endif
++
++extern UPROFILER_EXPORT void uprofiler_register_thread(const char* aName,
+                                                  void* aGuessStackTop);
+ 
+-extern MOZ_EXPORT void uprofiler_unregister_thread();
+-
+-extern MOZ_EXPORT void uprofiler_simple_event_marker(
++extern UPROFILER_EXPORT void uprofiler_unregister_thread();
++
++extern UPROFILER_EXPORT void uprofiler_simple_event_marker(
+     const char* name, const char category, char phase, int num_args,
+     const char** arg_names, const unsigned char* arg_types,
+     const unsigned long long* arg_values);
+ 
+-extern MOZ_EXPORT void uprofiler_simple_event_marker_capture_stack(
++extern UPROFILER_EXPORT void uprofiler_simple_event_marker_capture_stack(
+     const char* name, const char category, char phase, int num_args,
+     const char** arg_names, const unsigned char* arg_types,
+     const unsigned long long* arg_values);
+ 
+-extern MOZ_EXPORT void uprofiler_simple_event_marker_with_stack(
++extern UPROFILER_EXPORT void uprofiler_simple_event_marker_with_stack(
+     const char* name, const char category, char phase, int num_args,
+     const char** arg_names, const unsigned char* arg_types,
+     const unsigned long long* arg_values, void* provided_stack);
+ 
+-extern MOZ_EXPORT bool uprofiler_backtrace_into_buffer(
++extern UPROFILER_EXPORT bool uprofiler_backtrace_into_buffer(
+     struct NativeStack* stack, void* aBuffer);
+ 
+-extern MOZ_EXPORT void uprofiler_native_backtrace(const void* top,
++extern UPROFILER_EXPORT void uprofiler_native_backtrace(const void* top,
+                                                   struct NativeStack* stack);
+ 
+-extern MOZ_EXPORT bool uprofiler_is_active();
+-
+-extern MOZ_EXPORT bool uprofiler_feature_active(int32_t feature);
+-
+-extern MOZ_EXPORT bool uprofiler_get(struct UprofilerFuncPtrs* aFuncPtrs);
++extern UPROFILER_EXPORT bool uprofiler_is_active();
++
++extern UPROFILER_EXPORT bool uprofiler_feature_active(int32_t feature);
++
++extern UPROFILER_EXPORT bool uprofiler_get(struct UprofilerFuncPtrs* aFuncPtrs);
++
++#undef UPROFILER_EXPORT
+ 
+ /* NOLINT because we want to stick to C here */
+ // NOLINTBEGIN(modernize-use-using)
+@@ -75,9 +85,17 @@
+     if (getenv("MOZ_UPROFILER_LOG_THREAD_CREATION")) {
+       printf("### UProfiler: new thread: '%s'\n", name);
+     }
+-    uprofiler_register_thread(name, stacktop);
+-  }
+-  ~AutoRegisterProfiler() { uprofiler_unregister_thread(); }
++#if defined(MOZ_UPROFILER_STATIC)
++    if (uprofiler_register_thread)
++#endif
++      uprofiler_register_thread(name, stacktop);
++  }
++  ~AutoRegisterProfiler() {
++#if defined(MOZ_UPROFILER_STATIC)
++    if (uprofiler_unregister_thread)
++#endif
++      uprofiler_unregister_thread();
++  }
+ };
+ #endif  // __cplusplus
+ 
+@@ -155,17 +173,21 @@
+ 
+ #if defined(_WIN32)
+ #  define UPROFILER_OPENLIB() GetModuleHandle(NULL)
+-#else
++#elif !defined(MOZ_UPROFILER_STATIC)
+ #  define UPROFILER_OPENLIB() dlopen(NULL, RTLD_NOW)
+ #endif
+ 
+-#if defined(_WIN32)
++#if defined(MOZ_UPROFILER_STATIC)
++#  define UPROFILER_GET_SYM(handle, sym) (&sym)
++#elif defined(_WIN32)
+ #  define UPROFILER_GET_SYM(handle, sym) GetProcAddress(handle, sym)
+ #else
+ #  define UPROFILER_GET_SYM(handle, sym) (typeof(sym)*)(dlsym(handle, #sym))
+ #endif
+ 
+-#if defined(_WIN32)
++#if defined(MOZ_UPROFILER_STATIC)
++#  define UPROFILER_PRINT_ERROR(func) fprintf(stderr, "%s is not linked\n", #func);
++#elif defined(_WIN32)
+ #  define UPROFILER_PRINT_ERROR(func) fprintf(stderr, "%s error\n", #func);
+ #else
+ #  define UPROFILER_PRINT_ERROR(func) \
+@@ -192,6 +214,10 @@
+ 
+ // Assumes that a variable of type UprofilerFuncPtrs, named uprofiler
+ // is accessible in the scope
++#if defined(MOZ_UPROFILER_STATIC)
++#  define UPROFILER_GET_FUNCTIONS() UPROFILER_VISIT()
++#  define UPROFILER_GET(var) uprofiler_getter var = &uprofiler_get
++#else
+ #define UPROFILER_GET_FUNCTIONS()                                 \
+   void* handle = UPROFILER_OPENLIB();                             \
+   if (!handle) {                                                  \
+@@ -222,4 +248,6 @@
+     }                                                 \
+   }
+ 
++#endif  // MOZ_UPROFILER_STATIC
++
+ #endif  // MICRO_GECKO_PROFILER
+--- a/media/libcubeb/src/cubeb_tracing.h
++++ b/media/libcubeb/src/cubeb_tracing.h
+@@ -7,6 +7,16 @@
+ 
+ #include <MicroGeckoProfiler.h>
+ 
++#if defined(MOZ_UPROFILER_STATIC)
++// Alix can query native thread-stack metadata; no callback retains the address
++// of another thread's stack. Hooks remain active when the provider is linked.
++#define CUBEB_REGISTER_THREAD(name) \
++  do { if (uprofiler_register_thread) uprofiler_register_thread(name, NULL); } while (0)
++#define CUBEB_UNREGISTER_THREAD() \
++  do { if (uprofiler_unregister_thread) uprofiler_unregister_thread(); } while (0)
++#define CUBEB_TRACE(name, phase) \
++  do { if (uprofiler_simple_event_marker) uprofiler_simple_event_marker(name, 0, phase, 0, NULL, NULL, NULL); } while (0)
++#else
+ #define CUBEB_REGISTER_THREAD(name)               \
+   do {                                            \
+     char stacktop;                                \
+@@ -22,4 +32,6 @@
+ #define CUBEB_TRACE(name, phase) \
+   uprofiler_simple_event_marker(name, phase, 0, NULL, NULL, NULL)
+ 
++#endif // MOZ_UPROFILER_STATIC
++
+ #endif // CUBEB_TRACING_H

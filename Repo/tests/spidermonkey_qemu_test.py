@@ -15,8 +15,10 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument("timeout_seconds",nargs="?",type=int,default=180)
     parser.add_argument("--extended",action="store_true",help="also require native Ion JIT, GC, Wasm traps and worker atomics")
+    parser.add_argument("--existing-image",action="store_true",help="revalidate and run the existing upstream ELF without rebuilding it")
     options=parser.parse_args()
-    subprocess.run(["make","-C","ports/zen/upstream/obj-js-alix","-j2"],cwd=ROOT,check=True)
+    if not options.existing_image:
+        subprocess.run(["make","-C","ports/zen/upstream/obj-js-alix","-j2"],cwd=ROOT,check=True)
     subprocess.run(["python3","ports/zen/prepare_native_js.py"],cwd=ROOT,check=True)
     # Encode the marker so shell command echo cannot satisfy execution proof.
     prefix="ALIX_SPIDERMONKEY: PASS value="
@@ -49,6 +51,8 @@ def main():
                     raise RuntimeError("upstream executable image changed during native acceptance")
         receipt["scope"]="Upstream SpiderMonkey native runtime smoke; Gecko and Zen remain unverified"
         receipt["native_acceptance"]={"cpus":8,"wait_status":0,
+            "rebuilt_before_test":not options.existing_image,
+            "boot_images":json.loads(log.with_suffix(".boot-image.json").read_text()),
             "features":["JavaScript","Ion JIT observed","GC roots across 8 cycles","Wasm execution and bounds trap","worker shared Atomics"],
             "basic_log":"build/test-out/spidermonkey-basic-qemu.log",
             "runtime_log":"build/test-out/spidermonkey-runtime-qemu.log"}

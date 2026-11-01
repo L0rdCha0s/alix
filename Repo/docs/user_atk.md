@@ -7,7 +7,7 @@ This prototype introduces a path for running ATK-based applications in userland 
 * The kernel hosts **remote ATK windows** (`user_atk_window_t`). Each remote window is a normal ATK window that owns an `atk_image` child. The image points at a pixel buffer that the user process updates via a syscall.
 * New syscalls expose the functionality:
   * `SYSCALL_UI_CREATE` – create a remote window (`user_atk_window_desc_t`).
-  * `SYSCALL_UI_PRESENT` – copy a RGB565 buffer from userland into the window image and request a refresh.
+  * `SYSCALL_UI_PRESENT` – copy 32-bit `0xFFRRGGBB` pixels (BGRA bytes on x86) from userland into the window image and request a refresh.
   * `SYSCALL_UI_POLL_EVENT` – fetch mouse/key/close events; supports blocking.
   * `SYSCALL_UI_CLOSE` – tear a remote window down.
 * `user_atk.c` in the kernel bridges ATK’s event handling:
@@ -15,6 +15,12 @@ This prototype introduces a path for running ATK-based applications in userland 
   * Mouse capture is honoured so drags continue even if the cursor leaves the window.
   * Closing a window via the title bar emits a `USER_ATK_EVENT_CLOSE` for the owning process.
 * When a process exits, all of its remote windows are closed automatically.
+
+Native renderers also have versioned window controls for client bounds,
+visibility, focus, titles, decorations and display queries. See
+[`kernel/windows.md`](kernel/windows.md) for the current ABI, concurrency rules
+and native graphical acceptance evidence. These controls do not require the
+userland ATK renderer or Alix's HTML/CSS/JavaScript libraries.
 
 ## Userland Toolkit
 

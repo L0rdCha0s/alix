@@ -29,6 +29,8 @@ PHDRS
     tls PT_TLS FLAGS(0x4); /* Per-thread template; instantiated by the loader. */
 }
 
+/* Kernel bootstrap stack/page tables are loader allocated below 4 GiB.
+ * The native user virtual-address contract below remains unchanged. */
 SECTIONS
 {
     . = __alix_user_pointer_base;

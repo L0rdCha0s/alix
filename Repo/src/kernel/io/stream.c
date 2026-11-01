@@ -21,7 +21,12 @@ static int io_stream_close(void *context)
     return result;
 }
 
-static const fd_ops_t io_stream_ops = { .close = io_stream_close };
+static uint32_t io_stream_poll(void *context)
+{
+    io_stream_t *stream = context;
+    return stream->ops.poll ? stream->ops.poll(stream->context) : SYSCALL_POLL_ERR;
+}
+static const fd_ops_t io_stream_ops = { .close = io_stream_close, .poll = io_stream_poll };
 
 fd_description_t *io_stream_create(const fd_ops_t *ops, void *context,
                                    fd_description_t *owner, fd_retirement_queue_t *retirement)
@@ -34,6 +39,8 @@ fd_description_t *io_stream_create(const fd_ops_t *ops, void *context,
     stream->owner = owner;
     fd_description_t *description = fd_description_create_deferred(&io_stream_ops, stream, retirement);
     if (!description) free(stream);
+    else (void)fd_description_initialize_status(description,
+        (ops->read ? FD_STATUS_READ : 0) | (ops->write ? FD_STATUS_WRITE : 0));
     return description;
 }
 
@@ -102,15 +109,18 @@ static ssize_t io_console_write(void *context, const void *buffer, size_t count)
     return (ssize_t)count;
 }
 
+static uint32_t io_null_poll(void *context) { (void)context; return SYSCALL_POLL_IN; }
+static uint32_t io_console_poll(void *context) { (void)context; return SYSCALL_POLL_OUT; }
+
 fd_description_t *io_null_input_create(fd_retirement_queue_t *retirement)
 {
-    const fd_ops_t ops = { .read = io_null_read, .fstat = io_character_stat };
+    const fd_ops_t ops = { .read = io_null_read, .fstat = io_character_stat, .poll = io_null_poll };
     return io_stream_create(&ops, NULL, NULL, retirement);
 }
 
 fd_description_t *io_console_import_owned(void *unused)
 {
     (void)unused;
-    const fd_ops_t ops = { .write = io_console_write, .fstat = io_character_stat };
+    const fd_ops_t ops = { .write = io_console_write, .fstat = io_character_stat, .poll = io_console_poll };
     return io_stream_create(&ops, NULL, NULL, process_fd_retirement_queue());
 }

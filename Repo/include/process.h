@@ -294,6 +294,11 @@ process_t *process_create_user_elf_with_parent(const char *name,
                                                process_t *parent,
                                                const char *const *argv,
                                                size_t argc);
+/* File-backed kernel launcher: absolute VFS path copied before publication.
+ * The ordinary in-memory image constructors retain anonymous-image semantics. */
+process_t *process_create_user_elf_from_path(const char *name, const char *executable_path,
+                                            const uint8_t *image, size_t size, int stdout_fd,
+                                            process_t *parent, const char *const *argv, size_t argc);
 
 void process_set_priority(process_t *process, thread_priority_t priority);
 void process_set_priority_override(process_t *process, thread_priority_t priority);

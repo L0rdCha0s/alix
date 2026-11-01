@@ -11,6 +11,7 @@
 #include "timer.h"
 #include "video.h"
 #include "user_copy.h"
+#include "errno.h"
 
 #ifndef USER_ATK_DEBUG
 #define USER_ATK_DEBUG 0
@@ -34,6 +35,7 @@ typedef struct user_atk_window
     int stride_bytes;
     bool closed;
     bool destroying;
+    bool listed;
     spinlock_t pixel_lock;
     user_atk_event_t events[USER_ATK_EVENT_QUEUE_MAX];
     size_t event_head;
@@ -53,6 +55,8 @@ static bool g_capture_relative = false;
 static process_t *g_focus_priority_owner = NULL;
 static process_t *g_capture_priority_owner = NULL;
 static uint32_t g_next_handle = 1;
+
+_Static_assert(sizeof(user_atk_window_control_t) == 104, "window control ABI size");
 
 #define USER_ATK_PRESENT_SAMPLE_WORDS 8u
 
@@ -205,16 +209,17 @@ bool user_atk_window_is_resizable(const atk_widget_t *window)
     return (win->flags & USER_ATK_WINDOW_FLAG_RESIZABLE) != 0;
 }
 
-void user_atk_window_resized(const atk_widget_t *window)
+/* Caller holds the ATK state lock. Surface changes are serialized with
+ * presentation by pixel_lock; failed allocation leaves the old surface alive. */
+static bool user_atk_resize_window(user_atk_window_t *win)
 {
-    user_atk_window_t *win = user_atk_from_window(window);
-    if (!win || (win->flags & USER_ATK_WINDOW_FLAG_RESIZABLE) == 0)
+    if (!win)
     {
-        return;
+        return false;
     }
     if (!win->image || !win->window)
     {
-        return;
+        return false;
     }
 
     atk_widget_t *image = win->image;
@@ -225,13 +230,14 @@ void user_atk_window_resized(const atk_widget_t *window)
     int new_height = image->height;
     if (new_width < 1) new_width = 1;
     if (new_height < 1) new_height = 1;
+    if (new_width > 16384 || new_height > 16384) return false;
 
     bool size_changed = (new_width != win->content_width) || (new_height != win->content_height);
     bool offset_changed = (win->content_offset_x != new_off_x) || (win->content_offset_y != new_off_y);
 
     if (!size_changed && !offset_changed)
     {
-        return;
+        return true;
     }
 
     serial_printf("[user_atk][resize] handle=0x%016llX old=%dx%d off=(%d,%d) new=%dx%d off=(%d,%d)\r\n",
@@ -262,7 +268,7 @@ void user_atk_window_resized(const atk_widget_t *window)
             spinlock_unlock(&win->pixel_lock);
             image->width = win->content_width;
             image->height = win->content_height;
-            return;
+            return false;
         }
         video_color_t *back = (video_color_t *)malloc(new_bytes);
         if (!back)
@@ -271,7 +277,7 @@ void user_atk_window_resized(const atk_widget_t *window)
             spinlock_unlock(&win->pixel_lock);
             image->width = win->content_width;
             image->height = win->content_height;
-            return;
+            return false;
         }
         memset(front, 0, new_bytes);
         memset(back, 0, new_bytes);
@@ -302,7 +308,7 @@ void user_atk_window_resized(const atk_widget_t *window)
             image->width = win->content_width;
             image->height = win->content_height;
             spinlock_unlock(&win->pixel_lock);
-            return;
+            return false;
         }
 
         video_color_t *old_front = win->pixels;
@@ -340,6 +346,12 @@ void user_atk_window_resized(const atk_widget_t *window)
     user_atk_queue_resize_event(win, (uint32_t)win->content_width, (uint32_t)win->content_height);
     atk_window_mark_dirty(win->window);
     video_request_refresh_window(win->window);
+    return true;
+}
+
+void user_atk_window_resized(const atk_widget_t *window)
+{
+    (void)user_atk_resize_window(user_atk_from_window(window));
 }
 
 void user_atk_focus_window(const atk_widget_t *window)
@@ -350,12 +362,19 @@ void user_atk_focus_window(const atk_widget_t *window)
         target = NULL;
     }
     user_atk_windows_lock();
-    if (g_focus_window != target)
-    {
-        g_focus_window = target;
-    }
+    user_atk_window_t *previous = g_focus_window;
+    if (previous == target) { user_atk_windows_unlock(); return; }
+    user_atk_window_retain(previous);
+    user_atk_window_retain(target);
+    g_focus_window = target;
     user_atk_windows_unlock();
+    user_atk_event_t event = { .type = USER_ATK_EVENT_FOCUS };
+    if (previous) user_atk_queue_event(previous, &event);
+    event.data0 = 1;
+    if (target) user_atk_queue_event(target, &event);
     user_atk_apply_priorities();
+    user_atk_window_release(previous);
+    user_atk_window_release(target);
 }
 
 bool user_atk_capture_relative_active(void)
@@ -578,7 +597,8 @@ bool user_atk_route_key_event(const keyboard_event_t *key_event)
 #endif
 
     /* Translate extended arrow keys into ANSI escape sequences so text UI can consume them. */
-    if (key_event->extended && !key_event->released && key_event->ch == 0)
+    if (!(focus->flags & USER_ATK_WINDOW_FLAG_RAW_KEYS) &&
+        key_event->extended && !key_event->released && key_event->ch == 0)
     {
         const char *seq = NULL;
         size_t seq_len = 0;
@@ -710,6 +730,7 @@ static void user_atk_window_on_destroy(void *context)
 static void user_atk_insert(user_atk_window_t *win)
 {
     user_atk_windows_lock();
+    win->listed = true;
     win->prev = NULL;
     win->next = g_windows_head;
     if (g_windows_head)
@@ -731,6 +752,13 @@ static void user_atk_remove(user_atk_window_t *win, bool closing_kernel)
     atk_state_lock_init();
     uint64_t irq_state = atk_state_lock_acquire();
     user_atk_windows_lock();
+    if (!win->listed)
+    {
+        user_atk_windows_unlock();
+        atk_state_lock_release(irq_state);
+        return;
+    }
+    win->listed = false;
     if (win->prev)
     {
         win->prev->next = win->next;
@@ -789,7 +817,7 @@ static user_atk_window_t *user_atk_find(uint32_t handle, process_t *owner)
     return NULL;
 }
 
-int64_t user_atk_sys_create(const user_atk_window_desc_t *desc_user)
+static int64_t user_atk_create_impl(const user_atk_window_desc_t *desc_user)
 {
     if (!desc_user)
     {
@@ -850,11 +878,13 @@ int64_t user_atk_sys_create(const user_atk_window_desc_t *desc_user)
         return -1;
     }
 
-    const int margin = 8;
+    bool borderless = (desc.flags & USER_ATK_WINDOW_FLAG_BORDERLESS) != 0;
+    const int margin = borderless ? 0 : 8;
     int content_offset_x = margin;
-    int content_offset_y = ATK_WINDOW_TITLE_HEIGHT + margin;
+    int content_offset_y = (borderless ? 0 : ATK_WINDOW_TITLE_HEIGHT) + margin;
     window->width = desc.width + margin * 2;
-    window->height = desc.height + margin * 2 + ATK_WINDOW_TITLE_HEIGHT;
+    window->height = desc.height + margin * 2 + (borderless ? 0 : ATK_WINDOW_TITLE_HEIGHT);
+    if (borderless) atk_window_set_chrome_style(window, false);
     atk_window_ensure_inside(window);
 
     if (desc.title[0] != '\0')
@@ -898,7 +928,8 @@ int64_t user_atk_sys_create(const user_atk_window_desc_t *desc_user)
                           ATK_WIDGET_ANCHOR_BOTTOM);
 
     win->handle = g_next_handle++;
-    win->flags = desc.flags & USER_ATK_WINDOW_FLAG_RESIZABLE;
+    win->flags = desc.flags & (USER_ATK_WINDOW_FLAG_RESIZABLE | USER_ATK_WINDOW_FLAG_HIDDEN |
+                              USER_ATK_WINDOW_FLAG_BORDERLESS | USER_ATK_WINDOW_FLAG_RAW_KEYS);
     win->refcount = 1;
     win->owner = process_current();
     win->window = window;
@@ -922,115 +953,59 @@ int64_t user_atk_sys_create(const user_atk_window_desc_t *desc_user)
 
     atk_window_set_context(window, win, user_atk_window_on_destroy);
     user_atk_insert(win);
+    if (desc.flags & USER_ATK_WINDOW_FLAG_HIDDEN) atk_window_set_visible(state, window, false);
 
     atk_window_mark_dirty(window);
     video_request_refresh_window(window);
     user_atk_log("create handle=", win->handle);
-    user_atk_focus_window(window);
+    if (atk_window_is_visible(window)) user_atk_focus_window(window);
     atk_state_lock_release(irq_state);
     return (int64_t)win->handle;
 }
 
 int64_t user_atk_sys_present(uint32_t handle, const video_color_t *pixels, size_t byte_len)
 {
-    if (!pixels)
-    {
-        return -1;
-    }
-    user_atk_log("present handle=", handle);
-    user_atk_log("present user ptr=", (uintptr_t)pixels);
-    user_atk_log("present bytes=", byte_len);
+    if (!pixels) return -1;
+    spinlock_preempt_disable();
     user_atk_window_t *win = user_atk_find(handle, process_current());
-    if (!win || win->closed || !win->pixels)
+    int64_t result = -1;
+    if (win)
     {
-        if (win)
-        {
-            user_atk_window_release(win);
-        }
-        return -1;
-    }
-
-    spinlock_lock(&win->pixel_lock);
-    if (win->closed || !win->pixels)
-    {
-        spinlock_unlock(&win->pixel_lock);
-        user_atk_window_release(win);
-        return -1;
-    }
-
-#if USER_ATK_DEBUG
-    serial_printf("[user_atk][present] handle=0x%016llX bytes=0x%016llX expected=0x%016llX content=%dx%d stride=%d dst=0x%016llX\r\n",
-                  (unsigned long long)((uint64_t)handle),
-                  (unsigned long long)((uint64_t)byte_len),
-                  (unsigned long long)((uint64_t)win->pixel_bytes),
-                  win->content_width,
-                  win->content_height,
-                  win->stride_bytes,
-                  (unsigned long long)((uint64_t)(uintptr_t)win->pixels));
-#endif
-
-
-    size_t expected_bytes = win->pixel_bytes;
-    size_t copy_bytes = expected_bytes;
-    if (byte_len != expected_bytes)
-    {
-#if USER_ATK_DEBUG
-        user_atk_present_log_summary(handle, expected_bytes, byte_len, pixels, win->pixels);
-        user_atk_present_log_mismatch(handle, expected_bytes, byte_len);
-#endif
-        if (byte_len < copy_bytes)
-        {
-            copy_bytes = byte_len;
-        }
-    }
-
-    video_color_t *dst = win->back_pixels ? win->back_pixels : win->pixels;
-    if (copy_bytes > 0 && !user_copy_from_user(dst, pixels, copy_bytes))
-    {
-        spinlock_unlock(&win->pixel_lock);
-        user_atk_window_release(win);
-        return -1;
-    }
-    if (copy_bytes < expected_bytes)
-    {
-        size_t remaining = expected_bytes - copy_bytes;
-        memset((uint8_t *)dst + copy_bytes, 0, remaining);
-    }
-
-    if (win->back_pixels)
-    {
-        video_color_t *new_front = win->back_pixels;
-        win->back_pixels = win->pixels;
-        win->pixels = new_front;
-    }
-    spinlock_unlock(&win->pixel_lock);
-    user_atk_log("present dst ptr=", (uintptr_t)win->pixels);
-    if (win->window)
-    {
-        atk_state_lock_init();
+        /* Match resize/destroy order. Holding the state lock through the swap
+         * and image update prevents a renderer using a freed previous surface. */
         uint64_t irq_state = atk_state_lock_acquire();
-        if (win->image && win->pixels)
+        spinlock_lock(&win->pixel_lock);
+        if (!win->closed && win->window && win->image && win->pixels)
         {
-            atk_image_set_pixels(win->image,
-                                 win->pixels,
-                                 win->content_width,
-                                 win->content_height,
-                                 win->stride_bytes,
-                                 false);
+            size_t bytes = byte_len < win->pixel_bytes ? byte_len : win->pixel_bytes;
+            video_color_t *destination = win->back_pixels ? win->back_pixels : win->pixels;
+            if (!bytes || user_copy_from_user(destination, pixels, bytes))
+            {
+                if (bytes < win->pixel_bytes)
+                    memset((uint8_t *)destination + bytes, 0, win->pixel_bytes - bytes);
+                if (win->back_pixels)
+                {
+                    win->back_pixels = win->pixels;
+                    win->pixels = destination;
+                }
+                if (atk_image_set_pixels(win->image, win->pixels, win->content_width,
+                                           win->content_height, win->stride_bytes, false))
+                {
+                    atk_window_mark_dirty(win->window);
+                    video_request_refresh_window(win->window);
+                    result = 0;
+                }
+            }
         }
-        atk_window_mark_dirty(win->window);
-        video_request_refresh_window(win->window);
+        spinlock_unlock(&win->pixel_lock);
         atk_state_lock_release(irq_state);
+        user_atk_window_release(win);
     }
-    else
-    {
-        video_request_refresh();
-    }
-    user_atk_window_release(win);
-    return 0;
+    spinlock_preempt_enable();
+    return result;
 }
 
-int64_t user_atk_sys_poll_event(uint32_t handle, user_atk_event_t *event_out, uint32_t flags)
+static int64_t user_atk_poll_event_impl(uint32_t handle, user_atk_event_t *event_out, uint32_t flags)
 {
     if (!event_out)
     {
@@ -1160,7 +1135,7 @@ int64_t user_atk_sys_poll_event_timeout(uint32_t handle, user_atk_event_t *event
     return 1;
 }
 
-int64_t user_atk_sys_close(uint32_t handle)
+static int64_t user_atk_close_impl(uint32_t handle)
 {
     user_atk_log("close handle=", handle);
     user_atk_window_t *win = user_atk_find(handle, process_current());
@@ -1174,7 +1149,7 @@ int64_t user_atk_sys_close(uint32_t handle)
     return 0;
 }
 
-int64_t user_atk_sys_capture(uint32_t handle, uint32_t flags)
+static int64_t user_atk_capture_impl(uint32_t handle, uint32_t flags)
 {
     user_atk_window_t *win = user_atk_find(handle, process_current());
     if (!win)
@@ -1476,4 +1451,180 @@ static void user_atk_apply_priorities(void)
         g_capture_priority_owner = NULL;
     }
     user_atk_windows_unlock();
+}
+
+int64_t user_atk_sys_create(const user_atk_window_desc_t *desc_user)
+{
+    spinlock_preempt_disable();
+    int64_t result = user_atk_create_impl(desc_user);
+    spinlock_preempt_enable();
+    return result;
+}
+
+int64_t user_atk_sys_close(uint32_t handle)
+{
+    spinlock_preempt_disable();
+    int64_t result = user_atk_close_impl(handle);
+    spinlock_preempt_enable();
+    return result;
+}
+
+int64_t user_atk_sys_capture(uint32_t handle, uint32_t flags)
+{
+    spinlock_preempt_disable();
+    int64_t result = user_atk_capture_impl(handle, flags);
+    spinlock_preempt_enable();
+    return result;
+}
+
+static void user_atk_snapshot_window(user_atk_window_t *win, user_atk_window_control_t *control)
+{
+    memset(control, 0, sizeof(*control));
+    control->version = USER_ATK_CONTROL_VERSION; control->size = sizeof(*control);
+    control->screen_width = (uint32_t)video_screen_width();
+    control->screen_height = (uint32_t)video_screen_height();
+    if (!win)
+    {
+        control->width = control->screen_width; control->height = control->screen_height;
+        return;
+    }
+    control->x = win->window->x + win->content_offset_x;
+    control->y = win->window->y + win->content_offset_y;
+    control->width = (uint32_t)win->content_width; control->height = (uint32_t)win->content_height;
+    control->flags = (atk_window_is_visible(win->window) ? USER_ATK_STATE_VISIBLE : 0) |
+                     (atk_window_is_chrome_visible(win->window) ? USER_ATK_STATE_CHROME : 0) |
+                     ((win->flags & USER_ATK_WINDOW_FLAG_RESIZABLE) ? USER_ATK_STATE_RESIZABLE : 0);
+    user_atk_windows_lock();
+    if (g_focus_window == win) control->flags |= USER_ATK_STATE_FOCUSED;
+    user_atk_windows_unlock();
+    const char *title = atk_window_title(win->window);
+    for (size_t index = 0; index + 1 < sizeof(control->title) && title[index]; ++index)
+        control->title[index] = title[index];
+}
+
+/* Caller owns the ATK state lock and a retained window. No state becomes
+ * externally visible until the replacement image allocations have succeeded. */
+static int user_atk_configure_window(user_atk_window_t *win, int x, int y,
+                                      unsigned width, unsigned height, bool chrome)
+{
+    if (!width || !height || width > 16384 || height > 16384 ||
+        x < -1048576 || x > 1048576 || y < -1048576 || y > 1048576) return -EINVAL;
+    atk_widget_t *window = win->window, *image = win->image;
+    int old_x = window->x, old_y = window->y, old_width = window->width, old_height = window->height;
+    int old_image_x = image->x, old_image_y = image->y;
+    int client_x = old_x + win->content_offset_x, client_y = old_y + win->content_offset_y;
+    int margin = chrome ? 8 : 0, top = chrome ? ATK_WINDOW_TITLE_HEIGHT + margin : 0;
+    atk_window_mark_dirty(window);
+    window->x = x - margin; window->y = y - top;
+    window->width = (int)width + margin * 2; window->height = (int)height + top + margin;
+    image->x = margin; image->y = top; image->width = (int)width; image->height = (int)height;
+    if (!user_atk_resize_window(win))
+    {
+        window->x = old_x; window->y = old_y; window->width = old_width; window->height = old_height;
+        image->x = old_image_x; image->y = old_image_y;
+        image->width = win->content_width; image->height = win->content_height;
+        return -ENOMEM;
+    }
+    atk_window_set_chrome_style(window, chrome);
+    atk_window_request_layout(window);
+    if (client_x != x || client_y != y)
+    {
+        user_atk_event_t event = { .type = USER_ATK_EVENT_MOVE, .x = x, .y = y };
+        user_atk_queue_event(win, &event);
+    }
+    atk_window_mark_dirty(window);
+    video_request_refresh_window(window);
+    return 0;
+}
+
+int64_t user_atk_sys_control(uint32_t handle, uint32_t operation,
+                              user_atk_window_control_t *output, size_t bytes)
+{
+    if (bytes != sizeof(*output)) return -EINVAL;
+    if (operation > USER_ATK_CONTROL_DISPLAY) return -EINVAL;
+    spinlock_preempt_disable();
+    user_atk_window_control_t *control = calloc(1, sizeof(*control));
+    user_atk_window_t *win = NULL;
+    int result = control ? 0 : -ENOMEM;
+    if (!result && !user_copy_from_user(control, output, bytes)) result = -EFAULT;
+    if (!result && control->version != USER_ATK_CONTROL_VERSION) result = -ENOTSUP;
+    if (!result && (control->size != bytes || control->reserved)) result = -EINVAL;
+    if (!result && !user_copy_to_user(output, control, bytes)) result = -EFAULT;
+    if (!result && operation == USER_ATK_CONTROL_DISPLAY && handle) result = -EINVAL;
+    if (!result && operation != USER_ATK_CONTROL_DISPLAY)
+    {
+        win = user_atk_find(handle, process_current());
+        if (!win) result = -EBADF;
+    }
+    if (!result)
+    {
+        uint64_t irq_state = atk_state_lock_acquire();
+        if (win && (win->closed || !win->window || !win->image)) result = -EBADF;
+        else if (operation == USER_ATK_CONTROL_BOUNDS)
+            result = user_atk_configure_window(win, control->x, control->y, control->width, control->height,
+                                                atk_window_is_chrome_visible(win->window));
+        else if (operation == USER_ATK_CONTROL_CHROME)
+        {
+            if (control->flags > 1) result = -EINVAL;
+            else result = user_atk_configure_window(win, win->window->x + win->content_offset_x,
+                        win->window->y + win->content_offset_y, (unsigned)win->content_width,
+                        (unsigned)win->content_height, control->flags != 0);
+        }
+        else if (operation == USER_ATK_CONTROL_VISIBLE)
+        {
+            if (control->flags > 1) result = -EINVAL;
+            else
+            {
+                bool visible = control->flags != 0;
+                atk_window_set_visible(atk_state_get(), win->window, visible);
+                if (!visible)
+                {
+                    user_atk_windows_lock();
+                    bool focused = g_focus_window == win;
+                    if (g_capture_window == win)
+                    { g_capture_window = NULL; g_capture_forced = false; g_capture_relative = false; }
+                    user_atk_windows_unlock();
+                    if (focused) user_atk_focus_window(NULL);
+                    user_atk_apply_priorities();
+                }
+                video_request_refresh();
+            }
+        }
+        else if (operation == USER_ATK_CONTROL_FOCUS)
+        {
+            if (!atk_window_is_visible(win->window)) result = -EINVAL;
+            else
+            {
+                atk_window_bring_to_front(atk_state_get(), win->window);
+                user_atk_focus_window(win->window);
+                atk_dirty_mark_all(); video_request_refresh();
+            }
+        }
+        else if (operation == USER_ATK_CONTROL_TITLE)
+        {
+            if (!memchr(control->title, 0, sizeof(control->title))) result = -ENAMETOOLONG;
+            else
+            {
+                atk_window_set_title_text(win->window, control->title);
+                video_request_refresh_window(win->window);
+            }
+        }
+        if (!result) user_atk_snapshot_window(win, control);
+        atk_state_lock_release(irq_state);
+        if (!result && !user_copy_to_user(output, control, bytes)) result = -EFAULT;
+    }
+    user_atk_window_release(win);
+    free(control);
+    spinlock_preempt_enable();
+    return result;
+}
+
+int64_t user_atk_sys_poll_event(uint32_t handle, user_atk_event_t *event_out, uint32_t flags)
+{
+    if (flags & USER_ATK_POLL_FLAG_BLOCK)
+        return user_atk_poll_event_impl(handle, event_out, flags);
+    spinlock_preempt_disable();
+    int64_t result = user_atk_poll_event_impl(handle, event_out, flags);
+    spinlock_preempt_enable();
+    return result;
 }

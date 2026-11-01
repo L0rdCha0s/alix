@@ -21,6 +21,8 @@
 #include "font_cache.h"
 #include "timer.h"
 #include "entropy.h"
+#include "errno.h"
+#include "pmm.h"
 #include "spinlock.h"
 
 /*
@@ -1242,6 +1244,10 @@ uint64_t syscall_dispatch(syscall_frame_t *frame, uint64_t vector)
         case SYSCALL_UI_CAPTURE:
             result = user_atk_sys_capture((uint32_t)frame->rdi, (uint32_t)frame->rsi);
             break;
+        case SYSCALL_UI_CONTROL:
+            result = user_atk_sys_control((uint32_t)frame->rdi, (uint32_t)frame->rsi,
+                                           (user_atk_window_control_t *)frame->rdx, (size_t)frame->r10);
+            break;
         case SYSCALL_FONT_CACHE:
             result = font_cache_copy_to_user((void *)frame->rdi, (size_t)frame->rsi);
             break;
@@ -1460,6 +1466,12 @@ uint64_t syscall_dispatch(syscall_frame_t *frame, uint64_t vector)
             result = user_copy_to_user(user_info, &info, sizeof(info)) ? 0 : -1;
             break;
         }
+        case SYSCALL_MEMORY_PAGES:
+            if (frame->rdi > SYSCALL_MEMORY_AVAILABLE_PAGES) result = -EINVAL;
+            else if (!pmm_is_ready()) result = -EAGAIN;
+            else result = (int64_t)((frame->rdi == SYSCALL_MEMORY_TOTAL_PAGES ?
+                                       pmm_total_bytes() : pmm_available_bytes()) / 4096u);
+            break;
         case SYSCALL_TIME_MILLIS:
             result = (int64_t)timekeeping_now_millis();
             break;

@@ -54,11 +54,19 @@ def type_text(qmp, value, interval=0.04):
 
 
 def mouse_at(qmp, x, y):
+    def move(dx, dy):
+        response = qmp.human(f"mouse_move {dx} {dy}")
+        if response.strip():
+            raise RuntimeError(f"mouse movement failed: {response.strip()}")
+        # Keep each relative report alive through a guest USB poll. A burst of
+        # accepted HMP deltas can otherwise coalesce under eight-core TCG and
+        # leave the pointer short of a small target such as the close button.
+        time.sleep(0.12)
     for _ in range(14):
-        gui.hmp_mouse(qmp, "mouse_move -100 -100")
+        move(-100, -100)
     while x or y:
         dx, dy = min(100, x), min(100, y)
-        gui.hmp_mouse(qmp, f"mouse_move {dx} {dy}")
+        move(dx, dy)
         x -= dx
         y -= dy
 
@@ -133,7 +141,10 @@ def exercise_controls(runner, qmp, out):
 
     def click(x, y):
         mouse_at(qmp, x, y)
-        gui.click_left(qmp)
+        qmp.human("mouse_button 1")
+        time.sleep(0.12)
+        qmp.human("mouse_button 0")
+        time.sleep(0.12)
 
     click(485, 665)
     time.sleep(0.3)
@@ -182,6 +193,8 @@ def main():
     parser.add_argument("--exercise-controls", action="store_true",
                         help="also verify restart, pause, resume, seek and close with separate captures")
     args = parser.parse_args()
+    if args.exercise_controls and args.seconds < 20:
+        parser.error("--exercise-controls requires at least 20 seconds for the paced input sequence")
     if not args.no_build:
         subprocess.run(["make"], cwd=ROOT, check=True)
     out = ROOT / "build" / "test-out" / ("audio-" + args.label)
@@ -217,7 +230,7 @@ def main():
             raise RuntimeError("qemu-system-x86_64 is unavailable")
         wrapper.write_text("#!/usr/bin/env python3\nimport os, sys\n"
                            "args = sys.argv[1:]\n"
-                           f"args = [a.replace('file=fat:rw:build,', 'file=fat:rw:{boot},') for a in args]\n"
+                           f"args = [a.replace('file=fat:ro:build/boot,', 'file=fat:ro:{boot},') for a in args]\n"
                            f"os.execv({real_qemu!r}, [{real_qemu!r}] + args)\n")
         wrapper.chmod(0o755)
         trace = out / "qemu-trace.log"
@@ -297,6 +310,8 @@ def main():
             capture_screenshot(qmp, out / "player-finished.png")
             if args.backend != "wav":
                 qmp.human("stopcapture 0")
+            continuous = analyse_wave(capture)
+            (out / "continuous-analysis.json").write_text(json.dumps(continuous, indent=2) + "\n")
             if args.exercise_controls:
                 if args.backend == "wav":
                     raise RuntimeError("control captures require --backend coreaudio or none")
@@ -320,6 +335,16 @@ def main():
                                       or abs(metadata["tone_cycles"] - 997 * args.seconds) > 100
                                       or metadata["max_tone_residual"] > 50):
                 raise RuntimeError("playback failed continuity/duration checks; inspect result.json")
+        except Exception:
+            if qmp is not None:
+                try:
+                    capture_screenshot(qmp, out / "failure.png")
+                    from cpp_runtime_qemu_test import capture_guest_failure
+                    capture_guest_failure(qmp, temp, out / "serial.log",
+                                          snap / "http/atk_mp3.elf", snap / "alix.elf")
+                except Exception as diagnostic:
+                    (out / "diagnostic-error.txt").write_text(str(diagnostic))
+            raise
         finally:
             if qmp:
                 try:

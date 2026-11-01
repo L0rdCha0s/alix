@@ -121,6 +121,14 @@ The PMM builds a free-range list from the E820 map (`boot_info.e820`, type=1 usa
 
 The PMM exposes page/range allocation APIs returning `paddr_t` physical addresses.
 
+`pmm_total_bytes()` captures the E820 usable-range total before boot reservations
+and keeps that total stable across later allocation/free/reserve operations.
+`pmm_available_bytes()` reads current free backing under the PMM lock. Syscall 74
+returns either count in 4096-byte pages; libc exposes these as
+`sysconf(_SC_PHYS_PAGES)` and `sysconf(_SC_AVPHYS_PAGES)`. Available memory is a
+point-in-time count, not an allocation guarantee. The native Gecko OS interface
+fixture checks that touching 16 MiB consumes backing and unmapping releases it.
+
 ## User Physical Backing (`include/user_memory.h`, `src/kernel/user_memory.c`)
 
 `user_memory.c` is currently a thin wrapper over the PMM used by the process subsystem to allocate/free physical pages for user mappings.
@@ -228,6 +236,11 @@ as performance hints. Alix currently ignores those hints because it has no
 paging replacement/prefetch policy. It returns positive error codes and does
 not modify `errno`. This never invokes destructive discard; see the
 [POSIX interface specification](https://www.man7.org/linux/man-pages/man3/posix_madvise.3p.html).
+
+`madvise(MADV_NORMAL)` and `madvise(MADV_WILLNEED)` also use this checked,
+non-destructive hint path. They preserve contents and permissions, including
+PROT_NONE reservations, and reject unaligned/unowned ranges. Successful hints
+do not change errno. No eager prefetch is promised by the WILLNEED hint.
 
 `tests/native_vm_contract_test.py` checks physical reclamation, partial-range
 preservation, allocation failures, sparse PTEs, first touches before delayed CPU

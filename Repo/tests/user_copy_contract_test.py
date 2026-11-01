@@ -247,6 +247,9 @@ typedef struct { bool closed; unsigned event_waiters; } user_atk_window_t;
 static user_atk_window_t window;
 static bool event_ready,copy_ok;
 static unsigned releases;
+static unsigned preempt_depth;
+static void spinlock_preempt_disable(void){++preempt_depth;}
+static void spinlock_preempt_enable(void){CHECK(preempt_depth);--preempt_depth;}
 static void *process_current(void){return &window;}
 static bool user_ptr_range_valid(const void *p,size_t n){(void)n;return p!=NULL;}
 static user_atk_window_t *user_atk_find(uint32_t h,void *p){CHECK(h==7&&p==&window);return &window;}
@@ -258,7 +261,8 @@ static uint32_t timer_frequency(void){return 100;}
 static void wait_queue_wait(unsigned *q,bool(*predicate)(void*),void *p){(void)q;(void)predicate;(void)p;window.closed=true;}
 static bool wait_queue_wait_timeout(unsigned *q,bool(*predicate)(void*),void *p,uint64_t t){(void)q;(void)predicate;(void)p;CHECK(t);return false;}
 '''
-    for signature in ('int64_t user_atk_sys_poll_event(', 'static uint64_t user_atk_timeout_to_ticks',
+    for signature in ('static int64_t user_atk_poll_event_impl(', 'int64_t user_atk_sys_poll_event(',
+                      'static uint64_t user_atk_timeout_to_ticks',
                       'int64_t user_atk_sys_poll_event_timeout('):
         program += function_definition(source, signature) + '\n'
     program += r'''

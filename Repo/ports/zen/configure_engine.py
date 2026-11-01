@@ -11,7 +11,8 @@ import subprocess
 import sys
 
 from patch_engine import apply_patches
-from configure_cache import refresh_compiler_cache
+from configure_cache import refresh_compiler_cache, rust_port_revision
+from toolchain.target_driver import native_bindgen_flags
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -70,6 +71,23 @@ def main():
         # zlib. Only explicitly installed Alix metadata may be discovered.
         "PKG_CONFIG_LIBDIR": str(pkgconfig), "PKG_CONFIG_PATH": "", "PKG_CONFIG_SYSROOT_DIR": "",
     })
+    wasi_receipt = None
+    if args.project == "browser":
+        # Gecko C++ uses constant FP expressions in aggregate initializers.
+        # Its application code expects the default rounding environment;
+        # Alix's C math runtime retains its separately compiled fenv semantics.
+        env.setdefault("CXXFLAGS", "-fno-rounding-math")
+        # Codec/library sandboxes use real wasm32-wasip1 code. The native Alix
+        # driver has x86/TLS/ABI flags and is not a WASI compiler substitute.
+        from wasi_sdk import selected_sdk, verify
+        specification, selected, wasi = selected_sdk()
+        if not wasi.is_dir():
+            raise RuntimeError("run make zen-wasi-sdk to install the pinned sandbox compiler/sysroot")
+        verify(wasi, specification, selected)
+        env.setdefault("WASM_CC", str(wasi / "bin/clang"))
+        env.setdefault("WASM_CXX", str(wasi / "bin/clang++"))
+        env.setdefault("WASI_SYSROOT", str(wasi / "share/wasi-sysroot"))
+        wasi_receipt = wasi / "alix-sdk-receipt.json"
     rust_wrapper = ROOT / "ports/zen/rust/rustc.py"
     rust_specification = ROOT / "ports/zen/rust/x86_64-unknown-alix.json"
     if rust_wrapper.is_file() and rust_specification.is_file():
@@ -89,7 +107,14 @@ def main():
         if not snapshot:
             raise RuntimeError("native Rust sysroot must select a managed immutable std snapshot")
         env["RUSTFLAGS"] = (env.get("RUSTFLAGS", "") +
-                            " --cfg=alix_std_snapshot_" + snapshot.group(1)).strip()
+                            " --cfg=alix_std_snapshot_" + snapshot.group(1) +
+                            " --cfg=alix_rust_port_" + rust_port_revision(
+                                ROOT / "ports/zen/patches/series.json")).strip()
+        # bindgen invokes libclang directly and never enters alix-clang++.
+        # Use its target-specific environment override so host build tools keep
+        # their own ABI/includes even when Mozilla supplies global arguments.
+        variable = "BINDGEN_EXTRA_CLANG_ARGS_x86_64_unknown_alix"
+        env[variable] = shlex.join(native_bindgen_flags() + shlex.split(env.get(variable, "")))
     tools = json.loads((ROOT / "ports/zen/host-tools.json").read_text())
     cbindgen = ROOT / "ports/zen/upstream/tools" / ("cbindgen-" + tools["cbindgen"]["version"]) / "bin/cbindgen"
     if cbindgen.is_file():
@@ -126,6 +151,8 @@ def main():
         ROOT / "ports/zen/upstream/libm-alix-build/lib/libalix-math.a",
         ROOT / "build/user/lib/libalix-ssp.a", Path(__file__), Path(__file__).with_name("configure_cache.py"),
     ])
+    if wasi_receipt is not None:
+        compiler_inputs.extend([wasi_receipt, ROOT / "ports/zen/host-tools.json", Path(__file__).with_name("wasi_sdk.py")])
     refresh_compiler_cache(object_dir, state / ("configure-cache-" + args.project), compiler_inputs)
     print(f"Configuring upstream {label} for native Alix; diagnostics: {log}", flush=True)
     with log.open("w") as stream:

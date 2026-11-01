@@ -167,9 +167,16 @@ void *atk_window_context(const atk_widget_t *window);
  * When hidden, hit testing for title-bar actions is disabled for the window.
  */
 void atk_window_set_chrome_visible(atk_widget_t *window, bool visible);
+/* Set frame style without changing geometry or running layout. A caller that
+ * supplies exact bounds requests layout after committing its content surface. */
+void atk_window_set_chrome_style(atk_widget_t *window, bool visible);
 
 /* Return whether the window currently draws chrome. */
 bool atk_window_is_chrome_visible(const atk_widget_t *window);
+/* Visibility is independent of object lifetime/list ownership. Call with the
+ * ATK state lock; hidden windows neither paint nor receive pointer input. */
+bool atk_window_is_visible(const atk_widget_t *window);
+void atk_window_set_visible(atk_state_t *state, atk_widget_t *window, bool visible);
 
 /*
  * Validate the internal window list structure.

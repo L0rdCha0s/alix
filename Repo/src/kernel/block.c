@@ -1,5 +1,6 @@
 #include "block.h"
 #include "libc.h"
+#include "spinlock.h"
 
 /*
  * src/kernel/block.c
@@ -14,12 +15,14 @@
 
 static block_device_t *g_block_devices_head = NULL;
 static block_device_t *g_block_devices_tail = NULL;
+static spinlock_t g_registry_lock;
 
 /*
  * Initialise the global block device list.
  */
 void block_init(void)
 {
+    spinlock_init(&g_registry_lock);
     g_block_devices_head = NULL;
     g_block_devices_tail = NULL;
 }
@@ -79,28 +82,30 @@ block_device_t *block_register(const char *name,
     device->flush = flush;
     device->next = NULL;
 
+    uint64_t flags = spinlock_lock_irqsave(&g_registry_lock);
     if (!g_block_devices_head)
     {
-        g_block_devices_head = device;
+        __atomic_store_n(&g_block_devices_head, device, __ATOMIC_RELEASE);
         g_block_devices_tail = device;
     }
     else
     {
-        g_block_devices_tail->next = device;
+        __atomic_store_n(&g_block_devices_tail->next, device, __ATOMIC_RELEASE);
         g_block_devices_tail = device;
     }
+    spinlock_unlock_irqrestore(&g_registry_lock, flags);
 
     return device;
 }
 
 block_device_t *block_first(void)
 {
-    return g_block_devices_head;
+    return __atomic_load_n(&g_block_devices_head, __ATOMIC_ACQUIRE);
 }
 
 block_device_t *block_next(block_device_t *device)
 {
-    return device ? device->next : NULL;
+    return device ? __atomic_load_n(&device->next, __ATOMIC_ACQUIRE) : NULL;
 }
 
 block_device_t *block_find(const char *name)
@@ -109,7 +114,7 @@ block_device_t *block_find(const char *name)
     {
         return NULL;
     }
-    for (block_device_t *dev = g_block_devices_head; dev; dev = dev->next)
+    for (block_device_t *dev = block_first(); dev; dev = block_next(dev))
     {
         if (strcmp(dev->name, name) == 0)
         {
@@ -128,7 +133,7 @@ bool block_read(block_device_t *device, uint64_t lba, uint32_t count, void *buff
     {
         return false;
     }
-    if (lba >= device->sector_count || (lba + count) > device->sector_count)
+    if (lba >= device->sector_count || count > device->sector_count - lba)
     {
         return false;
     }
@@ -144,7 +149,7 @@ bool block_write(block_device_t *device, uint64_t lba, uint32_t count, const voi
     {
         return false;
     }
-    if (lba >= device->sector_count || (lba + count) > device->sector_count)
+    if (lba >= device->sector_count || count > device->sector_count - lba)
     {
         return false;
     }

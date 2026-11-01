@@ -185,6 +185,11 @@ int sys_ui_capture(uint32_t handle, uint32_t flags)
     return (int)syscall2(SYSCALL_UI_CAPTURE, (long)handle, (long)flags);
 }
 
+int sys_ui_control(uint32_t handle, uint32_t operation, user_atk_window_control_t *control)
+{
+    return (int)syscall4(SYSCALL_UI_CONTROL, handle, operation, (long)control, sizeof(*control));
+}
+
 int sys_yield(void)
 {
     return (int)syscall0(SYSCALL_YIELD);
@@ -276,6 +281,11 @@ ssize_t sys_net_snapshot(syscall_net_stats_t *buffer, size_t capacity)
 ssize_t sys_cpu_snapshot(syscall_cpu_stats_t *buffer, size_t capacity)
 {
     return (ssize_t)syscall2(SYSCALL_CPU_SNAPSHOT, (long)buffer, (long)capacity);
+}
+
+int64_t sys_memory_pages(uint32_t selector)
+{
+    return (int64_t)syscall1(SYSCALL_MEMORY_PAGES, (long)selector);
 }
 
 uint64_t sys_time_millis(void)

@@ -45,6 +45,7 @@ typedef struct wait_queue { spinlock_t lock; thread_t *head,*tail; } wait_queue_
 struct thread {
     process_t *process; thread_t *process_next, *wait_queue_next;
     io_request_t *io_request; wait_queue_t *waiting_queue; wait_queue_t join_queue;
+    bool io_interruptible, caught_pending;
     bool alive, pending_destroy, exited, in_transition, sleeping, in_run_queue, wake_pending, preempt_pending;
     uint32_t running_cpu, time_slice_remaining; int state, exit_status;
 };
@@ -79,6 +80,7 @@ static void scheduler_lock_release(uint64_t flags) {
 }
 static thread_t *current_thread_local(void) { CHECK(prep_guard || scheduler_locked); return model_thread; }
 static bool thread_lifetime_active(const thread_t *thread) { return thread && thread->alive; }
+static bool process_signal_pending_locked(thread_t *thread) { CHECK(scheduler_locked); return thread->caught_pending; }
 static bool thread_in_run_queue_load(const thread_t *thread) { return thread->in_run_queue; }
 static void remove_from_run_queue_locked(thread_t *thread) { CHECK(scheduler_locked); thread->in_run_queue=false; }
 static void sleep_queue_remove(thread_t *thread) { CHECK(scheduler_locked); thread->sleeping=false; }
@@ -123,6 +125,12 @@ static void complete_action(void) {
     CHECK(process_io_complete_request(executor_request, 37, NULL)==0); executor_request=NULL;
 }
 static void kill_action(void) { process_mark_terminated(model_thread->process, -1, 255u << 8); }
+static void signal_action(void) {
+    uint64_t flags=scheduler_lock_acquire("model_signal");
+    CHECK(model_thread->io_interruptible); model_thread->caught_pending=true;
+    process_io_cancel_thread_locked(model_thread); scheduler_lock_release(flags);
+    complete_action();
+}
 static void scheduler_schedule(bool requeue) {
     CHECK(!requeue && !scheduler_locked && !lock_depth && !prep_guard); ++schedules;
     if (schedule_action) { void (*action)(void)=schedule_action; schedule_action=NULL; action(); }
@@ -265,9 +273,28 @@ static void termination_status(void) {
     CHECK(process_wait_status_snapshot(NULL,&output)==-EINVAL&&process_wait_status_snapshot(model_thread->process,NULL)==-EINVAL);
     drain_fixture(queue);
 }
+static void interrupted_poll(void) {
+    for(unsigned mode=0;mode<3;++mode) {
+        io_queue_t *queue=new_fixture(); io_request_t *request=prepare(queue);
+        CHECK(!process_io_register_current(request) && !io_request_submit(request));
+        executor_request=io_queue_take(queue); CHECK(executor_request==request); prep_guard=false;
+        if(mode!=1)model_thread->caught_pending=true;
+        else schedule_action=signal_action;
+        io_request_status_t status;
+        if(mode==2) {
+            schedule_action=complete_action;
+            CHECK(!process_io_wait_current(&status)&&status.result==37);
+        } else CHECK(process_io_wait_current_interruptible(&status)==-EINTR);
+        CHECK(!model_thread->io_interruptible&&!model_thread->waiting_queue&&!g_io_completion_queue.head);
+        prep_guard=true;CHECK(!process_io_finish_current(mode!=2)&&!model_thread->io_request);prep_guard=false;
+        if(executor_request)complete_action();
+        drain_fixture(queue);CHECK(closes==1);
+    }
+}
 int main(void) {
     preparation_failure(); completed_and_gap(); kill_before_submit(); kill_wait_and_reap(); kill_during_result_copy();
     termination_status();
+    interrupted_poll();
     puts("process I/O registration, completion gap, terminal waiter and off-CPU cleanup contracts passed");
     return 0;
 }

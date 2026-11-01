@@ -156,6 +156,7 @@ typedef struct
     void *user_context;
     void (*on_destroy)(void *context);
     bool chrome_visible;
+    bool hidden;
     bool shaded;
     int shade_restore_height;
     /* Cached surface of the window (including chrome). */

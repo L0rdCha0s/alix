@@ -27,6 +27,41 @@ that owner's queue is occupied; a drained queue may change owners. This is
 serialization, not a software mixer. The queue bound and backend buffering also
 bound how promptly previously submitted audio can stop after a pause or seek.
 
+## Owned native PCM channels and cubeb
+
+`include/alix_audio.h` and `user/lib/audio.c` expose private-descriptor output:
+`alix_audio_open`, `alix_audio_write`, `alix_audio_get_status`, `alix_audio_drain`
+and `alix_audio_close`. The actual device format is 48 kHz stereo S16LE. Writes
+accept complete four-byte frames, can return a partial aligned prefix and wait
+through queue backpressure on the protected readiness worker. Status reports
+submitted, played, dropped, queued and latency frames. Played frames come from
+the hardware DMA cursor; inserted silent lead frames are excluded. Drain waits
+for actual consumption and reports a failed stream rather than inventing progress.
+
+Each open channel has a heap-owned accounting object. The descriptor and copied
+DMA queue hold separate references, so closing the final descriptor or killing a
+blocked writer cannot free active DMA metadata. Aliases and inherited descriptors
+share the same accounting. A different occupied channel is rejected even when
+both channels belong to the same process. Permanent errors account unplayed
+frames as dropped. Recovery and final retirement run on a protected housekeeping
+service; no caller stack or user buffer crosses the asynchronous boundary.
+
+The native cubeb backend supplies a process-local software mixer above these
+channels. Its contexts share a worker/channel, with separate stream lifetimes
+and hardware playback positions. It uses upstream cubeb/Speex for client-rate
+resampling and supports mono/stereo float or S16 output. It does not implement
+audio capture or a system-wide mixer between independent processes.
+
+`tests/audio_owned_test.c` passes real eight-CPU output, alias/inheritance,
+hardware drain and killed-writer cleanup. `tests/cubeb_qemu_test.py` passes native
+mixing, conversion, pause/resume, restart and callback-driven destruction, with
+captured simultaneous test tones. These checks do not establish physical-device
+listening quality or full cubeb conformance. The existing MP3 path also passes a
+20-second continuous-tone capture and a separate 10-second control/lifecycle run
+after these changes; evidence is under
+`build/test-out/audio-zen-owned-pcm-legacy/` and
+`build/test-out/audio-zen-owned-pcm-controls/`.
+
 ## Why the earlier playback skipped
 
 The previous MP3 loop refilled its 32 KiB compressed buffer only after decoding
@@ -119,6 +154,16 @@ above 50 PCM units (a check for abrupt waveform discontinuities).
 records separate clips for restart, pause, resume, seek and close, checking
 that sound returns or stops as appropriate and that the application exits
 without a kernel failure. A final terminal screenshot shows the audio counters.
+The paced control sequence requires a tone of at least 20 seconds; shorter
+tracks can reach EOF while the pointer is moving to the seek control.
+
+After native window controls and presentation/resize locking were added, a fresh
+20-second run also passed continuous playback and all control/close phases.
+Its capture contains 20.001 seconds of active audio, no interior silence and
+zero codec overruns or timer adjustments. Evidence is under
+`build/test-out/audio-widget-controls-paced-long/`. Pointer motion is paced for
+the guest USB poller so a coalesced relative movement cannot miss the close
+button; failure captures remain available from earlier diagnostic attempts.
 
 For the timer comparison, run the same snapshot separately with
 `--use-timer on` and `--use-timer off`; do not run competing QEMU instances during

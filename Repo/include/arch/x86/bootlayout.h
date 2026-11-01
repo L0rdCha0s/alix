@@ -2,6 +2,8 @@
 #define ARCH_X86_BOOTLAYOUT_H
 
 #define KERNEL_VMA_BASE   0x0000000010000000ULL
+/* Loader-selected stack and page-table bases are passed in bootinfo_t v3.
+ * These historical constants are retained only as layout reference values. */
 #define STACK_TOP         0x0000000000D00000ULL
 #define STACK_SIZE        0x0000000000100000ULL /* 1 MiB */
 

@@ -271,6 +271,18 @@ static void keyboard_stop_repeat(uint8_t scancode, bool extended)
     }
 }
 
+static bool keyboard_repeatable_navigation(uint8_t scancode, bool extended)
+{
+    if (!extended) return false;
+    switch (scancode)
+    {
+        case 0x47: case 0x48: case 0x49: case 0x4B: case 0x4D:
+        case 0x4F: case 0x50: case 0x51: case 0x52: case 0x53:
+            return true;
+        default: return false;
+    }
+}
+
 static bool keyboard_repeat_due(keyboard_event_t *event)
 {
     if (!event)
@@ -296,7 +308,7 @@ static bool keyboard_repeat_due(keyboard_event_t *event)
                                 entry->extended,
                                 entry->keypad_enter,
                                 true,
-                                &ch))
+                                &ch) && !keyboard_repeatable_navigation(entry->scancode, entry->extended))
         {
             entry->active = false;
             continue;
@@ -348,11 +360,6 @@ static bool keyboard_emit_char(uint8_t scancode,
         return false;
     }
 
-    if (extended && keyboard_emit_arrow_sequence(scancode, out_char))
-    {
-        return true;
-    }
-
     if (!synthetic && scancode < 128)
     {
         if (key_down[scancode])
@@ -361,6 +368,10 @@ static bool keyboard_emit_char(uint8_t scancode,
         }
         key_down[scancode] = 1;
     }
+
+    /* Event consumers need one physical navigation event, not terminal text.
+     * Character consumers translate arrow keys at keyboard_try_read below. */
+    if (extended && !keypad_enter) return false;
 
     bool shift_active = (left_shift_pressed | right_shift_pressed) != 0;
     bool ctrl_active = (left_ctrl_pressed | right_ctrl_pressed) != 0;
@@ -944,7 +955,7 @@ bool keyboard_try_read_event(keyboard_event_t *event)
 
         char out_char = 0;
         bool have_char = keyboard_emit_char(scancode, extended, keypad_enter, false, &out_char);
-        if (have_char)
+        if (have_char || keyboard_repeatable_navigation(scancode, extended))
         {
             keyboard_start_repeat(scancode, extended, keypad_enter);
         }
@@ -979,6 +990,8 @@ bool keyboard_try_read(char *out_char)
     keyboard_event_t event;
     while (keyboard_try_read_event(&event))
     {
+        if (event.extended && !event.released && !event.ch &&
+            keyboard_emit_arrow_sequence(event.scancode, out_char)) return true;
         if (!event.released && event.ch != 0)
         {
             *out_char = event.ch;
@@ -1001,6 +1014,15 @@ void keyboard_buffer_push(uint8_t scancode)
 void keyboard_disable_ps2(void)
 {
     __atomic_store_n(&ps2_enabled, false, __ATOMIC_RELEASE);
+}
+
+void keyboard_enable_ps2(void)
+{
+    if (inb(KBD_STATUS) == 0xff) return;
+    ps2_controller_init();
+    __atomic_store_n(&ps2_enabled, true, __ATOMIC_RELEASE);
+    interrupts_enable_irq(1);
+    serial_printf("[keyboard] using firmware-declared PS/2 fallback");
 }
 
 bool keyboard_ps2_enabled(void)

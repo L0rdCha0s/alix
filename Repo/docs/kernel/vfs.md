@@ -32,6 +32,9 @@ Public entry points:
 
 - `vfs_resolve(cwd, path)` — resolves to an existing node.
 - `vfs_mkdir(cwd, path)` — creates one directory; its parent must already exist.
+- `vfs_mkdir_exclusive(cwd, path, uid, gid)` — strict userspace creation under
+  the tree lock; existing leaves return EEXIST and new nodes use captured caller
+  credentials. It does not change the older kernel create-or-return contract.
 - `vfs_open_file(cwd, path, create, truncate)` — resolves/creates a file node.
 
 Resolution supports:

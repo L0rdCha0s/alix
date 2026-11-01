@@ -114,6 +114,30 @@ Mounting is initiated by VFS:
 
 The mount point directory in VFS (`mount->mount_point`) is treated as the on-disk root node (`root_id`).
 
+Its name and parent belong to the containing VFS tree. Loading the root never
+replaces the destination mount-point name with a saved name. New root records
+have an empty name and the no-parent sentinel; serialization never writes a
+parent ID from another mounted filesystem. Older records containing their
+former mount name remain readable without renaming the destination directory.
+The serialized-length calculation uses the same root-name policy as the
+payload writer, including metadata-only updates.
+
+`tests/alixfs_mount_root_contract_test.py` executes the complete backend with a
+memory block device, old named roots, file payload readback, foreign parent IDs
+and write-failure retry. `make zen-gecko-os-interfaces-qemu-test` additionally
+persists a file at one mount path and reads it at `/root` in an independent
+eight-CPU boot using a private disk snapshot. The original failed-test image
+also passes native readback after the root-identity fix.
+
+The same two-boot fixture now checks ftruncate shrink/grow: the resized file
+retains its first three bytes and the following 8189 bytes remain zero after
+fsync and remount. The new snapshot is `fsync-resized-committed.img`; earlier
+`fsync-committed.img` and legacy-name fixture images are retained. Use the
+fixture's `read-legacy` mode when replaying the older image without resize.bin.
+Mounted resize requests conservatively reserve metadata/name/sector headroom
+below the 32-bit chunk-length limit. This is not sparse-file support: the
+in-memory VFS allocates and zero-fills the extended data.
+
 ## Writeback and Dirty Tracking
 
 Writeback orchestration lives in VFS (`src/kernel/vfs.c`). AlixFS2 supplies the persistence operations.

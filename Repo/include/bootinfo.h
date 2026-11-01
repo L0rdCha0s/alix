@@ -4,8 +4,8 @@
 #include <stdint.h>
 
 #define BOOTINFO_MAGIC 0x414C4958U
-#define BOOTINFO_VERSION 2U
-#define BOOTINFO_MAX_E820_ENTRIES 128U
+#define BOOTINFO_VERSION 3U
+#define BOOTINFO_MAX_E820_ENTRIES 512U
 
 typedef struct
 {
@@ -19,6 +19,9 @@ typedef struct
 {
     uint32_t magic;
     uint32_t version;
+    uint64_t page_table_base;
+    uint64_t stack_top;
+    uint32_t smp_boot_reserved;
     uint32_t e820_entry_count;
     bootinfo_e820_entry_t e820[BOOTINFO_MAX_E820_ENTRIES];
 
@@ -30,6 +33,9 @@ typedef struct
     uint32_t framebuffer_bpp;
     uint64_t framebuffer_base;
     uint64_t framebuffer_size;
+    uint32_t framebuffer_red_mask;
+    uint32_t framebuffer_green_mask;
+    uint32_t framebuffer_blue_mask;
 
     uint64_t acpi_rsdp;
     uint32_t acpi_rsdp_length;

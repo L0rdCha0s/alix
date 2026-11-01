@@ -270,6 +270,7 @@ struct thread
     wait_queue_t *waiting_queue;
     /* Scheduler-protected WAITER ownership; detached only after off-CPU quiescence. */
     io_request_t *io_request;
+    bool io_interruptible;
     thread_t *wait_queue_next;
     uint32_t magic;
     char name[PROCESS_NAME_MAX];
@@ -347,6 +348,9 @@ struct process
 {
     uint64_t pid;
     uint64_t started_monotonic_ticks; /* Immutable creation timestamp. */
+    /* Absolute path snapshot before publication; empty for anonymous images.
+     * Storage shares the process lifetime, never a launcher or user stack. */
+    char executable_path[SYSCALL_EXECUTABLE_PATH_MAX];
     process_state_t state;
     process_lifetime_state_t lifetime_state;
     char name[PROCESS_NAME_MAX];
@@ -746,6 +750,7 @@ typedef struct
     const char *const *environment;
     size_t environment_count;
     uint64_t signal_mask, ignored_signals;
+    const char *executable_path; /* Protected constructor input, copied before publication. */
 } process_launch_context_t;
 /* Persistent protected constructor. Context refs transfer into the new child;
  * remaining refs on failure still belong to the caller. The watch owns the
@@ -813,6 +818,7 @@ void wait_queue_wake_all_locked(wait_queue_t *queue);
  * only until finish, within the caller's guard. Workers never borrow them. */
 int process_io_register_current(io_request_t *request);
 int process_io_wait_current(io_request_status_t *out);
+int process_io_wait_current_interruptible(io_request_status_t *out);
 int process_io_result_current(io_request_t **request_out, io_request_status_t *out);
 int process_io_finish_current(bool abandon);
 /* Caller holds scheduler_lock; abandon also requires off-CPU quiescence. */

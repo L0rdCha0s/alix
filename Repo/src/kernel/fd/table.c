@@ -27,6 +27,7 @@ struct fd_description
     uint32_t references;
     fd_ops_t ops;
     void *context;
+    uint32_t status_flags;
 };
 
 typedef struct
@@ -245,6 +246,31 @@ const fd_ops_t *fd_description_ops(const fd_description_t *description)
 void *fd_description_context(const fd_description_t *description)
 {
     return description ? description->context : NULL;
+}
+
+int fd_description_initialize_status(fd_description_t *description, uint32_t flags)
+{
+    uint32_t known = FD_STATUS_READ | FD_STATUS_WRITE | FD_STATUS_APPEND | FD_STATUS_NONBLOCK;
+    if (!description || (flags & ~known)) return -EINVAL;
+    __atomic_store_n(&description->status_flags, flags, __ATOMIC_RELEASE);
+    return 0;
+}
+
+uint32_t fd_description_status_flags(const fd_description_t *description)
+{
+    return description ? __atomic_load_n(&description->status_flags, __ATOMIC_ACQUIRE) : 0;
+}
+
+int fd_description_set_status_flags(fd_description_t *description, uint32_t flags)
+{
+    uint32_t mutable = FD_STATUS_APPEND | FD_STATUS_NONBLOCK;
+    uint32_t known = mutable | FD_STATUS_READ | FD_STATUS_WRITE;
+    if (!description || (flags & ~known)) return -EINVAL;
+    uint32_t old = __atomic_load_n(&description->status_flags, __ATOMIC_RELAXED), next;
+    do { next = (old & ~mutable) | (flags & mutable); }
+    while (!__atomic_compare_exchange_n(&description->status_flags, &old, next, false,
+                                         __ATOMIC_RELEASE, __ATOMIC_RELAXED));
+    return 0;
 }
 
 static fd_table_t *fd_table_create_internal(size_t capacity, fd_retirement_queue_t *queue)

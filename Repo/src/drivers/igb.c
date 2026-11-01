@@ -958,7 +958,7 @@ static void igb_dispatch_ipv4(net_interface_t *iface, uint8_t *frame, uint16_t f
             {
                 net_dhcp_handle_frame(iface, frame, frame_len);
             }
-            else if (src_port == 53 || dst_port == 53)
+            else if (src_port == 53 || dst_port == 53 || net_dns_port_active(dst_port))
             {
                 net_dns_handle_frame(iface, frame, frame_len);
             }

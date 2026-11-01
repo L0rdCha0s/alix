@@ -721,6 +721,14 @@ bool acpi_shutdown(void)
     return true;
 }
 
+bool acpi_has_i8042(void)
+{
+    size_t length = 0;
+    const acpi_fadt_t *fadt = acpi_find_table_cached("FACP", &length);
+    if (!fadt || length < offsetof(acpi_fadt_t, boot_arch_flags) + sizeof(uint16_t)) return false;
+    return (fadt->boot_arch_flags & 2) != 0;
+}
+
 const void *acpi_find_table_cached(const char *signature, size_t *length_out)
 {
     if (!signature)

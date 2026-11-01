@@ -132,7 +132,7 @@ void net_if_set_ipv4(net_interface_t *iface, uint32_t addr, uint32_t netmask, ui
     {
         return;
     }
-    iface->ipv4_addr = addr;
+    __atomic_store_n(&iface->ipv4_addr, addr, __ATOMIC_RELEASE);
     iface->ipv4_netmask = netmask;
     iface->ipv4_gateway = gateway;
 

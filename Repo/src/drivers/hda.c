@@ -10,6 +10,7 @@
 #include "spinlock.h"
 #include "timer.h"
 #include "audio.h"
+#include "errno.h"
 
 #define HDA_MMIO_BYTES 0x4000ULL
 
@@ -124,6 +125,16 @@ static hda_bdl_entry_t g_hda_bdl[HDA_BDL_ENTRIES] __attribute__((aligned(128)));
 static uint32_t g_hda_corb_storage[256] __attribute__((aligned(128)));
 static uint64_t g_hda_rirb_storage[256] __attribute__((aligned(128)));
 
+struct hda_pcm_stream
+{
+    /* All metadata, references and retirement links use g_hda.lock. */
+    uint64_t owner_pid;
+    uint64_t submitted_frames, played_frames, dropped_frames;
+    unsigned references;
+    bool failed;
+    struct hda_pcm_stream *retired_next;
+};
+
 typedef struct
 {
     volatile uint8_t *regs;
@@ -152,6 +163,9 @@ typedef struct
     uint64_t first_queued_ms;
     uint64_t writer_pid;
     bool writer_claimed;
+    hda_pcm_stream_t *active_pcm, *retired_pcm;
+    size_t pcm_lead_bytes;
+    uint64_t recovery_retry_ms;
     uint32_t gain_q16;
     uint32_t target_gain_q16;
     uint32_t gain_ramp_frames;
@@ -164,6 +178,63 @@ typedef struct
 
 static hda_state_t g_hda;
 static bool g_hda_ready;
+static process_t *g_hda_housekeeping_owner;
+
+static void hda_pcm_put_locked(hda_state_t *hda, hda_pcm_stream_t *stream)
+{
+    if (--stream->references == 0)
+    {
+        stream->retired_next = hda->retired_pcm;
+        hda->retired_pcm = stream;
+    }
+}
+
+static void hda_pcm_end_queue_locked(hda_state_t *hda, bool failed)
+{
+    hda_pcm_stream_t *stream = hda->active_pcm;
+    if (stream)
+    {
+        if (failed)
+        {
+            stream->failed = true;
+            stream->dropped_frames += stream->submitted_frames -
+                                      stream->played_frames - stream->dropped_frames;
+        }
+        hda->active_pcm = NULL;
+        hda_pcm_put_locked(hda, stream);
+    }
+    hda->pcm_lead_bytes = 0;
+}
+
+static void hda_pcm_consumed_locked(hda_state_t *hda, size_t consumed)
+{
+    size_t lead = consumed < hda->pcm_lead_bytes ? consumed : hda->pcm_lead_bytes;
+    hda->pcm_lead_bytes -= lead;
+    if (hda->active_pcm)
+        hda->active_pcm->played_frames += (consumed - lead) / HDA_FRAME_BYTES;
+    if (consumed == hda->used_bytes) hda_pcm_end_queue_locked(hda, false);
+}
+
+static void hda_pcm_reap(void)
+{
+    /* Never acquire the heap lock while holding the hardware/stream lock. */
+    spinlock_lock(&g_hda.lock);
+    hda_pcm_stream_t *head = g_hda.retired_pcm, *tail = head;
+    for (unsigned count = 1; tail && tail->retired_next && count < 64; ++count)
+        tail = tail->retired_next;
+    if (tail)
+    {
+        g_hda.retired_pcm = tail->retired_next;
+        tail->retired_next = NULL;
+    }
+    spinlock_unlock(&g_hda.lock);
+    while (head)
+    {
+        hda_pcm_stream_t *next = head->retired_next;
+        free(head);
+        head = next;
+    }
+}
 
 static inline uint64_t hda_now_ms(void)
 {
@@ -257,6 +328,7 @@ static bool hda_stop_stream(hda_state_t *hda)
     {
         return false;
     }
+    hda_pcm_end_queue_locked(hda, true);
     uint32_t ctl_off = HDA_REG_SD_CTL(HDA_STREAM_INDEX);
     uint32_t ctl = hda_read32(hda, ctl_off);
     ctl &= ~HDA_SDCTL_RUN;
@@ -354,12 +426,15 @@ static void hda_update_used_bytes(hda_state_t *hda, uint32_t hw_pos)
     if (missed_full_ring)
     {
         /* A modulo LPIB cannot reveal how many full wraps elapsed. */
+        hda_pcm_end_queue_locked(hda, true);
         hda->used_bytes = 0;
         hda->write_pos = (size_t)hw_pos;
         hda->needs_reprogram = true;
     }
     else
     {
+        size_t consumed = (size_t)delta < hda->used_bytes ? (size_t)delta : hda->used_bytes;
+        hda_pcm_consumed_locked(hda, consumed);
         hda_silence_advance(hda, prev, hw_pos);
 
         if ((size_t)delta >= hda->used_bytes)
@@ -418,15 +493,37 @@ static void hda_service_locked(hda_state_t *hda)
     }
 }
 
+static void hda_housekeeping_step(void)
+{
+    spinlock_lock(&g_hda.lock);
+    hda_service_locked(&g_hda);
+    bool recover = !g_hda.reconfiguring && g_hda.needs_reprogram &&
+                   hda_now_ms() >= g_hda.recovery_retry_ms;
+    if (recover)
+    {
+        hda_pcm_end_queue_locked(&g_hda, true);
+        g_hda.reconfiguring = true;
+    }
+    spinlock_unlock(&g_hda.lock);
+    if (recover)
+    {
+        bool programmed = hda_program_stream(&g_hda);
+        spinlock_lock(&g_hda.lock);
+        g_hda.needs_reprogram = !programmed;
+        g_hda.recovery_retry_ms = programmed ? 0 : hda_now_ms() + 100u;
+        g_hda.reconfiguring = false;
+        spinlock_unlock(&g_hda.lock);
+    }
+    hda_pcm_reap();
+}
+
 static void hda_housekeeping(void *arg)
 {
     (void)arg;
     for (;;)
     {
         process_sleep_ms(1);
-        spinlock_lock(&g_hda.lock);
-        hda_service_locked(&g_hda);
-        spinlock_unlock(&g_hda.lock);
+        hda_housekeeping_step();
     }
 }
 
@@ -938,6 +1035,7 @@ static bool hda_prepare_buffers(hda_state_t *hda)
     hda->used_bytes = 0;
     hda->fade_in_frames = HDA_FADE_IN_FRAMES;
     hda->hw_pos_prev = 0;
+    hda->pcm_lead_bytes = 0;
     hda->last_hw_update_ms = 0;
     hda->first_queued_ms = 0;
     hda->gain_initialized = false;
@@ -1059,7 +1157,6 @@ static bool hda_program_stream(hda_state_t *hda)
                         HDA_PIN_WIDGET_CTRL_OUT,
                         NULL);
 
-    hda->needs_reprogram = false;
     return true;
 }
 
@@ -1214,9 +1311,64 @@ static void hda_copy_pcm_chunk(hda_state_t *hda,
     }
 }
 
+static ssize_t hda_queue_pcm_locked(hda_state_t *hda, const uint8_t *source, size_t count)
+{
+    size_t lead = hda->running && !hda->used_bytes && !hda->needs_reprogram ?
+                  HDA_REPRIME_LEAD_BYTES : 0;
+    size_t maximum = hda->buffer_size ? hda->buffer_size - 1u : 0;
+    if (maximum > HDA_MAX_QUEUED_BYTES) maximum = HDA_MAX_QUEUED_BYTES;
+    size_t occupied = hda->used_bytes + lead;
+    size_t space = maximum > occupied ? maximum - occupied : 0;
+    space -= space % HDA_FRAME_BYTES;
+    size_t chunk = count < space ? count : space;
+    if (!chunk) return 0;
+    if (hda->active_pcm && hda->active_pcm->submitted_frames >
+                           UINT64_MAX - chunk / HDA_FRAME_BYTES) return -EOVERFLOW;
+
+    if (lead)
+    {
+        uint32_t hw_pos = hda_hw_position(hda);
+        hda_clear_ring_range(hda, hw_pos, lead);
+        hda->write_pos = ((size_t)hw_pos + lead) % hda->buffer_size;
+        hda->used_bytes = lead;
+        hda->pcm_lead_bytes = lead;
+        hda->hw_pos_prev = hw_pos;
+        hda->last_hw_update_ms = hda_now_ms();
+        hda->fade_in_frames = HDA_FADE_IN_FRAMES;
+        hda->reprime_events++;
+    }
+    bool start_after_copy = !hda->running;
+    if (start_after_copy && !hda->used_bytes) hda->first_queued_ms = hda_now_ms();
+    size_t first = chunk < hda->buffer_size - hda->write_pos ?
+                   chunk : hda->buffer_size - hda->write_pos;
+    uint32_t volume = audio_volume_get_percent();
+    hda_copy_pcm_chunk(hda, hda->buffer + hda->write_pos, source, first, volume);
+    hda->write_pos = (hda->write_pos + first) % hda->buffer_size;
+    hda->used_bytes += first;
+    if (first < chunk)
+    {
+        size_t second = chunk - first;
+        hda_copy_pcm_chunk(hda, hda->buffer + hda->write_pos, source + first, second, volume);
+        hda->write_pos = (hda->write_pos + second) % hda->buffer_size;
+        hda->used_bytes += second;
+    }
+    if (hda->active_pcm) hda->active_pcm->submitted_frames += chunk / HDA_FRAME_BYTES;
+    if (start_after_copy && hda->used_bytes >= HDA_START_QUEUED_BYTES)
+    {
+        __atomic_thread_fence(__ATOMIC_RELEASE);
+        if (!hda_start_stream(hda))
+        {
+            hda->needs_reprogram = true;
+            return -EIO;
+        }
+    }
+    return (ssize_t)chunk;
+}
+
 static bool hda_claim_writer_locked(hda_state_t *hda, uint64_t pid)
 {
-    if (hda->writer_claimed && hda->writer_pid != pid && hda->used_bytes > 0)
+    if (hda->used_bytes && (hda->active_pcm ||
+        (hda->writer_claimed && hda->writer_pid != pid)))
     {
         hda->rejected_writers++;
         return false;
@@ -1227,152 +1379,138 @@ static bool hda_claim_writer_locked(hda_state_t *hda, uint64_t pid)
     return true;
 }
 
-static ssize_t hda_dev_write(vfs_node_t *node,
-                             size_t offset,
-                             const void *buffer,
-                             size_t count,
-                             void *context)
+static ssize_t hda_dev_write(vfs_node_t *node, size_t offset, const void *buffer,
+                             size_t count, void *context)
 {
     (void)node;
-    hda_state_t *hda = (hda_state_t *)context;
-    if (count == 0)
-    {
-        return 0;
-    }
-    if (!hda || !buffer ||
-        (count % HDA_FRAME_BYTES) != 0 ||
-        (offset % HDA_FRAME_BYTES) != 0)
-    {
-        return -1;
-    }
-
-    const uint8_t *src = (const uint8_t *)buffer;
+    hda_state_t *hda = context;
+    if (!count) return 0;
+    if (!hda || !buffer || count % HDA_FRAME_BYTES || offset % HDA_FRAME_BYTES) return -1;
     uint64_t writer_pid = process_current_pid();
     size_t written = 0;
-
     while (written < count)
     {
         spinlock_lock(&hda->lock);
-
         if (hda->reconfiguring)
         {
             spinlock_unlock(&hda->lock);
             process_sleep_ms(1);
             continue;
         }
-
         hda_service_locked(hda);
         if (!hda_claim_writer_locked(hda, writer_pid))
         {
             spinlock_unlock(&hda->lock);
-            return written > 0 ? (ssize_t)written : -1;
+            return written ? (ssize_t)written : -1;
         }
-
-        if (hda->running)
-        {
-            if (hda->used_bytes == 0 && !hda->needs_reprogram)
-            {
-                uint32_t hw_pos = hda_hw_position(hda);
-                /*
-                 * RUN must remain set across a short producer gap: QEMU keeps
-                 * up to 8 KiB of already-fetched audio in its codec buffer and
-                 * discards it on a RUN transition.  Re-prime after a silent
-                 * lead instead of stopping or writing under the DMA cursor.
-                 */
-                hda_clear_ring_range(hda, hw_pos, HDA_REPRIME_LEAD_BYTES);
-                hda->write_pos = ((size_t)hw_pos + HDA_REPRIME_LEAD_BYTES) %
-                                 hda->buffer_size;
-                hda->used_bytes = HDA_REPRIME_LEAD_BYTES;
-                hda->hw_pos_prev = hw_pos;
-                hda->last_hw_update_ms = hda_now_ms();
-                hda->fade_in_frames = HDA_FADE_IN_FRAMES;
-                hda->reprime_events++;
-            }
-        }
-
         if (hda->needs_reprogram)
         {
+            hda_pcm_end_queue_locked(hda, true);
             hda->reconfiguring = true;
             spinlock_unlock(&hda->lock);
-
             bool programmed = hda_program_stream(hda);
-
             spinlock_lock(&hda->lock);
             hda->needs_reprogram = !programmed;
             hda->reconfiguring = false;
+            if (programmed) hda->recovery_retry_ms = 0;
             spinlock_unlock(&hda->lock);
-            if (!programmed)
-            {
-                return written > 0 ? (ssize_t)written : -1;
-            }
+            if (!programmed) return written ? (ssize_t)written : -1;
             continue;
         }
-
-        bool start_after_copy = !hda->running;
-        if (start_after_copy && hda->used_bytes == 0)
-        {
-            hda->first_queued_ms = hda_now_ms();
-        }
-
-        size_t max_queue = (hda->buffer_size > 0) ? (hda->buffer_size - 1u) : 0u;
-        if (max_queue > HDA_MAX_QUEUED_BYTES)
-        {
-            max_queue = HDA_MAX_QUEUED_BYTES;
-        }
-        size_t free_bytes = (max_queue > hda->used_bytes)
-            ? (max_queue - hda->used_bytes)
-            : 0u;
-        free_bytes -= free_bytes % HDA_FRAME_BYTES;
-        if (free_bytes == 0)
-        {
-            hda_log_hwpos(hda, "write-wait");
-            spinlock_unlock(&hda->lock);
-            /* Avoid busy-spinning when the hardware lags; sleep briefly. */
-            process_sleep_ms(1);
-            continue;
-        }
-
-        size_t remaining = count - written;
-        size_t chunk = (remaining < free_bytes) ? remaining : free_bytes;
-        size_t to_end = hda->buffer_size - hda->write_pos;
-        size_t first = (chunk < to_end) ? chunk : to_end;
-        uint32_t volume = audio_volume_get_percent();
-        hda_copy_pcm_chunk(hda,
-                           hda->buffer + hda->write_pos,
-                           src + written,
-                           first,
-                           volume);
-        hda->write_pos = (hda->write_pos + first) % hda->buffer_size;
-        hda->used_bytes += first;
-        written += first;
-
-        if (first < chunk)
-        {
-            size_t second = chunk - first;
-            hda_copy_pcm_chunk(hda,
-                               hda->buffer + hda->write_pos,
-                               src + written,
-                               second,
-                               volume);
-            hda->write_pos = (hda->write_pos + second) % hda->buffer_size;
-            hda->used_bytes += second;
-            written += second;
-        }
-        if (start_after_copy && hda->used_bytes >= HDA_START_QUEUED_BYTES)
-        {
-            /* Publish the complete prebuffer before the controller can fetch it. */
-            __atomic_thread_fence(__ATOMIC_RELEASE);
-            if (!hda_start_stream(hda))
-            {
-                hda->needs_reprogram = true;
-                spinlock_unlock(&hda->lock);
-                return -1;
-            }
-        }
+        ssize_t accepted = hda_queue_pcm_locked(hda, (const uint8_t *)buffer + written, count - written);
+        if (!accepted) hda_log_hwpos(hda, "write-wait");
         spinlock_unlock(&hda->lock);
+        if (accepted < 0) return written ? (ssize_t)written : -1;
+        if (accepted) written += (size_t)accepted;
+        else process_sleep_ms(1);
     }
-
     return (ssize_t)written;
+}
+
+int hda_pcm_create(uint64_t owner_pid, hda_pcm_stream_t **output)
+{
+    if (!output) return -EINVAL;
+    *output = NULL;
+    if (!__atomic_load_n(&g_hda_ready, __ATOMIC_ACQUIRE)) return -ENODEV;
+    hda_pcm_stream_t *stream = calloc(1, sizeof(*stream));
+    if (!stream) return -ENOMEM;
+    stream->owner_pid = owner_pid;
+    stream->references = 1;
+    *output = stream;
+    return 0;
+}
+
+void hda_pcm_release(hda_pcm_stream_t *stream)
+{
+    if (!stream) return;
+    spinlock_lock(&g_hda.lock);
+    hda_pcm_put_locked(&g_hda, stream);
+    spinlock_unlock(&g_hda.lock);
+}
+
+ssize_t hda_pcm_try_write(hda_pcm_stream_t *stream, const void *pcm, size_t bytes)
+{
+    if (!stream || (!pcm && bytes) || bytes % HDA_FRAME_BYTES) return -EINVAL;
+    if (!__atomic_load_n(&g_hda_ready, __ATOMIC_ACQUIRE)) return -ENODEV;
+    if (!bytes) return 0;
+    spinlock_lock(&g_hda.lock);
+    ssize_t result;
+    if (g_hda.reconfiguring) result = -EAGAIN;
+    else
+    {
+        hda_service_locked(&g_hda);
+        if (stream->failed) result = -EIO;
+        else if (g_hda.needs_reprogram) result = -EAGAIN;
+        else if (g_hda.used_bytes && g_hda.active_pcm != stream) result = -EBUSY;
+        else
+        {
+            if (g_hda.active_pcm != stream)
+            {
+                ++stream->references; /* The copied DMA queue owns this reference. */
+                g_hda.active_pcm = stream;
+                g_hda.writer_pid = stream->owner_pid;
+                g_hda.writer_claimed = true;
+            }
+            result = hda_queue_pcm_locked(&g_hda, pcm, bytes);
+            if (!result) result = -EAGAIN;
+            if (!g_hda.used_bytes) hda_pcm_end_queue_locked(&g_hda, false);
+            if (result == -EIO) stream->failed = true;
+        }
+    }
+    spinlock_unlock(&g_hda.lock);
+    return result;
+}
+
+int hda_pcm_writable(hda_pcm_stream_t *stream)
+{
+    if (!stream) return -EINVAL;
+    if (!__atomic_load_n(&g_hda_ready, __ATOMIC_ACQUIRE)) return -ENODEV;
+    spinlock_lock(&g_hda.lock);
+    hda_service_locked(&g_hda);
+    int result = stream->failed ? -EIO :
+        g_hda.reconfiguring || g_hda.needs_reprogram ||
+        (g_hda.used_bytes && g_hda.active_pcm != stream) ? 0 :
+        g_hda.used_bytes <= HDA_MAX_QUEUED_BYTES - HDA_FRAME_BYTES ? 1 : 0;
+    spinlock_unlock(&g_hda.lock);
+    return result;
+}
+
+int hda_pcm_snapshot(hda_pcm_stream_t *stream, hda_pcm_status_t *output)
+{
+    if (!stream || !output) return -EINVAL;
+    if (!__atomic_load_n(&g_hda_ready, __ATOMIC_ACQUIRE)) return -ENODEV;
+    spinlock_lock(&g_hda.lock);
+    hda_service_locked(&g_hda);
+    uint64_t queued = stream->submitted_frames - stream->played_frames - stream->dropped_frames;
+    *output = (hda_pcm_status_t){ .submitted_frames = stream->submitted_frames,
+        .played_frames = stream->played_frames, .dropped_frames = stream->dropped_frames,
+        .queued_frames = queued,
+        .latency_frames = queued + (g_hda.active_pcm == stream ? g_hda.pcm_lead_bytes / HDA_FRAME_BYTES : 0),
+        .rate = 48000, .channels = 2, .frame_bytes = HDA_FRAME_BYTES,
+        .flags = (stream->failed ? HDA_PCM_FAILED : 0) |
+                 (g_hda.reconfiguring || g_hda.needs_reprogram ? HDA_PCM_RECOVERING : 0) };
+    spinlock_unlock(&g_hda.lock);
+    return 0;
 }
 
 bool hda_get_status(hda_status_t *status)
@@ -1537,7 +1675,9 @@ void hda_init(void)
         return;
     }
 
-    if (!process_create_kernel("hda_idle", hda_housekeeping, NULL, PROCESS_DEFAULT_STACK_SIZE, -1))
+    g_hda_housekeeping_owner = process_create_kernel_service("hda_idle", hda_housekeeping, NULL,
+                                                            PROCESS_DEFAULT_STACK_SIZE);
+    if (!g_hda_housekeeping_owner)
     {
         serial_printf("[hda] failed to start housekeeping thread\r\n");
         return;

@@ -1,0 +1,804 @@
+--- a/media/libcubeb/src/cubeb.c
++++ b/media/libcubeb/src/cubeb.c
+@@ -28,6 +28,10 @@
+   void * user_ptr;
+ };
+ 
++#if defined(USE_ALIX)
++int
++alix_init(cubeb ** context, char const * context_name);
++#endif
+ #if defined(USE_PULSE)
+ int
+ pulse_init(cubeb ** context, char const * context_name);
+@@ -155,7 +159,11 @@
+   int (*init_oneshot)(cubeb **, char const *) = NULL;
+ 
+   if (backend_name != NULL) {
+-    if (!strcmp(backend_name, "pulse")) {
++    if (!strcmp(backend_name, "alix")) {
++#if defined(USE_ALIX)
++      init_oneshot = alix_init;
++#endif
++    } else if (!strcmp(backend_name, "pulse")) {
+ #if defined(USE_PULSE)
+       init_oneshot = pulse_init;
+ #endif
+@@ -226,6 +234,9 @@
+        * to override all other choices
+        */
+       init_oneshot,
++#if defined(USE_ALIX)
++      alix_init,
++#endif
+ #if defined(USE_PULSE_RUST)
+       pulse_rust_init,
+ #endif
+@@ -309,6 +320,9 @@
+ cubeb_get_backend_names()
+ {
+   static const char * const backend_names[] = {
++#if defined(USE_ALIX)
++      "alix",
++#endif
+ #if defined(USE_PULSE)
+       "pulse",
+ #endif
+--- a/media/libcubeb/src/moz.build
++++ b/media/libcubeb/src/moz.build
+@@ -14,6 +14,12 @@
+     'cubeb_utils.cpp'
+ ]
+ 
++if CONFIG['MOZ_ALIX_AUDIO']:
++    SOURCES += ['cubeb_alix.cpp']
++    DEFINES['USE_ALIX'] = True
++    DEFINES['MOZ_UPROFILER_STATIC'] = True
++    USE_LIBS += ['speex']
++
+ if CONFIG['MOZ_ALSA']:
+     SOURCES += [
+         'cubeb_alsa.c',
+@@ -27,7 +33,8 @@
+     DEFINES['USE_SUN'] = True
+ 
+ if (
+-    CONFIG["MOZ_PULSEAUDIO"]
++    CONFIG["MOZ_ALIX_AUDIO"]
++    or CONFIG["MOZ_PULSEAUDIO"]
+     or CONFIG["MOZ_JACK"]
+     or CONFIG["MOZ_AAUDIO"]
+     or CONFIG["MOZ_OPENSL"]
+--- /dev/null
++++ b/media/libcubeb/src/cubeb_alix.cpp
+@@ -0,0 +1,730 @@
++/*
++ * Copyright 2026 Alix contributors
++ * This file is made available under the ISC-style license in libcubeb/LICENSE.
++ */
++#include "cubeb/cubeb.h"
++#include "cubeb-internal.h"
++#include "cubeb_resampler.h"
++#include "cubeb_tracing.h"
++#include <alix_audio.h>
++#include <assert.h>
++#include <cmath>
++#include <errno.h>
++#include <pthread.h>
++#include <stdint.h>
++#include <stdlib.h>
++#include <string.h>
++#include <time.h>
++
++static constexpr unsigned rate = 48000, quantum = 512, minimum_latency = 4096;
++static constexpr unsigned maximum_latency = 16384, maximum_streams = 256;
++static constexpr unsigned maximum_events = 4096;
++struct packet;
++struct state_event;
++struct cubeb {
++  cubeb_ops const * ops;
++  pthread_mutex_t mutex;
++  pthread_cond_t changed;
++  pthread_condattr_t cond_attr;
++  pthread_attr_t thread_attr;
++  pthread_t worker;
++  bool mutex_ready, cond_ready, thread_created, thread_exited, shutting;
++  bool device_failed;
++  uint64_t references, clients;
++  uint32_t stream_count, event_count;
++  int device;
++  cubeb_stream * streams, * retired;
++  packet * packets, * packet_tail;
++  state_event * events, * event_tail;
++  float * mix;
++  int16_t * pcm;
++  uint64_t hardware_submitted;
++  alix_audio_status_t hardware;
++  timespec deadline;
++  timespec retry_delay;
++};
++struct cubeb_stream {
++  cubeb * context;
++  void * user_ptr;
++  cubeb_stream * next, * retired_next;
++  cubeb_data_callback data;
++  cubeb_state_callback state;
++  cubeb_stream_params client, output;
++  cubeb_resampler * resampler;
++  void * rendered;
++  uint32_t references, callbacks, render_pending, latency;
++  bool running, draining, closing, failed, eof, error_pending;
++  float volume;
++  uint64_t submitted, played, client_produced;
++  uint64_t segment_native_base, segment_client_base;
++  long resampler_latency;
++};
++struct part {
++  cubeb_stream * stream;
++  uint32_t produced, accounted;
++  float volume;
++};
++struct packet {
++  packet * next;
++  uint64_t begin;
++  uint32_t count, written;
++  bool complete;
++  part entries[];
++};
++struct state_event {
++  state_event * next;
++  cubeb_stream * stream;
++  cubeb_state state;
++};
++
++// All contexts in this process share one mixer and one native output channel.
++// Context API owners, the worker, and live stream objects retain independent
++// references. A context's raw registry slot is removed before the worker exits.
++static pthread_mutex_t registry_mutex = PTHREAD_MUTEX_INITIALIZER;
++static pthread_cond_t registry_changed = PTHREAD_COND_INITIALIZER;
++static cubeb * shared_context;
++static bool initializing;
++static char output_device;
++static void context_put(cubeb *);
++static void context_get(cubeb * context) {
++  __atomic_add_fetch(&context->references, 1u, __ATOMIC_RELAXED);
++}
++struct context_hold {
++  cubeb * context;
++  explicit context_hold(cubeb * value) : context(value) { context_get(value); }
++  ~context_hold() { context_put(context); }
++};
++static uint64_t client_frames(uint64_t frames, uint32_t client_rate) {
++  uint64_t whole = frames / rate;
++  if (whole > UINT64_MAX / client_rate) return UINT64_MAX;
++  uint64_t fraction = (frames % rate) * client_rate / rate;
++  uint64_t result = whole * client_rate;
++  return result > UINT64_MAX - fraction ? UINT64_MAX : result + fraction;
++}
++static void context_put(cubeb * context) {
++  if (__atomic_sub_fetch(&context->references, 1u, __ATOMIC_ACQ_REL)) return;
++  assert(!context->thread_created || context->thread_exited);
++  assert(!context->streams && !context->retired && !context->packets && !context->events);
++  if (context->device >= 0) alix_audio_close(context->device);
++  if (context->cond_ready) pthread_cond_destroy(&context->changed);
++  if (context->mutex_ready) pthread_mutex_destroy(&context->mutex);
++  free(context->mix); free(context->pcm); free(context);
++}
++static void stream_get_locked(cubeb_stream * stream) { ++stream->references; }
++static void stream_put_locked(cubeb_stream * stream) {
++  if (--stream->references) return;
++  assert(stream->closing && !stream->callbacks && !stream->render_pending);
++  stream->retired_next = stream->context->retired;
++  stream->context->retired = stream;
++}
++static void reap_streams(cubeb * context) {
++  // Callers retain a context reference; no allocator/destructor runs with the
++  // mixer mutex held. User callback pointers are never followed after closing.
++  pthread_mutex_lock(&context->mutex);
++  cubeb_stream * list = context->retired;
++  context->retired = nullptr;
++  pthread_mutex_unlock(&context->mutex);
++  while (list) {
++    cubeb_stream * next = list->retired_next;
++    cubeb_resampler_destroy(list->resampler);
++    free(list->rendered); free(list);
++    context_put(context);
++    list = next;
++  }
++}
++static bool queue_state_locked(cubeb_stream * stream, cubeb_state state) {
++  cubeb * context = stream->context;
++  if (context->event_count == maximum_events) return false;
++  state_event * event = static_cast<state_event *>(calloc(1, sizeof(*event)));
++  if (!event) return false;
++  stream_get_locked(stream);
++  event->stream = stream; event->state = state;
++  if (context->event_tail) context->event_tail->next = event;
++  else context->events = event;
++  context->event_tail = event;
++  ++context->event_count;
++  pthread_cond_broadcast(&context->changed);
++  return true;
++}
++static void state_callback_locked(cubeb_stream * stream, cubeb_state state) {
++  cubeb * context = stream->context;
++  if (stream->closing || context->shutting) return;
++  stream_get_locked(stream); ++stream->callbacks;
++  pthread_mutex_unlock(&context->mutex);
++  stream->state(stream, stream->user_ptr, state);
++  pthread_mutex_lock(&context->mutex);
++  --stream->callbacks;
++  stream_put_locked(stream);
++  pthread_cond_broadcast(&context->changed);
++}
++static void destroy_packet_locked(packet * value) {
++  for (unsigned index = 0; index < value->count; ++index)
++    stream_put_locked(value->entries[index].stream);
++  free(value);
++}
++static void account_packets_locked(cubeb * context) {
++  bool changed = false;
++  packet ** cursor = &context->packets;
++  while (*cursor) {
++    packet * value = *cursor;
++    uint64_t elapsed = context->hardware.played_frames > value->begin ?
++        context->hardware.played_frames - value->begin : 0;
++    if (elapsed > value->written) elapsed = value->written;
++    for (unsigned index = 0; index < value->count; ++index) {
++      part & entry = value->entries[index];
++      uint32_t progress = elapsed < entry.produced ? static_cast<uint32_t>(elapsed) : entry.produced;
++      assert(progress >= entry.accounted);
++      entry.stream->played += progress - entry.accounted;
++      if (progress != entry.accounted) changed = true;
++      entry.accounted = progress;
++    }
++    if (value->complete && elapsed == value->written) {
++      *cursor = value->next;
++      if (context->packet_tail == value) context->packet_tail = nullptr;
++      destroy_packet_locked(value);
++      changed = true;
++    } else cursor = &value->next;
++  }
++  context->packet_tail = nullptr;
++  for (packet * value = context->packets; value; value = value->next)
++    context->packet_tail = value;
++  if (changed) pthread_cond_broadcast(&context->changed);
++}
++static void device_error_locked(cubeb * context) {
++  context->device_failed = true;
++  for (cubeb_stream * stream = context->streams; stream; stream = stream->next) {
++    if (stream->running || stream->draining || stream->submitted != stream->played) {
++      stream->running = stream->draining = false;
++      stream->failed = stream->error_pending = true;
++    }
++  }
++  while (context->packets) {
++    packet * value = context->packets; context->packets = value->next;
++    destroy_packet_locked(value);
++  }
++  context->packet_tail = nullptr;
++}
++static bool refresh_hardware_locked(cubeb * context) {
++  if (alix_audio_get_status(context->device, &context->hardware)) {
++    device_error_locked(context); return false;
++  }
++  account_packets_locked(context);
++  if (context->hardware.flags & ALIX_AUDIO_FAILED) {
++    device_error_locked(context); return false;
++  }
++  return true;
++}
++static bool runnable_locked(cubeb * context) {
++  for (cubeb_stream * stream = context->streams; stream; stream = stream->next)
++    if (stream->running && !stream->closing && !stream->failed) return true;
++  return false;
++}
++static bool reopen_locked(cubeb * context) {
++  if (context->device >= 0) alix_audio_close(context->device);
++  context->device = alix_audio_open(ALIX_AUDIO_CLOEXEC);
++  if (context->device < 0) return false;
++  if (alix_audio_get_status(context->device, &context->hardware) ||
++      context->hardware.rate != rate || context->hardware.channels != 2 ||
++      context->hardware.frame_bytes != 4) {
++    alix_audio_close(context->device); context->device = -1; return false;
++  }
++  context->hardware_submitted = context->hardware.submitted_frames;
++  context->device_failed = false;
++  return true;
++}
++static void wait_locked(cubeb * context, bool timed) {
++  if (!timed) { pthread_cond_wait(&context->changed, &context->mutex); return; }
++  if (clock_gettime(CLOCK_MONOTONIC, &context->deadline)) {
++    device_error_locked(context); return;
++  }
++  context->deadline.tv_nsec += 5000000;
++  if (context->deadline.tv_nsec >= 1000000000) {
++    context->deadline.tv_nsec -= 1000000000; ++context->deadline.tv_sec;
++  }
++  pthread_cond_timedwait(&context->changed, &context->mutex, &context->deadline);
++}
++static long data_callback(cubeb_stream * stream, void *, const void * input, void * output, long frames) {
++  long result = stream->data(stream, stream->user_ptr, input, output, frames);
++  if (result < 0 || result > frames) return CUBEB_ERROR;
++  pthread_mutex_lock(&stream->context->mutex);
++  if (stream->client_produced > UINT64_MAX - static_cast<uint64_t>(result)) result = CUBEB_ERROR;
++  else stream->client_produced += static_cast<uint64_t>(result);
++  pthread_mutex_unlock(&stream->context->mutex);
++  return result;
++}
++static packet * prepare_packet_locked(cubeb * context) {
++  unsigned count = 0;
++  for (cubeb_stream * stream = context->streams; stream; stream = stream->next)
++    if (stream->running && !stream->closing && !stream->failed) ++count;
++  if (!count) return nullptr;
++  packet * value = static_cast<packet *>(calloc(1, sizeof(*value) + count * sizeof(part)));
++  if (!value) { device_error_locked(context); return nullptr; }
++  value->begin = context->hardware_submitted;
++  for (cubeb_stream * stream = context->streams; stream; stream = stream->next) {
++    if (!stream->running || stream->closing || stream->failed) continue;
++    part & entry = value->entries[value->count++];
++    entry.stream = stream; entry.volume = stream->volume;
++    stream_get_locked(stream); ++stream->callbacks; ++stream->render_pending;
++  }
++  return value;
++}
++static unsigned render_packet(cubeb * context, packet * value) {
++  memset(context->mix, 0, quantum * 2 * sizeof(float));
++  unsigned output_frames = 0;
++  for (unsigned index = 0; index < value->count; ++index) {
++    part & entry = value->entries[index];
++    cubeb_stream * stream = entry.stream;
++    pthread_mutex_lock(&context->mutex);
++    bool call = stream->running && !stream->closing && !stream->failed && !context->shutting;
++    pthread_mutex_unlock(&context->mutex);
++    long produced = call ? cubeb_resampler_fill(stream->resampler, nullptr, nullptr, stream->rendered, quantum) : 0;
++    pthread_mutex_lock(&context->mutex);
++    --stream->callbacks;
++    if (call && (produced < 0 || produced > quantum)) {
++      stream->running = stream->draining = false;
++      stream->failed = stream->error_pending = true;
++      produced = 0;
++    } else if (call && produced < quantum) {
++      stream->eof = true;
++      if (stream->running && !stream->closing) {
++        stream->running = false; stream->draining = true;
++      }
++    }
++    entry.produced = static_cast<uint32_t>(produced);
++    pthread_cond_broadcast(&context->changed);
++    pthread_mutex_unlock(&context->mutex);
++    if (entry.produced > output_frames) output_frames = entry.produced;
++    for (unsigned frame = 0; frame < entry.produced; ++frame) {
++      for (unsigned channel = 0; channel < 2; ++channel) {
++        unsigned source = frame * stream->client.channels + (stream->client.channels == 1 ? 0 : channel);
++        float sample = stream->client.format == CUBEB_SAMPLE_FLOAT32NE ?
++            static_cast<float *>(stream->rendered)[source] :
++            static_cast<int16_t *>(stream->rendered)[source] / 32768.0f;
++        context->mix[frame * 2 + channel] += sample * entry.volume;
++      }
++    }
++  }
++  for (unsigned index = 0; index < output_frames * 2; ++index) {
++    float sample = context->mix[index];
++    context->pcm[index] = !std::isfinite(sample) ? 0 : sample >= 1.0f ? INT16_MAX :
++                          sample <= -1.0f ? INT16_MIN : static_cast<int16_t>(sample * 32768.0f);
++  }
++  return output_frames;
++}
++
++static bool dispatch_state_locked(cubeb * context) {
++  if (context->events) {
++    state_event * event = context->events;
++    context->events = event->next;
++    if (!context->events) context->event_tail = nullptr;
++    --context->event_count;
++    state_callback_locked(event->stream, event->state);
++    stream_put_locked(event->stream);
++    free(event);
++    return true;
++  }
++  for (cubeb_stream * stream = context->streams; stream; stream = stream->next) {
++    if (stream->closing) continue;
++    cubeb_state state;
++    if (stream->error_pending) {
++      stream->error_pending = false; state = CUBEB_STATE_ERROR;
++    } else if (stream->draining && !stream->render_pending &&
++               stream->played == stream->submitted) {
++      stream->draining = false; state = CUBEB_STATE_DRAINED;
++    } else continue;
++    // The callback can destroy this stream. Rescan from the list head after it,
++    // rather than following a next pointer in a potentially retired object.
++    stream_get_locked(stream);
++    state_callback_locked(stream, state);
++    stream_put_locked(stream);
++    return true;
++  }
++  return false;
++}
++static void * mixer_entry(void * argument) {
++  CUBEB_REGISTER_THREAD("cubeb-alix");
++  cubeb * context = static_cast<cubeb *>(argument);
++  pthread_mutex_lock(&context->mutex);
++  while (!context->shutting) {
++    bool runnable = runnable_locked(context);
++    if (context->device_failed && runnable && !reopen_locked(context)) {
++      device_error_locked(context); continue;
++    }
++    if (!context->device_failed && (context->packets || runnable)) {
++      if (!refresh_hardware_locked(context)) continue;
++    }
++    // Hardware accounting can make the final packet drain. Deliver that state
++    // before choosing an indefinite idle wait; no later event need wake us.
++    if (dispatch_state_locked(context)) {
++      pthread_mutex_unlock(&context->mutex);
++      reap_streams(context);
++      pthread_mutex_lock(&context->mutex);
++      continue;
++    }
++    if (!runnable) { wait_locked(context, context->packets != nullptr); continue; }
++    unsigned target = maximum_latency;
++    for (cubeb_stream * stream = context->streams; stream; stream = stream->next)
++      if (stream->running && stream->latency < target) target = stream->latency;
++    if (context->hardware.latency_frames + quantum > target) {
++      wait_locked(context, true); continue;
++    }
++    packet * value = prepare_packet_locked(context);
++    if (!value) continue;
++    pthread_mutex_unlock(&context->mutex);
++    unsigned frames = render_packet(context, value);
++    pthread_mutex_lock(&context->mutex);
++    bool publish = frames && !context->shutting;
++    if (publish) {
++      if (context->packet_tail) context->packet_tail->next = value;
++      else context->packets = value;
++      context->packet_tail = value;
++    }
++    pthread_mutex_unlock(&context->mutex);
++    bool error = false;
++    while (publish && value->written < frames) {
++      pthread_mutex_lock(&context->mutex);
++      bool stop = context->shutting;
++      pthread_mutex_unlock(&context->mutex);
++      if (stop) break;
++      ssize_t accepted = alix_audio_write(context->device, context->pcm + value->written * 2,
++                                           (frames - value->written) * 4);
++      if (accepted < 0 && errno == EINTR) continue;
++      if (accepted < 0 && errno == EAGAIN) {
++        nanosleep(&context->retry_delay, nullptr); continue;
++      }
++      if (accepted <= 0 || accepted % 4 ||
++          static_cast<size_t>(accepted) > (frames - value->written) * 4) { error = true; break; }
++      pthread_mutex_lock(&context->mutex);
++      unsigned written = static_cast<unsigned>(accepted / 4);
++      for (unsigned index = 0; index < value->count; ++index) {
++        part & entry = value->entries[index];
++        unsigned before = value->written < entry.produced ? value->written : entry.produced;
++        unsigned after = value->written + written < entry.produced ? value->written + written : entry.produced;
++        entry.stream->submitted += after - before;
++      }
++      value->written += written; context->hardware_submitted += written;
++      pthread_mutex_unlock(&context->mutex);
++    }
++    pthread_mutex_lock(&context->mutex);
++    for (unsigned index = 0; index < value->count; ++index)
++      --value->entries[index].stream->render_pending;
++    value->complete = true;
++    // Only now may accounting/error cleanup retire the packet we were writing.
++    if (!publish) destroy_packet_locked(value);
++    else if (error) device_error_locked(context);
++    else account_packets_locked(context);
++    pthread_cond_broadcast(&context->changed);
++    pthread_mutex_unlock(&context->mutex);
++    reap_streams(context);
++    pthread_mutex_lock(&context->mutex);
++  }
++  int device = context->device;
++  pthread_mutex_unlock(&context->mutex);
++  if (device >= 0) alix_audio_drain(device);
++  pthread_mutex_lock(&context->mutex);
++  if (device >= 0 && !alix_audio_get_status(device, &context->hardware))
++    account_packets_locked(context);
++  while (context->packets) {
++    packet * value = context->packets; context->packets = value->next;
++    destroy_packet_locked(value);
++  }
++  context->packet_tail = nullptr;
++  while (context->events) {
++    state_event * event = context->events; context->events = event->next;
++    stream_put_locked(event->stream); free(event);
++  }
++  context->event_tail = nullptr; context->event_count = 0;
++  context->device = -1; context->thread_exited = true;
++  pthread_mutex_unlock(&context->mutex);
++  if (device >= 0) alix_audio_close(device);
++  reap_streams(context);
++  CUBEB_UNREGISTER_THREAD();
++  pthread_mutex_lock(&registry_mutex);
++  if (shared_context == context) shared_context = nullptr;
++  pthread_cond_broadcast(&registry_changed);
++  pthread_mutex_unlock(&registry_mutex);
++  context_put(context); // The worker owns this reference through its last access.
++  return nullptr;
++}
++
++static void alix_destroy(cubeb * context) {
++  context_hold operation(context);
++  pthread_mutex_lock(&registry_mutex);
++  assert(context->clients);
++  bool last = --context->clients == 0;
++  pthread_mutex_unlock(&registry_mutex);
++  if (last) {
++    pthread_mutex_lock(&context->mutex);
++    context->shutting = true;
++    pthread_cond_broadcast(&context->changed);
++    pthread_mutex_unlock(&context->mutex);
++    if (pthread_equal(pthread_self(), context->worker)) pthread_detach(context->worker);
++    else pthread_join(context->worker, nullptr);
++  }
++  context_put(context); // One API owner per successful cubeb_init call.
++}
++static char const * alix_backend_id(cubeb *) { return "alix"; }
++static int alix_max_channels(cubeb *, uint32_t * output) {
++  if (!output) return CUBEB_ERROR_INVALID_PARAMETER;
++  *output = 2; return CUBEB_OK;
++}
++static int alix_preferred_rate(cubeb *, uint32_t * output) {
++  if (!output) return CUBEB_ERROR_INVALID_PARAMETER;
++  *output = rate; return CUBEB_OK;
++}
++static int alix_min_latency(cubeb *, cubeb_stream_params params, uint32_t * output) {
++  if (!output || !params.rate) return CUBEB_ERROR_INVALID_PARAMETER;
++  *output = static_cast<uint32_t>((uint64_t(minimum_latency) * params.rate + rate - 1) / rate);
++  return CUBEB_OK;
++}
++static int alix_enumerate(cubeb *, cubeb_device_type type, cubeb_device_collection * output) {
++  if (!output) return CUBEB_ERROR_INVALID_PARAMETER;
++  output->device = nullptr; output->count = 0;
++  if (!(type & CUBEB_DEVICE_TYPE_OUTPUT)) return CUBEB_OK;
++  output->device = static_cast<cubeb_device_info *>(calloc(1, sizeof(cubeb_device_info)));
++  if (!output->device) return CUBEB_ERROR;
++  cubeb_device_info & device = output->device[0];
++  device.devid = &output_device; device.device_id = "alix:hda:default";
++  device.friendly_name = "Alix HDA output"; device.group_id = "alix:hda"; device.vendor_name = "Alix";
++  device.type = CUBEB_DEVICE_TYPE_OUTPUT; device.state = CUBEB_DEVICE_STATE_ENABLED;
++  device.preferred = CUBEB_DEVICE_PREF_ALL;
++  device.format = static_cast<cubeb_device_fmt>(CUBEB_DEVICE_FMT_S16NE | CUBEB_DEVICE_FMT_F32NE);
++  device.default_format = CUBEB_DEVICE_FMT_S16NE;
++  device.max_channels = 2; device.default_rate = device.min_rate = device.max_rate = rate;
++  device.latency_lo = minimum_latency; device.latency_hi = maximum_latency;
++  output->count = 1; return CUBEB_OK;
++}
++static int alix_collection_destroy(cubeb *, cubeb_device_collection * collection) {
++  if (!collection) return CUBEB_ERROR_INVALID_PARAMETER;
++  free(collection->device); collection->device = nullptr; collection->count = 0;
++  return CUBEB_OK;
++}
++
++static int alix_stream_init(cubeb * context, cubeb_stream ** output, char const *,
++                            cubeb_devid input_device, cubeb_stream_params * input,
++                            cubeb_devid selected, cubeb_stream_params * params,
++                            unsigned latency, cubeb_data_callback data,
++                            cubeb_state_callback state, void * user) {
++  if (!output) return CUBEB_ERROR_INVALID_PARAMETER;
++  *output = nullptr;
++  if (input || input_device) return CUBEB_ERROR_NOT_SUPPORTED;
++  if (!params || !data || !state || (selected && selected != &output_device))
++    return CUBEB_ERROR_INVALID_PARAMETER;
++  if (!params->rate || params->channels < 1 || params->channels > 2 ||
++      (params->format != CUBEB_SAMPLE_FLOAT32NE && params->format != CUBEB_SAMPLE_S16NE))
++    return CUBEB_ERROR_INVALID_FORMAT;
++  context_hold operation(context);
++  cubeb_stream * stream = static_cast<cubeb_stream *>(calloc(1, sizeof(*stream)));
++  if (!stream) return CUBEB_ERROR;
++  stream->context = context; context_get(context);
++  stream->references = 1; stream->client = *params; stream->output = *params;
++  stream->output.rate = rate;
++  stream->data = data; stream->state = state; stream->user_ptr = user; stream->volume = 1.0f;
++  uint64_t requested = (uint64_t(latency) * rate + params->rate - 1) / params->rate;
++  stream->latency = requested < minimum_latency ? minimum_latency :
++                    requested > maximum_latency ? maximum_latency : static_cast<unsigned>(requested);
++  unsigned sample_bytes = params->format == CUBEB_SAMPLE_FLOAT32NE ? 4 : 2;
++  stream->rendered = calloc(quantum * params->channels, sample_bytes);
++  if (stream->rendered)
++    stream->resampler = cubeb_resampler_create(stream, nullptr, &stream->output, params->rate,
++        data_callback, stream, CUBEB_RESAMPLER_QUALITY_DEFAULT, CUBEB_RESAMPLER_RECLOCK_NONE);
++  if (!stream->rendered || !stream->resampler) {
++    if (stream->resampler) cubeb_resampler_destroy(stream->resampler);
++    free(stream->rendered); free(stream); context_put(context); return CUBEB_ERROR;
++  }
++  stream->resampler_latency = cubeb_resampler_latency(stream->resampler);
++  pthread_mutex_lock(&context->mutex);
++  if (context->shutting || context->stream_count == maximum_streams) {
++    stream->closing = true; stream_put_locked(stream);
++    pthread_mutex_unlock(&context->mutex); reap_streams(context); return CUBEB_ERROR;
++  }
++  stream->next = context->streams; context->streams = stream; ++context->stream_count;
++  *output = stream;
++  pthread_mutex_unlock(&context->mutex);
++  return CUBEB_OK;
++}
++static void alix_stream_destroy(cubeb_stream * stream) {
++  cubeb * context = stream->context;
++  context_hold operation(context);
++  pthread_mutex_lock(&context->mutex);
++  stream->closing = true; stream->running = stream->draining = false;
++  bool self = pthread_equal(pthread_self(), context->worker);
++  while (stream->callbacks && !self) pthread_cond_wait(&context->changed, &context->mutex);
++  cubeb_stream ** cursor = &context->streams;
++  while (*cursor && *cursor != stream) cursor = &(*cursor)->next;
++  assert(*cursor == stream);
++  *cursor = stream->next; --context->stream_count;
++  stream_put_locked(stream);
++  pthread_cond_broadcast(&context->changed);
++  pthread_mutex_unlock(&context->mutex);
++  reap_streams(context);
++}
++static int alix_stream_start(cubeb_stream * stream) {
++  cubeb * context = stream->context;
++  context_hold operation(context);
++  pthread_mutex_lock(&context->mutex);
++  if (context->shutting || stream->closing || stream->failed) {
++    pthread_mutex_unlock(&context->mutex); return CUBEB_ERROR;
++  }
++  if (stream->running) { pthread_mutex_unlock(&context->mutex); return CUBEB_OK; }
++  if (stream->eof) {
++    bool self = pthread_equal(pthread_self(), context->worker);
++    while ((stream->render_pending || stream->played != stream->submitted) &&
++           !stream->failed && !stream->closing && !context->shutting) {
++      if (self) { pthread_mutex_unlock(&context->mutex); return CUBEB_ERROR; }
++      pthread_cond_wait(&context->changed, &context->mutex);
++    }
++    if (stream->failed || stream->closing || context->shutting) {
++      pthread_mutex_unlock(&context->mutex); return CUBEB_ERROR;
++    }
++    cubeb_resampler * replacement = cubeb_resampler_create(stream, nullptr, &stream->output,
++        stream->client.rate, data_callback, stream, CUBEB_RESAMPLER_QUALITY_DEFAULT, CUBEB_RESAMPLER_RECLOCK_NONE);
++    if (!replacement) { pthread_mutex_unlock(&context->mutex); return CUBEB_ERROR; }
++    cubeb_resampler_destroy(stream->resampler); stream->resampler = replacement;
++    stream->resampler_latency = cubeb_resampler_latency(replacement);
++    stream->segment_native_base = stream->played;
++    stream->segment_client_base = stream->client_produced;
++    stream->eof = false;
++  }
++  if (!queue_state_locked(stream, CUBEB_STATE_STARTED)) {
++    pthread_mutex_unlock(&context->mutex); return CUBEB_ERROR;
++  }
++  stream->running = true; stream->draining = false;
++  pthread_cond_broadcast(&context->changed);
++  pthread_mutex_unlock(&context->mutex);
++  return CUBEB_OK;
++}
++static int alix_stream_stop(cubeb_stream * stream) {
++  cubeb * context = stream->context;
++  context_hold operation(context);
++  pthread_mutex_lock(&context->mutex);
++  if (stream->closing) { pthread_mutex_unlock(&context->mutex); return CUBEB_ERROR; }
++  bool was_running = stream->running || stream->draining;
++  stream->running = stream->draining = false;
++  bool self = pthread_equal(pthread_self(), context->worker);
++  while (stream->callbacks && !self) pthread_cond_wait(&context->changed, &context->mutex);
++  int result = !was_running || queue_state_locked(stream, CUBEB_STATE_STOPPED) ? CUBEB_OK : CUBEB_ERROR;
++  pthread_cond_broadcast(&context->changed);
++  pthread_mutex_unlock(&context->mutex);
++  return result;
++}
++static int alix_position(cubeb_stream * stream, uint64_t * output) {
++  if (!output) return CUBEB_ERROR_INVALID_PARAMETER;
++  cubeb * context = stream->context;
++  context_hold operation(context);
++  pthread_mutex_lock(&context->mutex);
++  uint64_t delay = stream->resampler_latency > 0 ? static_cast<uint64_t>(stream->resampler_latency) : 0;
++  uint64_t played = stream->played - stream->segment_native_base;
++  played = played > delay ? played - delay : 0;
++  uint64_t delta = client_frames(played, stream->client.rate);
++  uint64_t result = delta > UINT64_MAX - stream->segment_client_base ? UINT64_MAX : stream->segment_client_base + delta;
++  if (stream->eof && !stream->failed && !stream->render_pending &&
++      stream->played == stream->submitted) result = stream->client_produced;
++  if (result > stream->client_produced) result = stream->client_produced;
++  *output = result;
++  pthread_mutex_unlock(&context->mutex);
++  return CUBEB_OK;
++}
++static int alix_latency(cubeb_stream * stream, uint32_t * output) {
++  if (!output) return CUBEB_ERROR_INVALID_PARAMETER;
++  cubeb * context = stream->context;
++  context_hold operation(context);
++  pthread_mutex_lock(&context->mutex);
++  uint64_t frames = stream->submitted - stream->played;
++  if (frames && context->hardware.latency_frames > frames) frames = context->hardware.latency_frames;
++  if (stream->resampler_latency > 0) frames += static_cast<uint64_t>(stream->resampler_latency);
++  uint64_t result = client_frames(frames, stream->client.rate);
++  *output = result > UINT32_MAX ? UINT32_MAX : static_cast<uint32_t>(result);
++  pthread_mutex_unlock(&context->mutex);
++  return CUBEB_OK;
++}
++static int alix_volume(cubeb_stream * stream, float volume) {
++  if (!std::isfinite(volume) || volume < 0.0f || volume > 1.0f) return CUBEB_ERROR_INVALID_PARAMETER;
++  cubeb * context = stream->context;
++  context_hold operation(context);
++  pthread_mutex_lock(&context->mutex); stream->volume = volume;
++  pthread_mutex_unlock(&context->mutex); return CUBEB_OK;
++}
++static int alix_current_device(cubeb_stream *, cubeb_device ** output) {
++  if (!output) return CUBEB_ERROR_INVALID_PARAMETER;
++  *output = static_cast<cubeb_device *>(calloc(1, sizeof(cubeb_device)));
++  if (!*output) return CUBEB_ERROR;
++  (*output)->output_name = strdup("Alix HDA output");
++  if (!(*output)->output_name) { free(*output); *output = nullptr; return CUBEB_ERROR; }
++  return CUBEB_OK;
++}
++static int alix_device_destroy(cubeb_stream *, cubeb_device * device) {
++  if (!device) return CUBEB_ERROR_INVALID_PARAMETER;
++  free(device->output_name); free(device->input_name); free(device);
++  return CUBEB_OK;
++}
++extern "C" int alix_init(cubeb **, char const *);
++static cubeb_ops const alix_ops = {
++  .init = alix_init,
++  .get_backend_id = alix_backend_id,
++  .get_max_channel_count = alix_max_channels,
++  .get_min_latency = alix_min_latency,
++  .get_preferred_sample_rate = alix_preferred_rate,
++  .enumerate_devices = alix_enumerate,
++  .device_collection_destroy = alix_collection_destroy,
++  .destroy = alix_destroy,
++  .stream_init = alix_stream_init,
++  .stream_destroy = alix_stream_destroy,
++  .stream_start = alix_stream_start,
++  .stream_stop = alix_stream_stop,
++  .stream_get_position = alix_position,
++  .stream_get_latency = alix_latency,
++  .stream_set_volume = alix_volume,
++  .stream_get_current_device = alix_current_device,
++  .stream_device_destroy = alix_device_destroy,
++};
++static cubeb * create_context() {
++  cubeb * context = static_cast<cubeb *>(calloc(1, sizeof(*context)));
++  if (!context) return nullptr;
++  context->ops = &alix_ops; context->references = 1; context->device = -1;
++  context->retry_delay.tv_nsec = 1000000;
++  if (pthread_mutex_init(&context->mutex, nullptr)) { context_put(context); return nullptr; }
++  context->mutex_ready = true;
++  if (pthread_condattr_init(&context->cond_attr)) { context_put(context); return nullptr; }
++  int result = pthread_condattr_setclock(&context->cond_attr, CLOCK_MONOTONIC);
++  if (!result) result = pthread_cond_init(&context->changed, &context->cond_attr);
++  pthread_condattr_destroy(&context->cond_attr);
++  if (result) { context_put(context); return nullptr; }
++  context->cond_ready = true;
++  context->mix = static_cast<float *>(calloc(quantum * 2, sizeof(float)));
++  context->pcm = static_cast<int16_t *>(calloc(quantum * 2, sizeof(int16_t)));
++  if (!context->mix || !context->pcm || !reopen_locked(context)) { context_put(context); return nullptr; }
++  if (pthread_attr_init(&context->thread_attr)) { context_put(context); return nullptr; }
++  result = pthread_attr_setstacksize(&context->thread_attr, 2 * 1024 * 1024);
++  if (!result) {
++    context_get(context);
++    result = pthread_create(&context->worker, &context->thread_attr, mixer_entry, context);
++    if (result) context_put(context);
++    else context->thread_created = true;
++  }
++  pthread_attr_destroy(&context->thread_attr);
++  if (result) { context_put(context); return nullptr; }
++  return context;
++}
++extern "C" int alix_init(cubeb ** output, char const *) {
++  if (!output) return CUBEB_ERROR_INVALID_PARAMETER;
++  *output = nullptr;
++  pthread_mutex_lock(&registry_mutex);
++  while (initializing || (shared_context && !shared_context->clients))
++    pthread_cond_wait(&registry_changed, &registry_mutex);
++  if (shared_context) {
++    ++shared_context->clients; context_get(shared_context); *output = shared_context;
++    pthread_mutex_unlock(&registry_mutex); return CUBEB_OK;
++  }
++  initializing = true;
++  pthread_mutex_unlock(&registry_mutex);
++  cubeb * context = create_context();
++  pthread_mutex_lock(&registry_mutex);
++  initializing = false;
++  if (context) {
++    context->clients = 1; shared_context = context; *output = context;
++  }
++  pthread_cond_broadcast(&registry_changed);
++  pthread_mutex_unlock(&registry_mutex);
++  return context ? CUBEB_OK : CUBEB_ERROR;
++}

@@ -7,6 +7,7 @@ typedef void (*mouse_listener_t)(int dx, int dy, bool left_pressed, bool right_p
 
 void mouse_init(void);
 void mouse_disable_ps2(void);
+void mouse_enable_ps2(void);
 bool mouse_ps2_active(void);
 void mouse_inject_event(int dx, int dy, bool left_pressed, bool right_pressed);
 void mouse_on_irq(uint8_t byte);

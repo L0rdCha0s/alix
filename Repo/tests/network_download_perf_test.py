@@ -79,7 +79,7 @@ class Guest:
         wrapper = temporary / 'qemu-wrapper'
         wrapper.write_text('#!/usr/bin/env python3\nimport os, sys\n'
                            'args = sys.argv[1:]\n'
-                           f"args = [a.replace('file=fat:rw:build,', 'file=fat:rw:{boot},') for a in args]\n"
+                           f"args = [a.replace('file=fat:ro:build/boot,', 'file=fat:ro:{boot},') for a in args]\n"
                            f'os.execv({real_qemu!r}, [{real_qemu!r}] + args)\n')
         wrapper.chmod(0o755)
         env = os.environ.copy()

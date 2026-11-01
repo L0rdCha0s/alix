@@ -228,18 +228,21 @@ static process_t *process_create_user_elf_internal(const char *name,
                                                    int stdout_fd,
                                                    process_t *parent,
                                                    const char *const *argv,
-                                                   size_t argc)
+                                                   size_t argc, const char *executable_path)
 {
     if (!image || size == 0)
     {
         return NULL;
     }
+    size_t path_length = executable_path ? strnlen(executable_path, SYSCALL_EXECUTABLE_PATH_MAX) : 0;
+    if (executable_path && (!path_length || path_length == SYSCALL_EXECUTABLE_PATH_MAX || executable_path[0] != '/')) return NULL;
 
     process_t *proc = allocate_process(name, true);
     if (!proc)
     {
         return NULL;
     }
+    if (executable_path) memcpy(proc->executable_path, executable_path, path_length + 1);
     if (!process_prepare_inherited_context(proc, parent, false) || !process_prepare_user_fds(proc, parent, stdout_fd))
     {
         paging_destroy_space(&proc->address_space);
@@ -389,7 +392,7 @@ process_t *process_create_user_elf(const char *name,
                                    const char *const *argv,
                                    size_t argc)
 {
-    return process_create_user_elf_internal(name, image, size, stdout_fd, NULL, argv, argc);
+    return process_create_user_elf_internal(name, image, size, stdout_fd, NULL, argv, argc, NULL);
 }
 
 process_t *process_create_user_elf_with_parent(const char *name,
@@ -400,7 +403,15 @@ process_t *process_create_user_elf_with_parent(const char *name,
                                                const char *const *argv,
                                                size_t argc)
 {
-    return process_create_user_elf_internal(name, image, size, stdout_fd, parent, argv, argc);
+    return process_create_user_elf_internal(name, image, size, stdout_fd, parent, argv, argc, NULL);
+}
+
+process_t *process_create_user_elf_from_path(const char *name, const char *executable_path,
+                                            const uint8_t *image, size_t size, int stdout_fd,
+                                            process_t *parent, const char *const *argv, size_t argc)
+{
+    if (!executable_path) return NULL;
+    return process_create_user_elf_internal(name, image, size, stdout_fd, parent, argv, argc, executable_path);
 }
 
 static volatile uint32_t g_bootstrap_preempt_depth[SMP_MAX_CPUS];

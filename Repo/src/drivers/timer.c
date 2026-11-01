@@ -8,6 +8,29 @@
 #define PIT_INPUT_HZ 1193182
 #define TIMER_MAX_TASKS 16
 
+/* PIT channel 2 one-shot, usable before IRQs/scheduling. Unlike a CPU loop,
+ * this observes a hardware duration. Preserve the speaker/gate register. */
+bool timer_early_delay_us(uint32_t microseconds)
+{
+    while (microseconds)
+    {
+        uint32_t chunk = microseconds > 50000 ? 50000 : microseconds;
+        uint16_t ticks = (uint16_t)(((uint64_t)chunk * PIT_INPUT_HZ + 999999) / 1000000);
+        uint8_t saved = inb(0x61);
+        outb(0x61, (saved & ~3u));
+        outb(PIT_COMMAND, 0xb0);
+        outb(0x42, ticks & 255);
+        outb(0x42, ticks >> 8);
+        outb(0x61, (saved & ~2u) | 1u);
+        unsigned spins = 10000000;
+        while (!(inb(0x61) & 0x20) && --spins) __asm__ volatile ("pause");
+        outb(0x61, saved);
+        if (!spins) return false;
+        microseconds -= chunk;
+    }
+    return true;
+}
+
 typedef struct
 {
     timer_callback_t callback;

@@ -60,6 +60,10 @@ typedef struct
 {
     char *name;
     char *value;
+    /* putenv retains the supplied storage; normally name/value are NULL for
+     * those entries. value may retain our old allocation when the supplied
+     * string aliases it. Never cache an offset into a mutable assignment. */
+    char *assignment;
 } libc_env_entry_t;
 
 static libc_env_entry_t *g_env_entries = NULL;
@@ -75,7 +79,13 @@ static int libc_env_find(const char *name)
     }
     for (size_t i = 0; i < g_env_count; ++i)
     {
-        if (strcmp(g_env_entries[i].name, name) == 0)
+        libc_env_entry_t *entry = &g_env_entries[i];
+        const char *separator = entry->assignment ? strchr(entry->assignment, '=') : NULL;
+        bool matches = entry->assignment ?
+            separator && (size_t)(separator - entry->assignment) == strlen(name) &&
+                !memcmp(entry->assignment, name, (size_t)(separator - entry->assignment)) :
+            !strcmp(entry->name, name);
+        if (matches)
         {
             return (int)i;
         }
@@ -1402,7 +1412,8 @@ static char *libc_getenv_unlocked(const char *name)
     {
         return NULL;
     }
-    return g_env_entries[index].value;
+    libc_env_entry_t *entry = &g_env_entries[index];
+    return entry->assignment ? strchr(entry->assignment, '=') + 1 : entry->value;
 }
 
 char *getenv(const char *name)
@@ -1789,12 +1800,21 @@ static int libc_setenv_unlocked(const char *name, const char *value, int overwri
             return -1;
         }
         memcpy(name_copy, name, name_len);
-        g_env_entries[g_env_count].name = name_copy;
-        g_env_entries[g_env_count].value = value_copy;
+        g_env_entries[g_env_count] = (libc_env_entry_t){ name_copy, value_copy, NULL };
         g_env_count++;
         return 0;
     }
 
+    if (g_env_entries[index].assignment)
+    {
+        name_copy = malloc(name_len);
+        if (!name_copy) { free(value_copy); errno = ENOMEM; return -1; }
+        memcpy(name_copy, name, name_len);
+        free(g_env_entries[index].name);
+        free(g_env_entries[index].value);
+        g_env_entries[index] = (libc_env_entry_t){ name_copy, value_copy, NULL };
+        return 0;
+    }
     free(g_env_entries[index].value);
     g_env_entries[index].value = value_copy;
     return 0;
@@ -1807,6 +1827,11 @@ int mkdir(const char *path, uint32_t mode)
 #endif
 {
     (void)mode;
+#if defined(ALIX_OWNED_FDS) && !defined(TTF_HOST_BUILD)
+    int64_t result = sys_file_io(SYSCALL_FILE_MKDIR, (uintptr_t)path, 0, 0, 0);
+    if (result < 0) { errno = (int)-result; return -1; }
+    return 0;
+#else
     if (!path || path[0] == '\0')
     {
         errno = EINVAL;
@@ -1818,6 +1843,7 @@ int mkdir(const char *path, uint32_t mode)
         return -1;
     }
     return 0;
+#endif
 }
 
 int setenv(const char *name, const char *value, int overwrite)
@@ -1861,6 +1887,39 @@ int unsetenv(const char *name)
     return result;
 }
 
+int putenv(char *assignment)
+{
+    if (!assignment || !assignment[0] || assignment[0] == '=') { errno = EINVAL; return -1; }
+    const char *separator = strchr(assignment, '=');
+    /* Match the widely used removal extension without retaining that string. */
+    if (!separator) return unsetenv(assignment);
+    size_t length = (size_t)(separator - assignment);
+    char *name = malloc(length + 1);
+    if (!name) { errno = ENOMEM; return -1; }
+    memcpy(name, assignment, length); name[length] = 0;
+    alix_mutex_lock(&g_env_mutex);
+    int index = libc_env_find(name);
+    int result = 0;
+    char *retained = NULL;
+    if (index < 0)
+    {
+        if (!libc_env_reserve(g_env_count + 1)) { errno = ENOMEM; result = -1; }
+        else index = (int)g_env_count++;
+    }
+    else
+    {
+        char *old = g_env_entries[index].value;
+        if (old && (uintptr_t)assignment >= (uintptr_t)old &&
+            (uintptr_t)assignment - (uintptr_t)old <= strlen(old)) retained = old;
+        free(g_env_entries[index].name);
+        if (!retained) free(old);
+    }
+    if (!result) g_env_entries[index] = (libc_env_entry_t){ NULL, retained, assignment };
+    alix_mutex_unlock(&g_env_mutex);
+    free(name);
+    return result;
+}
+
 void alix_environment_free(char **environment)
 {
     if (!environment) return;
@@ -1875,6 +1934,12 @@ char **alix_environment_copy(void)
     if (copy)
         for (size_t index = 0; index < g_env_count; ++index)
         {
+            if (g_env_entries[index].assignment)
+            {
+                copy[index] = strdup(g_env_entries[index].assignment);
+                if (!copy[index]) { alix_environment_free(copy); copy = NULL; break; }
+                continue;
+            }
             size_t name = strlen(g_env_entries[index].name), value = strlen(g_env_entries[index].value);
             if (name > SIZE_MAX - value - 2 || !(copy[index] = malloc(name + value + 2)))
             { alix_environment_free(copy); copy = NULL; break; }
@@ -1929,6 +1994,8 @@ static const char *libc_error_message(int errnum)
         case ERANGE: return "Result out of range";
         case EOVERFLOW: return "Value too large";
         case ETIMEDOUT: return "Operation timed out";
+        case EHOSTDOWN: return "Host is down";
+        case EHOSTUNREACH: return "No route to host";
         case EDEADLK: return "Resource deadlock avoided";
         case EILSEQ: return "Invalid byte sequence";
         case ENOTSUP: return "Operation not supported";
@@ -2811,6 +2878,7 @@ static FILE *file_alloc(int fd, uint64_t flags, bool append)
     FILE *stream = (FILE *)malloc(sizeof(FILE));
     if (!stream)
     {
+        errno = ENOMEM;
         return NULL;
     }
     memset(stream, 0, sizeof(*stream));
@@ -2919,6 +2987,46 @@ FILE *fopen(const char *path, const char *mode)
         return NULL;
     }
     return stream;
+}
+
+FILE *fdopen(int descriptor, const char *mode)
+{
+    bool append = false;
+    uint64_t flags = fopen_mode_to_flags(mode, &append);
+    if (!flags) return NULL;
+    if (flags & SYSCALL_OPEN_EXCLUSIVE) { errno = EINVAL; return NULL; }
+#ifndef ALIX_OWNED_FDS
+    /* New POSIX descriptor APIs use the private namespace. A legacy integer
+     * must never fall through to a similarly numbered private descriptor. */
+    (void)descriptor;
+    errno = ENOTSUP;
+    return NULL;
+#else
+    int64_t status = sys_file_io(SYSCALL_FILE_GETFL, (uint64_t)(int64_t)descriptor, 0, 0, 0);
+    if (status < 0) { errno = (int)-status; return NULL; }
+    uint64_t access = flags & (SYSCALL_OPEN_READ | SYSCALL_OPEN_WRITE);
+    if ((access & (uint64_t)status) != access) { errno = EINVAL; return NULL; }
+    struct stat *metadata = malloc(sizeof(*metadata));
+    if (!metadata) { errno = ENOMEM; return NULL; }
+    if (fstat(descriptor, metadata)) { free(metadata); return NULL; }
+    bool seek_append = append && S_ISREG(metadata->st_mode);
+    free(metadata);
+    FILE *stream = file_alloc(descriptor, flags, seek_append);
+    if (!stream) { if (!errno) errno = ENOMEM; return NULL; }
+    if (append && !((uint64_t)status & SYSCALL_OPEN_APPEND))
+    {
+        int64_t result = sys_file_io(SYSCALL_FILE_SETFL, (uint64_t)(int64_t)descriptor,
+                                      (uint64_t)status | SYSCALL_OPEN_APPEND, 0, 0);
+        if (result < 0)
+        {
+            int error = (int)-result;
+            alix_mutex_lock(&stream->mutex); stream->fd = -1; alix_mutex_unlock(&stream->mutex);
+            (void)fclose(stream); errno = error;
+            return NULL;
+        }
+    }
+    return stream;
+#endif
 }
 
 FILE *freopen(const char *path, const char *mode, FILE *stream)
@@ -3291,6 +3399,24 @@ long ftell(FILE *stream)
     return (long)position;
 }
 
+int fseeko(FILE *stream, off_t offset, int whence)
+{
+    if (!stream) { errno = EBADF; return -1; }
+    alix_mutex_lock(&stream->mutex);
+    int result = file_seek_unlocked(stream, offset, whence);
+    alix_mutex_unlock(&stream->mutex);
+    return result;
+}
+
+off_t ftello(FILE *stream)
+{
+    if (!stream) { errno = EBADF; return -1; }
+    alix_mutex_lock(&stream->mutex);
+    int64_t result = file_tell_unlocked(stream);
+    alix_mutex_unlock(&stream->mutex);
+    return (off_t)result;
+}
+
 int fgetpos(FILE *stream, fpos_t *position)
 {
     if (!stream || !position) { errno = !stream ? EBADF : EINVAL; return -1; }
@@ -3532,11 +3658,39 @@ int close(int fd)
     return sys_close(fd);
 }
 
+int fsync(int fd)
+{
+#ifdef ALIX_OWNED_FDS
+    int64_t result = sys_file_io(SYSCALL_FILE_SYNC, (uint64_t)(int64_t)fd, 0, 0, 0);
+    if (result < 0) { errno = (int)-result; return -1; }
+    return 0;
+#else
+    /* Legacy global descriptors cannot name a slot in the private table. */
+    (void)fd;
+    errno = ENOTSUP;
+    return -1;
+#endif
+}
+
 int unlink(const char *path)
 {
     int64_t result = sys_file_io(SYSCALL_FILE_REMOVE, (uintptr_t)path, 0, 0, 0);
     if (result < 0) { errno = (int)-result; return -1; }
     return 0;
+}
+
+int ftruncate(int fd, off_t length)
+{
+#ifdef ALIX_OWNED_FDS
+    if (length < 0) { errno = EINVAL; return -1; }
+    int64_t result = sys_file_io(SYSCALL_FILE_TRUNCATE, (uint64_t)(int64_t)fd, (uint64_t)length, 0, 0);
+    if (result < 0) { errno = (int)-result; return -1; }
+    return 0;
+#else
+    (void)fd; (void)length;
+    errno = ENOTSUP;
+    return -1;
+#endif
 }
 
 int puts(const char *text)
@@ -3579,6 +3733,13 @@ int64_t lseek(int fd, int64_t offset, int whence)
     return sys_lseek(fd, offset, whence);
 }
 
+ssize_t alix_get_executable_path(char *buffer, size_t capacity)
+{
+    int64_t result = sys_process(SYSCALL_PROCESS_EXECUTABLE_PATH, (uintptr_t)buffer, capacity, 0);
+    if (result < 0) { errno = (int)-result; return -1; }
+    return (ssize_t)result;
+}
+
 int __alix_stat_decode(const syscall_stat_t *input, struct stat *st)
 {
     if (!st || !input) { errno = EFAULT; return -1; }
@@ -3614,9 +3775,20 @@ int fstat(int fd, struct stat *st)
 int putc(int ch, FILE *stream) { return fputc(ch, stream); }
 int putchar(int ch) { return fputc(ch, stdout); }
 
-ssize_t pread(int fd, void *buffer, size_t count, size_t offset)
+ssize_t pread(int fd, void *buffer, size_t count, off_t offset)
 {
-    return sys_pread(fd, buffer, count, offset);
+    if (offset < 0) { errno = EINVAL; return -1; }
+    return sys_pread(fd, buffer, count, (size_t)offset);
+}
+
+int sched_yield(void)
+{
+    return sys_yield();
+}
+
+int sched_getcpu(void)
+{
+    return (int)sys_thread_cpu();
 }
 
 int open(const char *path, uint64_t flags, ...)
@@ -4320,6 +4492,11 @@ void _Exit(int status)
     sys_exit(status);
 }
 
+void _exit(int status)
+{
+    _Exit(status);
+}
+
 /* Mozilla deliberately defines its own abort hook. Keep ordinary Alix libc's
  * definition strong; only the upstream application profile permits that hook. */
 #ifdef ALIX_UPSTREAM_ABORT_HOOK
@@ -4563,6 +4740,13 @@ double difftime(time_t end, time_t beginning)
 long sysconf(int name)
 {
     if (name == _SC_PAGESIZE) return 4096;
+    if (name == _SC_PHYS_PAGES || name == _SC_AVPHYS_PAGES)
+    {
+        int64_t pages = sys_memory_pages(name == _SC_PHYS_PAGES ?
+            SYSCALL_MEMORY_TOTAL_PAGES : SYSCALL_MEMORY_AVAILABLE_PAGES);
+        if (pages < 0) { errno = (int)-pages; return -1; }
+        return (long)pages;
+    }
     if (name != _SC_NPROCESSORS_ONLN && name != _SC_NPROCESSORS_CONF)
     { errno = EINVAL; return -1; }
     syscall_cpu_stats_t *cpus = (syscall_cpu_stats_t *)calloc(SYSCALL_CPU_MAX, sizeof(*cpus));

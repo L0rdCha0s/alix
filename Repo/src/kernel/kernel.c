@@ -588,45 +588,20 @@ static void mount_default_fstab(void)
         block_device_t *device = fstab_find_device(entry->device_name);
         if (!device)
         {
-            serial_printf("%s", "[alix] fstab: device ");
-            serial_printf("%s", entry->device_name);
-            serial_printf("%s", " not found\r\n");
+            serial_printf("[alix] fstab: device %s not found; using RAM-backed system layout", entry->device_name);
+            ensure_system_layout();
+            vfs_set_subtree_mutable(mount_point, true);
+            (void)timekeeping_ensure_timezone_config();
             continue;
         }
 
         if (!vfs_mount_device(device, mount_point))
         {
-            serial_printf("%s", "[alix] fstab: mount failed for ");
-            serial_printf("%s", entry->device_name);
-            serial_printf("%s", " -> ");
-            serial_printf("%s", entry->mount_path);
-            serial_printf("%s", ", attempting format\r\n");
-            if (vfs_format(device))
-            {
-                if (!vfs_mount_device(device, mount_point))
-                {
-                    serial_printf("%s", "[alix] fstab: mount still failing after format\r\n");
-                }
-                else
-                {
-                    ensure_system_layout();
-                    if (!timekeeping_ensure_timezone_config())
-                    {
-                        serial_printf("%s", "[alix] warn: timezone config missing and default creation failed\r\n");
-                    }
-                    else
-                    {
-                        if (!timekeeping_reload_timezone())
-                        {
-                            serial_printf("%s", "[alix] warn: failed to reload timezone config\r\n");
-                        }
-                    }
-                }
-            }
-            else
-            {
-                serial_printf("%s", "[alix] fstab: format failed\r\n");
-            }
+            serial_printf("[alix] fstab: mount failed for %s -> %s; leaving disk unchanged (mkfs must be requested explicitly)",
+                          entry->device_name, entry->mount_path);
+            ensure_system_layout(); /* usable RAM-backed shell on an unformatted disk */
+            vfs_set_subtree_mutable(mount_point, true);
+            (void)timekeeping_ensure_timezone_config();
         }
         else
         {
@@ -1100,6 +1075,7 @@ void kernel_main(void)
     heap_init();
     paging_init();
     ioremap_init();
+    console_framebuffer_ready();
     pmm_init();
     user_memory_init();
     serial_printf("%s", "[alix] after paging/pmm/user_memory init\n");

@@ -154,14 +154,15 @@ bool shell_execute_binary(shell_state_t *shell,
 
     char *exec_path = tokens[0];
     vfs_node_t *cwd = (shell && shell->cwd) ? shell->cwd : vfs_root();
-    vfs_node_t *node = vfs_resolve(cwd, exec_path);
-    if (!node)
+    vfs_node_t *node = NULL;
+    if (vfs_resolve_owned(cwd, exec_path, &node))
     {
-        node = vfs_resolve(vfs_root(), exec_path);
+        (void)vfs_resolve_owned(vfs_root(), exec_path, &node);
     }
 
     if (!node || !vfs_is_file(node))
     {
+        vfs_node_release_owned(node);
         free_tokens(tokens, token_count);
         return shell_exec_error(out, label ? label : exec_path, "file not found");
     }
@@ -170,17 +171,28 @@ bool shell_execute_binary(shell_state_t *shell,
     char *data = vfs_data(node, &size);
     if (!data || size == 0)
     {
+        vfs_node_release_owned(node);
         free_tokens(tokens, token_count);
         return shell_exec_error(out, label ? label : exec_path, "empty file");
     }
 
-    process_t *proc = process_create_user_elf_with_parent(exec_path,
+    char *canonical_path = malloc(VFS_PATH_MAX);
+    if (!canonical_path || vfs_node_path_snapshot(node, canonical_path, VFS_PATH_MAX) < 0)
+    {
+        free(canonical_path);
+        vfs_node_release_owned(node);
+        free_tokens(tokens, token_count);
+        return shell_exec_error(out, label ? label : "exec", "executable path unavailable");
+    }
+    process_t *proc = process_create_user_elf_from_path(exec_path, canonical_path,
                                                           (const uint8_t *)data,
                                                           size,
                                                           shell ? shell->stdout_fd : -1,
                                                           process_current(),
                                                           (const char *const *)tokens,
                                                           token_count);
+    free(canonical_path);
+    vfs_node_release_owned(node);
     free_tokens(tokens, token_count);
 
     if (!proc)

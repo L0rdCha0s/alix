@@ -26,7 +26,9 @@ KERNEL_VMA_BASE = 0x0000000010000000;
 
 SECTIONS
 {
-  /* SMP AP trampoline lives in low physical memory at 0x8000 */
+  /* The loader reserves the fixed AP real-mode mailbox/trampoline separately.
+   * Bootstrap stack and page-table pages are allocated by firmware and passed
+   * in bootinfo_t; neither is an implicitly free linker address anymore. */
   .ap_trampoline 0x0000000000008000 :
   {
     KEEP(*(.ap_trampoline))

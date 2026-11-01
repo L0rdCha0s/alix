@@ -1,0 +1,20 @@
+--- a/third_party/angle/angle_program_version_id_gn/moz.build
++++ b/third_party/angle/angle_program_version_id_gn/moz.build
+@@ -32,6 +32,17 @@
+     "/ipc/chromium/src",
+     "/tools/profiler/public"
+ ]
++
++# Alix uses the common shader serialization dependency set, also shared by
++# Android and Linux. This hashes source files; it does not select a host window,
++# graphics driver, ABI or operating-system implementation.
++if CONFIG["OS_TARGET"] == "Alix":
++    GeneratedFile(
++        "/third_party/angle/gen/ANGLEShaderProgramVersion.h.rsp",
++        entry_point="write_paths",
++        inputs=["ANGLEShaderProgramVersion.h-fceddb19599b4b60.rsp.in"],
++        script="/python/mozbuild/mozbuild/action/write_path_list.py",
++    )
+ 
+ if CONFIG["OS_TARGET"] == "Android":
+ 

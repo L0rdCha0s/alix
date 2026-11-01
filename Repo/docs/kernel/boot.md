@@ -2,6 +2,39 @@
 
 This document follows the boot flow from UEFI → `kernel_entry` → `kernel_main`, and where SMP fits in.
 
+## QEMU volumes
+
+`make` stages a dedicated boot volume in `build/boot/` containing only:
+
+```text
+alix.elf
+EFI/BOOT/BOOTX64.EFI
+```
+
+`make run`, `make run-hdd`, `make run-hdd-rtl` and `make run-ps2-hdd`
+attach two separate disks in this order:
+
+| Volume | Host source | Guest device | Purpose |
+| --- | --- | --- | --- |
+| Boot | `build/boot/` (read-only virtual FAT) | `/dev/ahci0` | Firmware loads the EFI loader and kernel. |
+| Main | `data.img` (writable AlixFS2) | `/dev/ahci1`, mounted at `/root` | Persistent applications, configuration and home directories. |
+
+The AHCI disk model requires a writable device, so the boot disk has a temporary
+write overlay (`snapshot=on`). Guest writes to it are discarded when QEMU exits;
+the staged host files remain read-only. Main-volume writes persist in `data.img`.
+
+`/usr`, `/etc` and `/home` point into the main volume. User binaries still
+build under `build/bin/` and `build/user/`; the existing `/usr/bin/dl.sh` workflow installs
+them to `/root/usr/bin`. They do not belong on the firmware boot volume.
+
+The full `build/` tree is never exported to QEMU. Its debug symbols, object
+files, ports and test output can grow beyond virtual FAT16's capacity without
+affecting boot. The staged files refresh when the kernel or loader changes.
+`BOOT_DIR=/path/to/staging` overrides the generated boot directory and
+`DATA_IMG=/path/to/main.img` selects another main disk. Existing main disks
+are reused without truncation or formatting. A missing main image is created
+as a blank 4 GiB disk; formatting it requires an explicit guest `mkfs` command.
+
 ## 1) UEFI Loader (`src/loader/uefi_loader.c`)
 
 Entry point is `efi_main(...)`.
@@ -15,7 +48,9 @@ High-level flow:
    - Framebuffer info (`capture_framebuffer`)
    - ACPI RSDP pointer + optional copy (`capture_acpi_rsdp`)
    - E820-style memory map derived from the UEFI memory map (`convert_to_e820` inside `exit_boot_services`)
-5. Allocate pages for the final `bootinfo_t` in physical memory, copy it there, then `ExitBootServices`.
+5. Reserve bootstrap stack, page tables and `bootinfo_t` below 4 GiB through
+   UEFI; reserve the fixed AP real-mode region or select single-CPU fallback.
+   Record framebuffer RGB masks and validate the final memory map, then `ExitBootServices`.
 6. Jump to the kernel entry: `kernel_entry((bootinfo_t*)boot_info_phys)`.
 
 `bootinfo_t` (see `include/bootinfo.h`) is the only structured handoff between the loader and kernel.
@@ -27,18 +62,18 @@ The UEFI loader jumps to `kernel_entry(bootinfo_t *loader_info)`.
 `kernel_entry` is a naked function that:
 
 - Disables interrupts (`cli`)
-- Switches to a known-good bootstrap stack (`STACK_TOP` from `include/arch/x86/bootlayout.h`)
+- Switches to the firmware-reserved bootstrap stack in `bootinfo_t.stack_top`
 - Calls `kernel_entry_main(loader_info)`
 
 `kernel_entry_main(...)` then performs early setup in a predictable order:
 
-1. Bring up serial logging (`serial_init`) for early kernel logs.
-2. Zero the `.bss` section.
+1. Zero the `.bss` section.
+2. Bring up bounded, optional serial logging (`serial_init`).
 3. Copy the loader-provided `bootinfo_t` into the global `boot_info`.
 4. Derive kernel heap bounds and the global `g_mem_layout` from the E820 map:
    - Heap placement is bounded by usable RAM (`configure_heap_from_e820`)
    - User pointer window is kept *above* the identity-mapped low region (`configure_memory_layout_from_e820`)
-5. Build initial page tables (`build_page_tables`) and load CR3.
+5. Build initial page tables in the firmware-reserved pages (`page_table_base`) and load CR3.
 6. Initialise BSP CPU state/segments (`arch_cpu_init_bsp`).
 7. Call `kernel_main()` (defined in `src/kernel/kernel.c`).
 
@@ -78,3 +113,6 @@ SMP has two distinct phases:
 - User layout: `user/lib/link.ld`
 
 If you change virtual/physical layout assumptions, update both the linker scripts and `g_mem_layout` logic.
+
+See [physical hardware support](hardware.md) for disk safety, xHCI/BOT storage,
+GOP graphics, interrupt/timer assumptions and the isolated acceptance runners.

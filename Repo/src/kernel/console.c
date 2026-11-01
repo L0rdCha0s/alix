@@ -1,4 +1,5 @@
 #include "console.h"
+#include "framebuffer.h"
 #include "bootinfo.h"
 #include "io.h"
 #include "libc.h"
@@ -146,10 +147,10 @@ void console_init(void)
 {
     spinlock_init(&g_console_lock);
     memset(console_chars, ' ', sizeof(console_chars));
-    console_force_text_mode(text_mode_80x25);
+    if (!boot_info.framebuffer_enabled) console_force_text_mode(text_mode_80x25);
     cursor_row = cursor_col = 0;
     console_update_cursor();
-    fb_init_from_bootinfo();
+    /* The framebuffer may be above 4 GiB; map it only after paging is ready. */
     fb_redraw_all();
     fb_cursor_show();
 }
@@ -313,7 +314,7 @@ static void fb_init_from_bootinfo(void)
 {
     fb_console_enabled = false;
     fb_ptr = NULL;
-    if (!boot_info.framebuffer_enabled)
+    if (!framebuffer_valid(&boot_info))
     {
         return;
     }
@@ -325,7 +326,7 @@ static void fb_init_from_bootinfo(void)
     fb_width = boot_info.framebuffer_width;
     fb_height = boot_info.framebuffer_height;
     fb_pitch = boot_info.framebuffer_pitch ? (boot_info.framebuffer_pitch * 4U) : (fb_width * 4U);
-    fb_ptr = (uint32_t *)(uintptr_t)boot_info.framebuffer_base;
+    fb_ptr = framebuffer_map();
     if (!fb_ptr)
     {
         return;
@@ -363,8 +364,8 @@ static void fb_draw_cell(size_t row, size_t col)
     {
         glyph = font_basic_get_glyph8x8(' ');
     }
-    const uint32_t fg = 0xFFFFFFFFU;
-    const uint32_t bg = 0xFF000000U;
+    const uint32_t fg = framebuffer_pack(0xffffff);
+    const uint32_t bg = framebuffer_pack(0);
 
     for (uint32_t y = 0; y < cell_h; ++y)
     {
@@ -472,7 +473,7 @@ void console_set_vga_enabled(bool enabled)
     }
     if (enabled)
     {
-        console_force_text_mode(text_mode_80x25);
+        if (!boot_info.framebuffer_enabled) console_force_text_mode(text_mode_80x25);
         console_redraw_vga();
         console_update_cursor();
         if (fb_console_enabled)
@@ -480,4 +481,11 @@ void console_set_vga_enabled(bool enabled)
             fb_redraw_all();
         }
     }
+}
+
+void console_framebuffer_ready(void)
+{
+    fb_init_from_bootinfo();
+    fb_redraw_all();
+    fb_cursor_show();
 }

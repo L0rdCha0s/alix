@@ -5,6 +5,10 @@
 
 #define FD_TABLE_MAX_ENTRIES 256u
 #define FD_TABLE_CLOEXEC 1u
+#define FD_STATUS_READ (1u << 0)
+#define FD_STATUS_WRITE (1u << 1)
+#define FD_STATUS_APPEND (1u << 16)
+#define FD_STATUS_NONBLOCK (1u << 18)
 
 typedef struct fd_description fd_description_t;
 typedef struct fd_table fd_table_t;
@@ -75,6 +79,11 @@ bool fd_description_get(fd_description_t *description);
 int fd_description_put(fd_description_t *description);
 const fd_ops_t *fd_description_ops(const fd_description_t *description);
 void *fd_description_context(const fd_description_t *description);
+/* Initialize only before publication, with exclusive constructor ownership.
+ * Status is shared by aliases/inherited slots. Mutation preserves access mode. */
+int fd_description_initialize_status(fd_description_t *description, uint32_t flags);
+uint32_t fd_description_status_flags(const fd_description_t *description);
+int fd_description_set_status_flags(fd_description_t *description, uint32_t flags);
 /* Immutable identity query; caller holds a description reference. */
 bool fd_description_is_deferred_to(const fd_description_t *description, const fd_retirement_queue_t *queue);
 

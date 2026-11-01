@@ -9,12 +9,14 @@
 #include "arch/x86/smp_boot.h"
 #include "heap.h"
 #include "lapic.h"
+#include "bootinfo.h"
 #include "libc.h"
 #include "paging.h"
 #include "msr.h"
 #include "process.h"
 #include "serial.h"
 #include "idt.h"
+#include "timer.h"
 
 /*
  * src/kernel/smp.c
@@ -52,7 +54,7 @@ static inline uint32_t smp_cpuid_apic_id(void)
  * Adjust if you reserve a different region size in your linker script.
  */
 #ifndef SMP_TRAMPOLINE_MAX_SIZE
-#define SMP_TRAMPOLINE_MAX_SIZE (64 * 1024u)
+#define SMP_TRAMPOLINE_MAX_SIZE 4096u
 #endif
 
 typedef struct __attribute__((packed))
@@ -210,7 +212,7 @@ static void protect_bootstrap_data_page(void)
     }
 }
 
-static void map_cpu(uint32_t index, uint8_t apic_id, uint8_t processor_id, bool enabled)
+static void map_cpu(uint32_t index, uint32_t apic_id, uint32_t processor_id, bool enabled)
 {
     if (index >= SMP_MAX_CPUS)
     {
@@ -223,7 +225,7 @@ static void map_cpu(uint32_t index, uint8_t apic_id, uint8_t processor_id, bool 
     g_cpus[index].bsp = false;
     __atomic_store_n(&g_cpus[index].online, false, __ATOMIC_RELAXED);
 
-    g_apic_to_index[apic_id] = (uint8_t)index;
+    if (apic_id < sizeof(g_apic_to_index)) g_apic_to_index[apic_id] = (uint8_t)index;
 }
 
 static void ensure_boot_cpu_present(void)
@@ -231,21 +233,15 @@ static void ensure_boot_cpu_present(void)
     uint32_t bsp_apic = lapic_get_id();
     uint32_t bsp_index = 0;
 
-    if (bsp_apic < (uint32_t)sizeof(g_apic_to_index))
+    bool found = false;
+    for (uint32_t i = 0; i < g_cpu_count; ++i)
     {
-        if (g_apic_to_index[bsp_apic] != 0xFF)
-        {
-            bsp_index = g_apic_to_index[bsp_apic];
-        }
-        else
-        {
-            bsp_index = g_cpu_count;
-            if (g_cpu_count < SMP_MAX_CPUS)
-            {
-                map_cpu(bsp_index, (uint8_t)bsp_apic, 0, true);
-                g_cpu_count++;
-            }
-        }
+        if (g_cpus[i].apic_id == bsp_apic) { bsp_index = i; found = true; break; }
+    }
+    if (!found)
+    {
+        bsp_index = g_cpu_count < SMP_MAX_CPUS ? g_cpu_count++ : 0;
+        map_cpu(bsp_index, bsp_apic, 0, true);
     }
 
     g_boot_cpu_index = bsp_index;
@@ -286,7 +282,8 @@ bool smp_init(void)
     g_cpu_count = 0;
 
     size_t madt_length = 0;
-    const acpi_madt_t *madt = (const acpi_madt_t *)acpi_find_table_cached(MADT_SIGNATURE, &madt_length);
+    const acpi_madt_t *madt = boot_info.smp_boot_reserved ?
+        (const acpi_madt_t *)acpi_find_table_cached(MADT_SIGNATURE, &madt_length) : NULL;
     if (madt && madt_length >= sizeof(acpi_madt_t) && madt->header.length <= madt_length)
     {
         const uint8_t *cursor = madt->entries;
@@ -310,11 +307,19 @@ bool smp_init(void)
                 const acpi_madt_lapic_t *lapic = (const acpi_madt_lapic_t *)entry;
                 bool enabled = (lapic->flags & LAPIC_FLAG_ENABLED) != 0;
 
-                if (g_cpu_count < SMP_MAX_CPUS)
+                if (enabled && g_cpu_count < SMP_MAX_CPUS)
                 {
                     map_cpu(g_cpu_count, lapic->apic_id, lapic->processor_id, enabled);
                     g_cpu_count++;
                 }
+            }
+            else if (entry->type == 9 && entry->length >= 16 && g_cpu_count < SMP_MAX_CPUS)
+            {
+                uint32_t apic_id, flags, uid;
+                memcpy(&apic_id, cursor + 4, 4);
+                memcpy(&flags, cursor + 8, 4);
+                memcpy(&uid, cursor + 12, 4);
+                if (flags & 1) map_cpu(g_cpu_count++, apic_id, uid, true);
             }
 
             cursor += entry->length;
@@ -324,7 +329,7 @@ bool smp_init(void)
     if (g_cpu_count == 0)
     {
         g_cpu_count = 1;
-        map_cpu(0, (uint8_t)lapic_get_id(), 0, true);
+        map_cpu(0, lapic_get_id(), 0, true);
     }
 
     ensure_boot_cpu_present();
@@ -374,7 +379,7 @@ static uint32_t resolve_apic_to_index(uint32_t apic_id, bool strict)
         {
             continue;
         }
-        if (g_cpus[i].apic_id == (uint8_t)apic_id)
+        if (g_cpus[i].apic_id == apic_id)
         {
             if (apic_id < (uint32_t)sizeof(g_apic_to_index))
             {
@@ -448,12 +453,11 @@ static void prepare_bootstrap_data(uint32_t cpu_index, uint64_t stack_top)
  */
 bool smp_start_secondary_cpus(void)
 {
-    copy_trampoline_blob();
-
     if (smp_cpu_count() <= 1)
     {
         return true;
     }
+    copy_trampoline_blob();
 
     bool all_started = true;
     uint8_t vector = (uint8_t)(SMP_TRAMPOLINE_PHYS >> 12);
@@ -477,23 +481,17 @@ bool smp_start_secondary_cpus(void)
         smp_log_value(" starting CPU apic=", g_cpus[i].apic_id);
 
         lapic_send_init(g_cpus[i].apic_id);
-        for (volatile int delay = 0; delay < 100000; ++delay)
-        {
-            __asm__ volatile ("pause");
-        }
+        if (!timer_early_delay_us(10000)) return false;
 
         lapic_send_startup(g_cpus[i].apic_id, vector);
-        for (volatile int delay = 0; delay < 100000; ++delay)
-        {
-            __asm__ volatile ("pause");
-        }
+        if (!timer_early_delay_us(200)) return false;
 
         lapic_send_startup(g_cpus[i].apic_id, vector);
 
         uint32_t wait_loops = 0;
         uint32_t last_stage = 0;
         while (!__atomic_load_n(&g_cpus[i].online, __ATOMIC_ACQUIRE) &&
-               wait_loops++ < 5000000)
+               wait_loops++ < 2000)
         {
             uint32_t stage = g_bootstrap_data->stage;
             if (stage != last_stage)
@@ -501,7 +499,7 @@ bool smp_start_secondary_cpus(void)
                 last_stage = stage;
                 smp_log_value("cpu stage=", stage);
             }
-            __asm__ volatile ("pause");
+            if (!timer_early_delay_us(500)) break;
         }
 
         if (__atomic_load_n(&g_cpus[i].online, __ATOMIC_ACQUIRE))
@@ -512,6 +510,9 @@ bool smp_start_secondary_cpus(void)
         {
             smp_log_value("cpu failed stage=", g_bootstrap_data->stage);
             all_started = false;
+            /* A delayed AP may still read the shared bootstrap mailbox. Keep
+             * that mailbox and its dedicated stack assigned to this AP. */
+            break;
         }
     }
 

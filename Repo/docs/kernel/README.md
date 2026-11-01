@@ -5,6 +5,7 @@ This folder documents how the kernel boots, schedules work, manages memory, expo
 ## Start Here
 
 - Boot + early init: `docs/kernel/boot.md`
+- Physical hardware, USB and framebuffer support: `docs/kernel/hardware.md`
 - Native C11 libc, math and threads: `docs/kernel/libc.md`
 - Processes/threads + scheduler: `docs/kernel/process.md`
 - Native user child launch and waiting: `docs/kernel/child_processes.md`
@@ -13,7 +14,11 @@ This folder documents how the kernel boots, schedules work, manages memory, expo
 - AlixFS2 backend details: `docs/kernel/alixfs.md`
 - Syscalls, FDs, sockets: `docs/kernel/syscalls.md`
 - Process-owned byte pipes: `docs/kernel/pipes.md`
+- Native poll/select readiness and cancellation: `docs/kernel/poll.md`
+- Native socket entry points and remaining network API work: `docs/kernel/sockets.md`
+- Native DNS ownership and libc address lookup: `docs/kernel/resolver.md`
 - Terminal classification and current non-TTY streams: `docs/kernel/termios.md`
+- Native window controls, surfaces and ownership: `docs/kernel/windows.md`
 - Networking (drivers + protocols): `docs/kernel/network.md`
 - Audio streaming, counters and playback diagnostics: `docs/kernel/audio.md`
 - Source tree map: `docs/kernel/source_map.md`

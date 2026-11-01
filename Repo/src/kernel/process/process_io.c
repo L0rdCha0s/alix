@@ -53,11 +53,12 @@ bool process_io_abandon_thread_locked(thread_t *thread)
     return io_request_waiter_abandon(request) == 0;
 }
 
-int process_io_wait_current(io_request_status_t *out)
+static int process_io_wait_current_mode(io_request_status_t *out, bool interruptible)
 {
     if (!out || spinlock_preempt_disabled()) return -EINVAL;
     uint64_t flags = scheduler_lock_acquire("io_wait");
     thread_t *thread = current_thread_local();
+    if (thread) thread->io_interruptible = interruptible;
     for (;;)
     {
         if (process_io_thread_terminal(thread))
@@ -66,14 +67,26 @@ int process_io_wait_current(io_request_status_t *out)
              * termination path has removed its completion-queue membership. */
             if (thread && thread->waiting_queue == &g_io_completion_queue)
                 thread_remove_from_wait_queue(thread);
+            if (thread) thread->io_interruptible = false;
             scheduler_lock_release(flags);
             return -ECANCELED;
         }
         io_request_t *request = thread->io_request;
         if (!request)
         {
+            thread->io_interruptible = false;
             scheduler_lock_release(flags);
             return -EINVAL;
+        }
+        if (interruptible && process_signal_pending_locked(thread))
+        {
+            (void)io_request_cancel(request);
+            if (thread->waiting_queue == &g_io_completion_queue)
+                thread_remove_from_wait_queue(thread);
+            thread->state = THREAD_STATE_RUNNING;
+            thread->io_interruptible = false;
+            scheduler_lock_release(flags);
+            return -EINTR;
         }
         int result = io_request_status(request, out);
         if (result || out->cancelled || out->state == IO_REQUEST_COMPLETED)
@@ -81,11 +94,13 @@ int process_io_wait_current(io_request_status_t *out)
             if (thread->waiting_queue == &g_io_completion_queue)
                 thread_remove_from_wait_queue(thread);
             thread->state = THREAD_STATE_RUNNING;
+            thread->io_interruptible = false;
             scheduler_lock_release(flags);
             return result ? result : out->cancelled ? -ECANCELED : 0;
         }
         if (thread->waiting_queue && thread->waiting_queue != &g_io_completion_queue)
         {
+            thread->io_interruptible = false;
             scheduler_lock_release(flags);
             return -EBUSY;
         }
@@ -107,6 +122,16 @@ int process_io_wait_current(io_request_status_t *out)
         scheduler_schedule(false);
         flags = scheduler_lock_acquire("io_wait");
     }
+}
+
+int process_io_wait_current(io_request_status_t *out)
+{
+    return process_io_wait_current_mode(out, false);
+}
+
+int process_io_wait_current_interruptible(io_request_status_t *out)
+{
+    return process_io_wait_current_mode(out, true);
 }
 
 int process_io_result_current(io_request_t **request_out, io_request_status_t *out)

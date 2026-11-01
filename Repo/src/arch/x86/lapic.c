@@ -27,6 +27,7 @@
 #define LAPIC_SPURIOUS_VECTOR    0xFF
 
 static volatile uint32_t *g_lapic_base = NULL;
+static bool g_x2apic;
 
 static inline uint32_t lapic_cpuid_apic_id(void)
 {
@@ -40,6 +41,7 @@ static inline uint32_t lapic_cpuid_apic_id(void)
 
 static inline void lapic_write(uint32_t reg, uint32_t value)
 {
+    if (g_x2apic) { wrmsr(0x800 + reg / 16, value); return; }
     if (!g_lapic_base)
     {
         return;
@@ -50,6 +52,7 @@ static inline void lapic_write(uint32_t reg, uint32_t value)
 
 static inline uint32_t lapic_read(uint32_t reg)
 {
+    if (g_x2apic) return (uint32_t)rdmsr(0x800 + reg / 16);
     if (!g_lapic_base)
     {
         return 0;
@@ -59,15 +62,26 @@ static inline uint32_t lapic_read(uint32_t reg)
 
 static void lapic_wait_for_icr(void)
 {
-    while (lapic_read(LAPIC_REG_ICR_LOW) & (1u << 12))
+    if (g_x2apic) return;
+    unsigned polls = 1000000;
+    while ((lapic_read(LAPIC_REG_ICR_LOW) & (1u << 12)) && --polls)
     {
         __asm__ volatile ("pause");
+    }
+    if (!polls)
+    {
+        serial_printf("[lapic] IPI delivery timed out");
+        for (;;) __asm__ volatile ("cli; hlt");
     }
 }
 
 bool lapic_init(void)
 {
     uint64_t apic_base = rdmsr(IA32_APIC_BASE_MSR);
+    uint32_t eax, ebx, ecx, edx;
+    __asm__ volatile ("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(1), "c"(0));
+    g_x2apic = (ecx & (1u << 21)) || (apic_base & (1ULL << 10));
+    if (g_x2apic) apic_base |= 1ULL << 10;
     apic_base |= LAPIC_ENABLE_BIT;
     wrmsr(IA32_APIC_BASE_MSR, apic_base);
 
@@ -85,6 +99,11 @@ bool lapic_init(void)
 
 void lapic_enable(void)
 {
+    if (g_x2apic)
+    {
+        uint64_t base = rdmsr(IA32_APIC_BASE_MSR);
+        wrmsr(IA32_APIC_BASE_MSR, base | (1ULL << 10) | LAPIC_ENABLE_BIT);
+    }
     if (!g_lapic_base)
     {
         lapic_init();
@@ -101,7 +120,7 @@ uint32_t lapic_get_id(void)
         return lapic_cpuid_apic_id();
     }
     uint32_t value = lapic_read(LAPIC_REG_ID);
-    return value >> 24;
+    return g_x2apic ? value : value >> 24;
 }
 
 void lapic_eoi(void)
@@ -109,45 +128,34 @@ void lapic_eoi(void)
     lapic_write(LAPIC_REG_EOI, 0);
 }
 
-void lapic_send_ipi(uint32_t apic_id, uint8_t vector)
+static void lapic_send_icr(uint32_t apic_id, uint32_t low)
 {
+    uint64_t flags;
+    __asm__ volatile ("pushfq; pop %0; cli" : "=r"(flags) :: "memory");
     lapic_wait_for_icr();
-    lapic_write(LAPIC_REG_ICR_HIGH, apic_id << 24);
-    lapic_write(LAPIC_REG_ICR_LOW, LAPIC_DELIVERY_FIXED | vector);
+    if (g_x2apic) wrmsr(0x830, ((uint64_t)apic_id << 32) | low);
+    else
+    {
+        lapic_write(LAPIC_REG_ICR_HIGH, apic_id << 24);
+        lapic_write(LAPIC_REG_ICR_LOW, low);
+    }
+    lapic_wait_for_icr();
+    __asm__ volatile ("push %0; popfq" :: "r"(flags) : "memory", "cc");
 }
+
+void lapic_send_ipi(uint32_t apic_id, uint8_t vector)
+{ lapic_send_icr(apic_id, LAPIC_DELIVERY_FIXED | vector); }
 
 void lapic_send_init(uint32_t apic_id)
-{
-    lapic_wait_for_icr();
-    lapic_write(LAPIC_REG_ICR_HIGH, apic_id << 24);
-    lapic_write(LAPIC_REG_ICR_LOW, LAPIC_DELIVERY_INIT | LAPIC_LEVEL_ASSERT | LAPIC_TRIGGER_LEVEL);
-    lapic_wait_for_icr();
-}
+{ lapic_send_icr(apic_id, LAPIC_DELIVERY_INIT | LAPIC_LEVEL_ASSERT | LAPIC_TRIGGER_LEVEL); }
 
 void lapic_send_startup(uint32_t apic_id, uint8_t vector)
-{
-    lapic_wait_for_icr();
-    lapic_write(LAPIC_REG_ICR_HIGH, apic_id << 24);
-    lapic_write(LAPIC_REG_ICR_LOW, LAPIC_DELIVERY_STARTUP | (vector & 0xFFu));
-    lapic_wait_for_icr();
-}
+{ lapic_send_icr(apic_id, LAPIC_DELIVERY_STARTUP | vector); }
 
 void lapic_broadcast_ipi(uint8_t vector, bool include_self)
 {
-    uint32_t icr = LAPIC_DELIVERY_FIXED | vector;
-    if (!include_self)
-    {
-        /* APIC destination shorthand 01 is self-only; 11 is all excluding
-         * self.  Using 01 here silently left every AP asleep. */
-        icr |= LAPIC_DEST_ALL_EXCLUDING_SELF;
-    }
-    else
-    {
-        icr |= LAPIC_DEST_ALL_INCLUDING_SELF;
-    }
-    lapic_wait_for_icr();
-    lapic_write(LAPIC_REG_ICR_HIGH, 0);
-    lapic_write(LAPIC_REG_ICR_LOW, icr);
+    lapic_send_icr(0, LAPIC_DELIVERY_FIXED | vector |
+        (include_self ? LAPIC_DEST_ALL_INCLUDING_SELF : LAPIC_DEST_ALL_EXCLUDING_SELF));
 }
 
 void lapic_set_tpr(uint8_t value)

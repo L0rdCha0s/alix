@@ -84,10 +84,14 @@ bool process_signal_pending_locked(thread_t *thread)
 
 static void signal_notify_locked(thread_t *thread)
 {
-    /* Running/queued I/O cancellation has caller-abandonment semantics today.
-     * Preserve its result and defer caught delivery until the caller finishes. */
+    /* Poll has no partial data transfer to preserve. Cancel its owned request;
+     * the event worker publishes completion and wakes the waiter for EINTR.
+     * Other I/O keeps its existing deferred caught-signal delivery. */
     if (thread->io_request)
+    {
+        if (thread->io_interruptible) process_io_cancel_thread_locked(thread);
         return;
+    }
     if (thread->futex_waiting)
     {
         thread->futex_interrupted = true;

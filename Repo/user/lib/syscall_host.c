@@ -279,6 +279,12 @@ ssize_t sys_cpu_snapshot(syscall_cpu_stats_t *buffer, size_t capacity)
     return -1;
 }
 
+int64_t sys_memory_pages(uint32_t selector)
+{
+    (void)selector;
+    return -ENOSYS;
+}
+
 uint64_t sys_time_millis(void)
 {
     struct timespec ts = {0};

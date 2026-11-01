@@ -1,0 +1,65 @@
+--- a/ipc/chromium/src/base/platform_thread.h
++++ b/ipc/chromium/src/base/platform_thread.h
+@@ -22,7 +22,9 @@
+ #else
+ #  include <pthread.h>
+ typedef pthread_t PlatformThreadHandle;
+-#  if defined(XP_LINUX) || defined(XP_OPENBSD) || defined(XP_SOLARIS) || \
++#  if defined(__ALIX__)
++typedef pthread_t PlatformThreadId;
++#  elif defined(XP_LINUX) || defined(XP_OPENBSD) || defined(XP_SOLARIS) || \
+       defined(__GLIBC__)
+ #    include <unistd.h>
+ typedef pid_t PlatformThreadId;
+--- a/ipc/chromium/src/base/platform_thread_posix.cc
++++ b/ipc/chromium/src/base/platform_thread_posix.cc
+@@ -44,7 +44,9 @@
+ PlatformThreadId PlatformThread::CurrentId() {
+   // Pthreads doesn't have the concept of a thread ID, so we have to reach down
+   // into the kernel.
+-#if defined(XP_DARWIN)
++#if defined(__ALIX__)
++  return pthread_self();
++#elif defined(XP_DARWIN)
+   mach_port_t port = mach_thread_self();
+   mach_port_deallocate(mach_task_self(), port);
+   return port;
+@@ -88,7 +90,9 @@
+   // the process name for the LWP.  We don't want to do this for the main
+   // thread because that would rename the process, causing tools like killall
+   // to stop working.
++#  if !defined(__ALIX__)
+   if (PlatformThread::CurrentId() == getpid()) return;
++#  endif
+ 
+   // Using NS_SetCurrentThreadName, as opposed to using platform APIs directly,
+   // also sets the thread name on the PRThread wrapper, and allows us to
+--- a/third_party/angle/src/common/platform.h
++++ b/third_party/angle/src/common/platform.h
+@@ -11,6 +11,9 @@
+ 
+ #if defined(_WIN32)
+ #    define ANGLE_PLATFORM_WINDOWS 1
++#elif defined(__ALIX__)
++#    define ANGLE_PLATFORM_ALIX 1
++#    define ANGLE_PLATFORM_POSIX 1
+ #elif defined(__Fuchsia__)
+ #    define ANGLE_PLATFORM_FUCHSIA 1
+ #    define ANGLE_PLATFORM_POSIX 1
+--- a/third_party/angle/include/EGL/eglplatform.h
++++ b/third_party/angle/include/EGL/eglplatform.h
+@@ -119,6 +119,14 @@
+ typedef Pixmap   EGLNativePixmapType;
+ typedef Window   EGLNativeWindowType;
+ 
++#elif defined(__ALIX__)
++
++/* Native handles for shared declarations. Alix currently uses software
++ * composition; an EGL context provider is a separate runtime capability. */
++typedef void             *EGLNativeDisplayType;
++typedef khronos_uintptr_t EGLNativePixmapType;
++typedef khronos_uintptr_t EGLNativeWindowType;
++
+ #elif defined(__unix__)
+ 
+ typedef void             *EGLNativeDisplayType;

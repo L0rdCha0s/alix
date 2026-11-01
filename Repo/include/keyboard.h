@@ -17,6 +17,7 @@ bool keyboard_try_read_event(keyboard_event_t *event);
 void keyboard_buffer_push(uint8_t scancode);
 void keyboard_unread_char(char ch);
 void keyboard_disable_ps2(void);
+void keyboard_enable_ps2(void);
 bool keyboard_ps2_enabled(void);
 
 #endif

@@ -13,6 +13,8 @@ typedef enum
     USER_ATK_EVENT_KEY = 2,
     USER_ATK_EVENT_CLOSE = 3,
     USER_ATK_EVENT_RESIZE = 4,
+    USER_ATK_EVENT_FOCUS = 5, /* data0: 1 gained, 0 lost */
+    USER_ATK_EVENT_MOVE = 6,  /* x/y: client origin in screen pixels */
 } user_atk_event_type_t;
 
 #define USER_ATK_MOUSE_FLAG_PRESS   (1u << 0)
@@ -46,7 +48,36 @@ typedef struct
 
 #define USER_ATK_POLL_FLAG_BLOCK (1u << 0)
 #define USER_ATK_WINDOW_FLAG_RESIZABLE (1u << 0)
+#define USER_ATK_WINDOW_FLAG_HIDDEN (1u << 1)
+#define USER_ATK_WINDOW_FLAG_BORDERLESS (1u << 2)
+#define USER_ATK_WINDOW_FLAG_RAW_KEYS (1u << 3)
 #define USER_ATK_CAPTURE_ENABLE (1u << 0)
 #define USER_ATK_CAPTURE_RELATIVE (1u << 1)
+
+#define USER_ATK_CONTROL_VERSION 1u
+typedef enum
+{
+    USER_ATK_CONTROL_QUERY,
+    USER_ATK_CONTROL_BOUNDS,
+    USER_ATK_CONTROL_VISIBLE,
+    USER_ATK_CONTROL_FOCUS,
+    USER_ATK_CONTROL_TITLE,
+    USER_ATK_CONTROL_CHROME,
+    USER_ATK_CONTROL_DISPLAY,
+} user_atk_control_opcode_t;
+#define USER_ATK_STATE_VISIBLE 1u
+#define USER_ATK_STATE_FOCUSED 2u
+#define USER_ATK_STATE_CHROME 4u
+#define USER_ATK_STATE_RESIZABLE 8u
+/* Every successful operation returns actual state in this fixed-size record.
+ * Bounds use client-area screen pixels. VISIBLE/CHROME accept flags 0 or 1.
+ * DISPLAY requires handle 0 and returns physical screen dimensions. */
+typedef struct
+{
+    uint32_t version, size;
+    int32_t x, y;
+    uint32_t width, height, flags, screen_width, screen_height, reserved;
+    char title[USER_ATK_TITLE_MAX];
+} user_atk_window_control_t;
 
 #endif /* USER_ATK_DEFS_H */

@@ -1,0 +1,1575 @@
+--- a/widget/moz.build
++++ b/widget/moz.build
+@@ -53,7 +53,7 @@
+     "components.conf",
+ ]
+ 
+-if toolkit in ("android", "cocoa", "gtk", "uikit", "windows"):
++if toolkit in ("android", "cocoa", "gtk", "uikit", "windows", "alix"):
+     DIRS += [toolkit]
+ 
+ if toolkit == "cocoa":
+@@ -338,7 +338,7 @@
+         "nsBaseColorPicker.cpp",
+     ]
+ 
+-if toolkit in ("gtk", "windows", "cocoa", "uikit", "android"):
++if toolkit in ("gtk", "windows", "cocoa", "uikit", "android", "alix"):
+     UNIFIED_SOURCES += [
+         "nsNativeTheme.cpp",
+     ]
+@@ -377,6 +377,12 @@
+         "gtk/PlatformWidgetTypes.ipdlh",
+         "headless/HeadlessWidgetTypes.ipdlh",
+     ]
++elif toolkit == "alix":
++    IPDL_SOURCES = [
++        "alix/PlatformWidgetTypes.ipdlh",
++        "generic/PCompositorWidget.ipdl",
++        "headless/HeadlessWidgetTypes.ipdlh",
++    ]
+ elif toolkit == "android":
+     IPDL_SOURCES = [
+         "android/PCompositorWidget.ipdl",
+--- /dev/null
++++ b/widget/alix/AlixTextInput.cpp
+@@ -0,0 +1,39 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++#include "AlixTextInput.h"
++#include "mozilla/TextEventDispatcher.h"
++#include "mozilla/TextEvents.h"
++#include "nsString.h"
++namespace mozilla::widget {
++NS_IMPL_ISUPPORTS(AlixTextInput, TextEventDispatcherListener,
++                  nsISupportsWeakReference)
++nsresult AlixTextInput::NotifyIME(TextEventDispatcher *dispatcher,
++                                  const IMENotification &notification) {
++  switch (notification.mMessage) {
++  case REQUEST_TO_COMMIT_COMPOSITION:
++  case REQUEST_TO_CANCEL_COMPOSITION: {
++    if (!dispatcher->IsComposing())
++      return NS_OK;
++    nsEventStatus status = nsEventStatus_eIgnore;
++    return dispatcher->CommitComposition(
++        status, notification.mMessage == REQUEST_TO_CANCEL_COMPOSITION
++                    ? &EmptyString()
++                    : nullptr);
++  }
++  default:
++    // There is no separate Alix IME process to notify of geometry/selection.
++    // Gecko retains composition state; physical input uses native key events.
++    return NS_OK;
++  }
++}
++IMENotificationRequests AlixTextInput::GetIMENotificationRequests() {
++  return {};
++}
++void AlixTextInput::OnRemovedFrom(TextEventDispatcher *) {}
++void AlixTextInput::WillDispatchKeyboardEvent(TextEventDispatcher *,
++                                              WidgetKeyboardEvent &, uint32_t,
++                                              void *) {
++  // Native key values have already been normalized before entering Gecko.
++}
++} // namespace mozilla::widget
+--- /dev/null
++++ b/widget/alix/AlixTextInput.h
+@@ -0,0 +1,24 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++#ifndef widget_alix_AlixTextInput_h
++#define widget_alix_AlixTextInput_h
++#include "mozilla/TextEventDispatcherListener.h"
++#include "mozilla/widget/IMEData.h"
++namespace mozilla::widget {
++class AlixTextInput final : public TextEventDispatcherListener {
++public:
++  AlixTextInput() = default;
++  NS_DECL_ISUPPORTS
++  NS_IMETHOD NotifyIME(TextEventDispatcher *, const IMENotification &) override;
++  NS_IMETHOD_(IMENotificationRequests) GetIMENotificationRequests() override;
++  NS_IMETHOD_(void) OnRemovedFrom(TextEventDispatcher *) override;
++  NS_IMETHOD_(void)
++  WillDispatchKeyboardEvent(TextEventDispatcher *, WidgetKeyboardEvent &,
++                            uint32_t, void *) override;
++
++private:
++  ~AlixTextInput() override = default;
++};
++} // namespace mozilla::widget
++#endif
+--- /dev/null
++++ b/widget/alix/GfxInfo.cpp
+@@ -0,0 +1,211 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#include "GfxInfo.h"
++
++#include "nsServiceManagerUtils.h"
++
++namespace mozilla {
++namespace widget {
++
++#ifdef DEBUG
++NS_IMPL_ISUPPORTS_INHERITED(GfxInfo, GfxInfoBase, nsIGfxInfoDebug)
++#endif
++
++GfxInfo::GfxInfo() {}
++
++GfxInfo::~GfxInfo() {}
++
++NS_IMETHODIMP
++GfxInfo::GetDWriteEnabled(bool *aEnabled) { return NS_ERROR_FAILURE; }
++
++NS_IMETHODIMP
++GfxInfo::GetEmbeddedInFirefoxReality(bool *aEmbeddedInFirefoxReality) {
++  *aEmbeddedInFirefoxReality = false;
++  return NS_OK;
++}
++
++NS_IMETHODIMP
++GfxInfo::GetHasBattery(bool *aHasBattery) { return NS_ERROR_NOT_IMPLEMENTED; }
++
++NS_IMETHODIMP
++GfxInfo::GetDWriteVersion(nsAString &aDwriteVersion) {
++  return NS_ERROR_FAILURE;
++}
++
++NS_IMETHODIMP
++GfxInfo::GetCleartypeParameters(nsAString &aCleartypeParams) {
++  return NS_ERROR_FAILURE;
++}
++
++NS_IMETHODIMP
++GfxInfo::GetWindowProtocol(nsAString &aWindowProtocol) {
++  return NS_ERROR_NOT_IMPLEMENTED;
++}
++
++NS_IMETHODIMP
++GfxInfo::GetTestType(nsAString &aTestType) { return NS_ERROR_NOT_IMPLEMENTED; }
++
++NS_IMETHODIMP
++GfxInfo::GetAdapterDescription(nsAString &aAdapterDescription) {
++  return NS_ERROR_FAILURE;
++}
++
++NS_IMETHODIMP
++GfxInfo::GetAdapterDescription2(nsAString &aAdapterDescription) {
++  return NS_ERROR_FAILURE;
++}
++
++NS_IMETHODIMP
++GfxInfo::GetAdapterRAM(uint32_t *aAdapterRAM) { return NS_ERROR_FAILURE; }
++
++NS_IMETHODIMP
++GfxInfo::GetAdapterRAM2(uint32_t *aAdapterRAM) { return NS_ERROR_FAILURE; }
++
++NS_IMETHODIMP
++GfxInfo::GetAdapterDriverVendor(nsAString &aAdapterDriverVendor) {
++  aAdapterDriverVendor.AssignLiteral("");
++  return NS_OK;
++}
++
++NS_IMETHODIMP
++GfxInfo::GetAdapterDriverVendor2(nsAString &aAdapterDriverVendor2) {
++  return NS_ERROR_FAILURE;
++}
++
++NS_IMETHODIMP
++GfxInfo::GetAdapterDriver(nsAString &aAdapterDriver) {
++  return NS_ERROR_FAILURE;
++}
++
++NS_IMETHODIMP
++GfxInfo::GetAdapterDriver2(nsAString &aAdapterDriver) {
++  return NS_ERROR_FAILURE;
++}
++
++NS_IMETHODIMP
++GfxInfo::GetAdapterDriverVersion(nsAString &aAdapterDriverVersion) {
++  aAdapterDriverVersion = EmptyString();
++  return NS_OK;
++}
++
++NS_IMETHODIMP
++GfxInfo::GetAdapterDriverVersion2(nsAString &aAdapterDriverVersion) {
++  aAdapterDriverVersion = EmptyString();
++  return NS_OK;
++}
++
++NS_IMETHODIMP
++GfxInfo::GetAdapterDriverDate(nsAString &aAdapterDriverDate) {
++  return NS_ERROR_FAILURE;
++}
++
++NS_IMETHODIMP
++GfxInfo::GetAdapterDriverDate2(nsAString &aAdapterDriverDate) {
++  return NS_ERROR_FAILURE;
++}
++
++NS_IMETHODIMP
++GfxInfo::GetAdapterVendorID(nsAString &aAdapterVendorID) {
++  aAdapterVendorID = EmptyString();
++  return NS_OK;
++}
++
++NS_IMETHODIMP
++GfxInfo::GetAdapterVendorID2(nsAString &aAdapterVendorID) {
++  aAdapterVendorID = EmptyString();
++  return NS_OK;
++}
++
++NS_IMETHODIMP
++GfxInfo::GetAdapterDeviceID(nsAString &aAdapterDeviceID) {
++  aAdapterDeviceID = EmptyString();
++  return NS_OK;
++}
++
++NS_IMETHODIMP
++GfxInfo::GetAdapterDeviceID2(nsAString &aAdapterDeviceID) {
++  aAdapterDeviceID = EmptyString();
++  return NS_OK;
++}
++
++NS_IMETHODIMP
++GfxInfo::GetAdapterSubsysID(nsAString &aAdapterSubsysID) {
++  return NS_ERROR_FAILURE;
++}
++
++NS_IMETHODIMP
++GfxInfo::GetAdapterSubsysID2(nsAString &aAdapterSubsysID) {
++  return NS_ERROR_FAILURE;
++}
++
++NS_IMETHODIMP
++GfxInfo::GetIsGPU2Active(bool *aIsGPU2Active) { return NS_ERROR_FAILURE; }
++
++NS_IMETHODIMP
++GfxInfo::GetDrmRenderDevice(nsACString &aDrmRenderDevice) {
++  return NS_ERROR_NOT_IMPLEMENTED;
++}
++
++const nsTArray<RefPtr<GfxDriverInfo>> &GfxInfo::GetGfxDriverInfo() {
++
++  return *sDriverInfo;
++}
++
++nsresult GfxInfo::GetFeatureStatusImpl(
++    int32_t aFeature, int32_t *aStatus, nsAString &aSuggestedDriverVersion,
++    const nsTArray<RefPtr<GfxDriverInfo>> &aDriverInfo, nsACString &aFailureId,
++    OperatingSystem *aOS /* = nullptr */) {
++  NS_ENSURE_ARG_POINTER(aStatus);
++  aSuggestedDriverVersion.SetIsVoid(true);
++  *aStatus = nsIGfxInfo::FEATURE_STATUS_UNKNOWN;
++  if (aOS)
++    *aOS = OperatingSystem::Unknown;
++
++  if (sShutdownOccurred) {
++    return NS_OK;
++  }
++
++  // Alix currently exposes CPU surfaces, with no native OpenGL context API.
++  // Report the actual capability so Gecko can choose its software renderer.
++  if (aFeature == nsIGfxInfo::FEATURE_OPENGL_LAYERS ||
++      aFeature == nsIGfxInfo::FEATURE_WEBGL_OPENGL) {
++    *aStatus = nsIGfxInfo::FEATURE_BLOCKED_DEVICE;
++    aFailureId.AssignLiteral("FEATURE_FAILURE_ALIX_NO_NATIVE_GL");
++    return NS_OK;
++  }
++
++  return GfxInfoBase::GetFeatureStatusImpl(
++      aFeature, aStatus, aSuggestedDriverVersion, aDriverInfo, aFailureId, aOS);
++}
++
++#ifdef DEBUG
++
++// Implement nsIGfxInfoDebug
++
++NS_IMETHODIMP GfxInfo::SpoofVendorID(const nsAString &aVendorID) {
++  return NS_ERROR_FAILURE;
++}
++
++NS_IMETHODIMP GfxInfo::SpoofDeviceID(const nsAString &aDeviceID) {
++  return NS_ERROR_FAILURE;
++}
++
++NS_IMETHODIMP GfxInfo::SpoofDriverVersion(const nsAString &aDriverVersion) {
++  return NS_ERROR_FAILURE;
++}
++
++NS_IMETHODIMP GfxInfo::SpoofOSVersion(uint32_t aVersion) {
++  return NS_ERROR_FAILURE;
++}
++
++NS_IMETHODIMP GfxInfo::SpoofOSVersionEx(uint32_t aMajor, uint32_t aMinor,
++                                        uint32_t aBuild, uint32_t aRevision) {
++  return NS_ERROR_FAILURE;
++}
++
++#endif
++
++} // namespace widget
++} // namespace mozilla
+--- /dev/null
++++ b/widget/alix/GfxInfo.h
+@@ -0,0 +1,88 @@
++/*
++ * This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#ifndef _mozilla_widget_GfxInfo_h_
++#define _mozilla_widget_GfxInfo_h_
++
++#include "GfxDriverInfo.h"
++#include "GfxInfoBase.h"
++#include "nsString.h"
++
++namespace mozilla {
++
++namespace gl {
++class GLContext;
++}
++
++namespace widget {
++
++class GfxInfo : public GfxInfoBase {
++private:
++  ~GfxInfo();
++
++public:
++  GfxInfo();
++
++  OperatingSystem GetOperatingSystem() override {
++    return OperatingSystem::Unknown;
++  }
++
++  // We only declare the subset of nsIGfxInfo that we actually implement. The
++  // rest is brought forward from GfxInfoBase.
++  NS_IMETHOD GetDWriteEnabled(bool *aDWriteEnabled) override;
++  NS_IMETHOD
++  GetEmbeddedInFirefoxReality(bool *aEmbeddedInFirefoxReality) override;
++  NS_IMETHOD GetHasBattery(bool *aHasBattery) override;
++  NS_IMETHOD GetDWriteVersion(nsAString &aDwriteVersion) override;
++  NS_IMETHOD GetCleartypeParameters(nsAString &aCleartypeParams) override;
++  NS_IMETHOD GetWindowProtocol(nsAString &aWindowProtocol) override;
++  NS_IMETHOD GetTestType(nsAString &aTestType) override;
++  NS_IMETHOD GetAdapterDescription(nsAString &aAdapterDescription) override;
++  NS_IMETHOD GetAdapterDriver(nsAString &aAdapterDriver) override;
++  NS_IMETHOD GetAdapterVendorID(nsAString &aAdapterVendorID) override;
++  NS_IMETHOD GetAdapterDeviceID(nsAString &aAdapterDeviceID) override;
++  NS_IMETHOD GetAdapterSubsysID(nsAString &aAdapterSubsysID) override;
++  NS_IMETHOD GetAdapterRAM(uint32_t *aAdapterRAM) override;
++  NS_IMETHOD GetAdapterDriverVendor(nsAString &aAdapterDriverVendor) override;
++  NS_IMETHOD GetAdapterDriverVersion(nsAString &aAdapterDriverVersion) override;
++  NS_IMETHOD GetAdapterDriverDate(nsAString &aAdapterDriverDate) override;
++  NS_IMETHOD GetAdapterDescription2(nsAString &aAdapterDescription) override;
++  NS_IMETHOD GetAdapterDriver2(nsAString &aAdapterDriver) override;
++  NS_IMETHOD GetAdapterVendorID2(nsAString &aAdapterVendorID) override;
++  NS_IMETHOD GetAdapterDeviceID2(nsAString &aAdapterDeviceID) override;
++  NS_IMETHOD GetAdapterSubsysID2(nsAString &aAdapterSubsysID) override;
++  NS_IMETHOD GetAdapterRAM2(uint32_t *aAdapterRAM) override;
++  NS_IMETHOD GetAdapterDriverVendor2(nsAString &aAdapterDriverVendor) override;
++  NS_IMETHOD
++  GetAdapterDriverVersion2(nsAString &aAdapterDriverVersion) override;
++  NS_IMETHOD GetAdapterDriverDate2(nsAString &aAdapterDriverDate) override;
++  NS_IMETHOD GetIsGPU2Active(bool *aIsGPU2Active) override;
++  NS_IMETHOD GetDrmRenderDevice(nsACString &aDrmRenderDevice) override;
++  using GfxInfoBase::GetFeatureStatus;
++  using GfxInfoBase::GetFeatureSuggestedDriverVersion;
++
++#ifdef DEBUG
++  NS_DECL_ISUPPORTS_INHERITED
++
++  NS_IMETHOD SpoofVendorID(const nsAString &aVendorID) override;
++  NS_IMETHOD SpoofDeviceID(const nsAString &aDeviceID) override;
++  NS_IMETHOD SpoofDriverVersion(const nsAString &aDriverVersion) override;
++  NS_IMETHOD SpoofOSVersion(uint32_t aVersion) override;
++  NS_IMETHOD SpoofOSVersionEx(uint32_t aMajor, uint32_t aMinor, uint32_t aBuild,
++                              uint32_t aRevision) override;
++#endif
++
++protected:
++  nsresult GetFeatureStatusImpl(
++      int32_t aFeature, int32_t *aStatus, nsAString &aSuggestedDriverVersion,
++      const nsTArray<RefPtr<GfxDriverInfo>> &aDriverInfo,
++      nsACString &aFailureId, OperatingSystem *aOS = nullptr) override;
++  const nsTArray<RefPtr<GfxDriverInfo>> &GetGfxDriverInfo() override;
++};
++
++} // namespace widget
++} // namespace mozilla
++
++#endif /* _mozilla_widget_GfxInfo_h_ */
+--- /dev/null
++++ b/widget/alix/PlatformWidgetTypes.ipdlh
+@@ -0,0 +1,16 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++include HeadlessWidgetTypes;
++using mozilla::LayoutDeviceIntSize from "Units.h";
++namespace mozilla {
++namespace widget {
++struct AlixCompositorWidgetInitData {
++  LayoutDeviceIntSize ClientSize;
++};
++union CompositorWidgetInitData {
++  AlixCompositorWidgetInitData;
++  HeadlessCompositorWidgetInitData;
++};
++}
++}
+--- /dev/null
++++ b/widget/alix/components.conf
+@@ -0,0 +1,61 @@
++# This Source Code Form is subject to the terms of the Mozilla Public
++# License, v. 2.0. If a copy of the MPL was not distributed with this
++# file, You can obtain one at http://mozilla.org/MPL/2.0/.
++
++Headers = '/widget/alix/nsWidgetFactory.h',
++
++InitFunc = 'nsWidgetAlixModuleCtor'
++UnloadFunc = 'nsWidgetAlixModuleDtor'
++
++Classes = [
++    {
++        'cid': '{49f428e8-baf9-4ba3-b1b0-7d2fd3abbcea}',
++        'contract_ids': ['@mozilla.org/widget/parent/clipboard;1'],
++        'interfaces': ['nsIClipboard'],
++        'type': 'nsIClipboard',
++        'processes': ProcessSelector.MAIN_PROCESS_ONLY,
++    },
++    {
++        'name': 'GfxInfo',
++        'cid': '{d755a760-9f27-11df-0800-200c9a664242}',
++        'contract_ids': ['@mozilla.org/gfx/info;1'],
++        'type': 'mozilla::widget::GfxInfo',
++        'headers': ['/widget/alix/GfxInfo.h'],
++        'init_method': 'Init',
++    },
++    {
++        'cid': '{2d96b3df-c051-11d1-a827-0040959a28c9}',
++        'contract_ids': ['@mozilla.org/widget/appshell/alix;1'],
++        'legacy_constructor': 'nsAppShellConstructor',
++        'headers': ['/widget/alix/nsWidgetFactory.h'],
++        'processes': ProcessSelector.ALLOW_IN_GPU_RDD_VR_SOCKET_AND_UTILITY_PROCESS,
++    },
++    {
++        'cid': '{8b5314bc-db01-11d2-96ce-0060b0fb9956}',
++        'contract_ids': ['@mozilla.org/widget/transferable;1'],
++        'type': 'nsTransferable',
++        'headers': ['/widget/nsTransferable.h'],
++    },
++    {
++        'cid': '{948a0023-e3a7-11d2-96cf-0060b0fb9956}',
++        'contract_ids': ['@mozilla.org/widget/htmlformatconverter;1'],
++        'type': 'nsHTMLFormatConverter',
++        'headers': ['/widget/nsHTMLFormatConverter.h'],
++    },
++    {
++        'cid': '{77221d5a-1dd2-11b2-8c69-c710f15d2ed5}',
++        'contract_ids': ['@mozilla.org/widget/clipboardhelper;1'],
++        'type': 'nsClipboardHelper',
++        'headers': ['/widget/nsClipboardHelper.h'],
++    },
++    {
++        'cid': '{f0ddedd7-e8d5-4f95-a5b4-0f48f1741b36}',
++        'contract_ids': ['@mozilla.org/gfx/parent/screenmanager;1'],
++        'type': 'mozilla::widget::ScreenManager',
++        'headers': ['mozilla/widget/ScreenManager.h'],
++        'constructor': 'mozilla::widget::ScreenManager::GetAddRefedSingleton',
++        'processes': ProcessSelector.MAIN_PROCESS_ONLY,
++        'singleton': True,
++    },
++
++]
+--- /dev/null
++++ b/widget/alix/moz.build
+@@ -0,0 +1,9 @@
++# This Source Code Form is subject to the terms of the Mozilla Public
++# License, v. 2.0. If a copy of the MPL was not distributed with this
++# file, You can obtain one at http://mozilla.org/MPL/2.0/.
++EXPORTS.mozilla.widget += ['nsWindow.h']
++SOURCES += ['AlixTextInput.cpp', 'GfxInfo.cpp', 'nsAppShell.cpp', 'nsLookAndFeel.cpp', 'nsNativeThemeAlix.cpp', 'nsWidgetFactory.cpp', 'nsWindow.cpp']
++LOCAL_INCLUDES += ['/toolkit/xre', '/widget', '/widget/headless', '/xpcom/components']
++XPCOM_MANIFESTS += ['components.conf']
++include("/ipc/chromium/chromium-config.mozbuild")
++FINAL_LIBRARY = "xul"
+--- /dev/null
++++ b/widget/alix/nsAppShell.cpp
+@@ -0,0 +1,60 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++#include "nsAppShell.h"
++#include "HeadlessScreenHelper.h"
++#include "gfxPlatform.h"
++#include "mozilla/RefPtr.h"
++#include "mozilla/widget/Screen.h"
++#include "mozilla/widget/ScreenManager.h"
++#include "nsWindow.h"
++#include "nsXULAppAPI.h"
++#include <usyscall.h>
++using namespace mozilla;
++using namespace mozilla::widget;
++
++nsAppShell::~nsAppShell() = default;
++nsresult nsAppShell::Init() {
++  nsresult result = nsBaseAppShell::Init();
++  if (NS_FAILED(result))
++    return result;
++  if (XRE_IsParentProcess() && gfxPlatform::IsHeadless()) {
++    mHeadlessScreen = MakeUnique<HeadlessScreenHelper>();
++  } else if (XRE_IsParentProcess()) {
++    mDisplay.version = USER_ATK_CONTROL_VERSION;
++    mDisplay.size = sizeof(mDisplay);
++    if (sys_ui_control(0, USER_ATK_CONTROL_DISPLAY, &mDisplay) ||
++        !mDisplay.width || !mDisplay.height)
++      return NS_ERROR_NOT_AVAILABLE;
++    nsTArray<RefPtr<Screen>> screens;
++    LayoutDeviceIntRect rect(0, 0, mDisplay.width, mDisplay.height);
++    screens.AppendElement(MakeRefPtr<Screen>(
++        rect, rect, 24, 24, 0, DesktopToLayoutDeviceScale(),
++        CSSToLayoutDeviceScale(), 96.0f, Screen::IsPseudoDisplay::No,
++        Screen::IsHDR::No, 80.0f, 1000.0f));
++    ScreenManager::Refresh(std::move(screens));
++  }
++  return NS_OK;
++}
++void nsAppShell::ScheduleNativeEventCallback() {
++  MonitorAutoLock lock(mWake);
++  mWakePending = true;
++  lock.NotifyAll();
++}
++bool nsAppShell::ProcessNextNativeEvent(bool mayWait) {
++  bool processed = nsWindow::PumpNativeEvents();
++  bool requested;
++  {
++    MonitorAutoLock lock(mWake);
++    // Alix's window queue has nonblocking polling. Bound the idle wait so
++    // native input is observed without retaining a user stack in a kernel UI
++    // wait.
++    if (mayWait && !processed && !mWakePending)
++      lock.Wait(TimeDuration::FromMilliseconds(10));
++    requested = mWakePending;
++    mWakePending = false;
++  }
++  if (requested)
++    NativeEventCallback();
++  return nsWindow::PumpNativeEvents() || processed || requested;
++}
+--- /dev/null
++++ b/widget/alix/nsAppShell.h
+@@ -0,0 +1,28 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++#ifndef widget_alix_nsAppShell_h
++#define widget_alix_nsAppShell_h
++#include "mozilla/Monitor.h"
++#include "mozilla/UniquePtr.h"
++#include "nsBaseAppShell.h"
++#include <user_atk_defs.h>
++namespace mozilla::widget {
++class HeadlessScreenHelper;
++}
++class nsAppShell final : public nsBaseAppShell {
++public:
++  nsresult Init();
++
++protected:
++  ~nsAppShell() override;
++  void ScheduleNativeEventCallback() override;
++  bool ProcessNextNativeEvent(bool mayWait) override;
++
++private:
++  mozilla::Monitor mWake{"AlixAppShellWake"};
++  bool mWakePending = false;
++  user_atk_window_control_t mDisplay{};
++  mozilla::UniquePtr<mozilla::widget::HeadlessScreenHelper> mHeadlessScreen;
++};
++#endif
+--- /dev/null
++++ b/widget/alix/nsLookAndFeel.cpp
+@@ -0,0 +1,208 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#include "nsLookAndFeel.h"
++#include "nsStyleConsts.h"
++
++using namespace mozilla;
++
++static const char16_t UNICODE_BULLET = 0x2022;
++
++nsLookAndFeel::nsLookAndFeel() = default;
++
++nsLookAndFeel::~nsLookAndFeel() = default;
++
++nsresult nsLookAndFeel::NativeGetColor(ColorID aID, ColorScheme aScheme,
++                                       nscolor &aResult) {
++  aResult = GetStandinForNativeColor(aID, aScheme);
++  return NS_OK;
++}
++
++nsresult nsLookAndFeel::NativeGetInt(IntID aID, int32_t &aResult) {
++  nsresult res = NS_OK;
++  // These values should be portable desktop defaults; no host toolkit is
++  // consulted.
++  switch (aID) {
++  case IntID::CaretBlinkTime:
++    aResult = 567;
++    break;
++  case IntID::CaretWidth:
++    aResult = 1;
++    break;
++  case IntID::SelectTextfieldsOnKeyFocus:
++    aResult = 1;
++    break;
++  case IntID::SubmenuDelay:
++    aResult = 200;
++    break;
++  case IntID::MenusCanOverlapOSBar:
++    aResult = 0;
++    break;
++  case IntID::UseOverlayScrollbars:
++    aResult = 0;
++    break;
++  case IntID::AllowOverlayScrollbarsOverlap:
++    aResult = 0;
++    break;
++  case IntID::SkipNavigatingDisabledMenuItem:
++    aResult = 1;
++    break;
++  case IntID::DragThresholdX:
++  case IntID::DragThresholdY:
++    aResult = 4;
++    break;
++  case IntID::UseAccessibilityTheme:
++    aResult = 0;
++    break;
++  case IntID::ScrollArrowStyle:
++    aResult = eScrollArrow_None;
++    break;
++  case IntID::ScrollButtonLeftMouseButtonAction:
++    aResult = 0;
++    return NS_OK;
++  case IntID::ScrollButtonMiddleMouseButtonAction:
++    aResult = 3;
++    return NS_OK;
++  case IntID::ScrollButtonRightMouseButtonAction:
++    aResult = 3;
++    return NS_OK;
++  case IntID::TreeOpenDelay:
++    aResult = 1000;
++    break;
++  case IntID::TreeCloseDelay:
++    aResult = 1000;
++    break;
++  case IntID::TreeLazyScrollDelay:
++    aResult = 150;
++    break;
++  case IntID::TreeScrollDelay:
++    aResult = 100;
++    break;
++  case IntID::TreeScrollLinesMax:
++    aResult = 3;
++    break;
++  case IntID::ChosenMenuItemsShouldBlink:
++    aResult = 1;
++    break;
++  case IntID::WindowsAccentColorInTitlebar:
++    aResult = 0;
++    res = NS_ERROR_NOT_IMPLEMENTED;
++    break;
++  case IntID::AlertNotificationOrigin:
++    aResult = NS_ALERT_TOP;
++    break;
++  case IntID::ScrollToClick:
++    aResult = 0;
++    break;
++  case IntID::IMERawInputUnderlineStyle:
++  case IntID::IMESelectedRawTextUnderlineStyle:
++  case IntID::IMEConvertedTextUnderlineStyle:
++  case IntID::IMESelectedConvertedTextUnderline:
++    aResult = static_cast<int32_t>(StyleTextDecorationStyle::Solid);
++    break;
++  case IntID::SpellCheckerUnderlineStyle:
++    aResult = static_cast<int32_t>(StyleTextDecorationStyle::Dotted);
++    break;
++  case IntID::MenuBarDrag:
++    aResult = 0;
++    break;
++  case IntID::ScrollbarButtonAutoRepeatBehavior:
++    aResult = 0;
++    break;
++  case IntID::SwipeAnimationEnabled:
++    aResult = 0;
++    break;
++  case IntID::ScrollbarDisplayOnMouseMove:
++    aResult = 0;
++    break;
++  case IntID::ScrollbarFadeBeginDelay:
++    aResult = 0;
++    break;
++  case IntID::ScrollbarFadeDuration:
++    aResult = 0;
++    break;
++  case IntID::ContextMenuOffsetVertical:
++    aResult = -6;
++    break;
++  case IntID::ContextMenuOffsetHorizontal:
++    aResult = 1;
++    break;
++  case IntID::GTKCSDAvailable:
++    aResult = 0;
++    break;
++  case IntID::GTKCSDMinimizeButton:
++    aResult = 0;
++    break;
++  case IntID::GTKCSDMaximizeButton:
++    aResult = 0;
++    break;
++  case IntID::GTKCSDCloseButton:
++    aResult = 1;
++    break;
++  case IntID::GTKCSDReversedPlacement:
++    aResult = 0;
++    break;
++  case IntID::SystemUsesDarkTheme:
++    aResult = 0;
++    break;
++  case IntID::PrefersReducedMotion:
++  case IntID::PrefersReducedTransparency:
++    aResult = 0;
++    break;
++  case IntID::InvertedColors:
++    aResult = 0;
++    break;
++  case IntID::PrimaryPointerCapabilities:
++    aResult = 0;
++    break;
++  case IntID::AllPointerCapabilities:
++    aResult = 0;
++    break;
++  default:
++    aResult = 0;
++    res = NS_ERROR_FAILURE;
++    break;
++  }
++  return res;
++}
++
++nsresult nsLookAndFeel::NativeGetFloat(FloatID aID, float &aResult) {
++  nsresult res = NS_OK;
++
++  // Hardcoded values for GTK.
++  switch (aID) {
++  case FloatID::IMEUnderlineRelativeSize:
++    aResult = 1.0f;
++    break;
++  case FloatID::SpellCheckerUnderlineRelativeSize:
++    aResult = 1.0f;
++    break;
++  case FloatID::CaretAspectRatio:
++    // Intentionally failing to quietly indicate lack of support.
++    aResult = -1.0;
++    res = NS_ERROR_FAILURE;
++    break;
++  default:
++    aResult = -1.0;
++    res = NS_ERROR_FAILURE;
++    break;
++  }
++
++  return res;
++}
++
++bool nsLookAndFeel::NativeGetFont(FontID aID, nsString &aFontName,
++                                  gfxFontStyle &aFontStyle) {
++  // Default to san-serif for everything.
++  aFontStyle.style = FontSlantStyle::NORMAL;
++  aFontStyle.weight = FontWeight::NORMAL;
++  aFontStyle.width = FontWidth::NORMAL;
++  aFontStyle.size = 14;
++  aFontStyle.systemFont = true;
++
++  aFontName.AssignLiteral("sans-serif");
++  return true;
++}
++
++char16_t nsLookAndFeel::GetPasswordCharacterImpl() { return UNICODE_BULLET; }
+--- /dev/null
++++ b/widget/alix/nsLookAndFeel.h
+@@ -0,0 +1,18 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++#ifndef widget_alix_nsLookAndFeel_h
++#define widget_alix_nsLookAndFeel_h
++#include "nsXPLookAndFeel.h"
++class nsLookAndFeel final : public nsXPLookAndFeel {
++public:
++  nsLookAndFeel();
++  ~nsLookAndFeel() override;
++  void NativeInit() override {}
++  nsresult NativeGetInt(IntID, int32_t &) override;
++  nsresult NativeGetFloat(FloatID, float &) override;
++  nsresult NativeGetColor(ColorID, ColorScheme, nscolor &) override;
++  bool NativeGetFont(FontID, nsString &, gfxFontStyle &) override;
++  char16_t GetPasswordCharacterImpl() override;
++};
++#endif
+--- /dev/null
++++ b/widget/alix/nsNativeThemeAlix.cpp
+@@ -0,0 +1,9 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++#include "mozilla/widget/Theme.h"
++using namespace mozilla;
++using namespace mozilla::widget;
++already_AddRefed<Theme> do_CreateNativeThemeDoNotUseDirectly() {
++  return do_AddRef(new Theme(Theme::ScrollbarStyle()));
++}
+--- /dev/null
++++ b/widget/alix/nsWidgetFactory.cpp
+@@ -0,0 +1,27 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++#include "HeadlessClipboard.h"
++#include "mozilla/Components.h"
++#include "mozilla/ModuleUtils.h"
++#include "mozilla/WidgetUtils.h"
++#include "nsAppShell.h"
++#include "nsAppShellSingleton.h"
++#include "nsCOMPtr.h"
++#include "nsLookAndFeel.h"
++using namespace mozilla;
++using namespace mozilla::widget;
++
++// Gecko's portable parent-process clipboard owns all transferred data. Content
++// processes use the ordinary IPC clipboard proxy. An OS clipboard bridge is
++// still required for sharing clipboard ownership with independent Alix apps.
++NS_IMPL_COMPONENT_FACTORY(nsIClipboard) {
++  nsCOMPtr<nsIClipboard> instance = new HeadlessClipboard();
++  return instance.forget();
++}
++void nsWidgetAlixModuleCtor() { nsAppShellInit(); }
++void nsWidgetAlixModuleDtor() {
++  WidgetUtils::Shutdown();
++  nsLookAndFeel::Shutdown();
++  nsAppShellShutdown();
++}
+--- /dev/null
++++ b/widget/alix/nsWidgetFactory.h
+@@ -0,0 +1,11 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++#ifndef widget_alix_nsWidgetFactory_h
++#define widget_alix_nsWidgetFactory_h
++#include "nsID.h"
++#include "nscore.h"
++nsresult nsAppShellConstructor(const nsIID &, void **);
++void nsWidgetAlixModuleCtor();
++void nsWidgetAlixModuleDtor();
++#endif
+--- /dev/null
++++ b/widget/alix/nsWindow.cpp
+@@ -0,0 +1,593 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++#include "nsWindow.h"
++#include "gfxPlatform.h"
++#include "mozilla/ClearOnShutdown.h"
++#include "mozilla/MouseEvents.h"
++#include "mozilla/TextEventDispatcher.h"
++#include "mozilla/TextEvents.h"
++#include "mozilla/UniquePtrExtensions.h"
++#include "mozilla/WidgetUtils.h"
++#include "mozilla/gfx/2D.h"
++#include "mozilla/widget/PlatformWidgetTypes.h"
++#include "nsIRollupListener.h"
++#include "nsIWidgetListener.h"
++#include "nsString.h"
++#include "nsThreadUtils.h"
++#include <algorithm>
++#include <errno.h>
++#include <string.h>
++#include <usyscall.h>
++
++using namespace mozilla;
++using namespace mozilla::gfx;
++using namespace mozilla::widget;
++
++StaticAutoPtr<nsTArray<nsWindow *>> nsWindow::sWindows;
++already_AddRefed<nsIWidget> nsIWidget::CreateTopLevelWindow() {
++  if (gfxPlatform::IsHeadless())
++    return CreateHeadlessWidget();
++  RefPtr<nsIWidget> window = new nsWindow();
++  return window.forget();
++}
++already_AddRefed<nsIWidget> nsIWidget::CreateChildWindow() {
++  if (gfxPlatform::IsHeadless())
++    return CreateHeadlessWidget();
++  RefPtr<nsIWidget> window = new nsWindow();
++  return window.forget();
++}
++void nsWindow::GetCompositorWidgetInitData(CompositorWidgetInitData *output) {
++  *output = AlixCompositorWidgetInitData(GetClientSize());
++}
++TextEventDispatcherListener *nsWindow::GetNativeTextEventDispatcherListener() {
++  if (!mTextInput)
++    mTextInput = new AlixTextInput();
++  return mTextInput;
++}
++nsWindow::nsWindow() = default;
++nsWindow::~nsWindow() { DestroyImpl(); }
++
++bool nsWindow::Control(uint32_t operation) {
++  mControl.version = USER_ATK_CONTROL_VERSION;
++  mControl.size = sizeof(mControl);
++  mControl.reserved = 0;
++  return sys_ui_control(mHandle, operation, &mControl) == 0;
++}
++nsresult nsWindow::Create(nsIWidget *parent, const LayoutDeviceIntRect &rect,
++                          const InitData &data) {
++  MOZ_ASSERT(NS_IsMainThread());
++  if (mHandle || mDestroyed || rect.Width() < 0 || rect.Height() < 0)
++    return NS_ERROR_INVALID_ARG;
++  BaseCreate(parent, data);
++  mDescription.width = std::max(1, rect.Width());
++  mDescription.height = std::max(1, rect.Height());
++  mDescription.flags =
++      USER_ATK_WINDOW_FLAG_HIDDEN | USER_ATK_WINDOW_FLAG_RAW_KEYS;
++  if (data.mWindowType == WindowType::TopLevel ||
++      data.mWindowType == WindowType::Dialog)
++    mDescription.flags |= USER_ATK_WINDOW_FLAG_RESIZABLE;
++  if (data.mWindowType == WindowType::Popup ||
++      data.mWindowType == WindowType::Invisible ||
++      data.mBorderStyle == BorderStyle::None)
++    mDescription.flags |= USER_ATK_WINDOW_FLAG_BORDERLESS;
++  int handle = sys_ui_create(&mDescription);
++  if (handle <= 0) {
++    ClearParent();
++    return NS_ERROR_FAILURE;
++  }
++  mHandle = static_cast<uint32_t>(handle);
++  auto initial = rect;
++  if (parent && data.mWindowType == WindowType::Popup)
++    initial.MoveBy(parent->WidgetToScreenOffset());
++  if (!SetBounds(initial)) {
++    sys_ui_close(mHandle);
++    mHandle = 0;
++    mTextInput = nullptr;
++    ClearParent();
++    return NS_ERROR_FAILURE;
++  }
++  mRestoreBounds = GetBounds();
++  if (!sWindows) {
++    sWindows = new nsTArray<nsWindow *>();
++    ClearOnShutdown(&sWindows);
++  }
++  sWindows->AppendElement(this);
++  return NS_OK;
++}
++void nsWindow::Destroy() {
++  RefPtr<nsWindow> hold(this);
++  DestroyImpl();
++}
++void nsWindow::DestroyImpl() {
++  MOZ_ASSERT(NS_IsMainThread());
++  if (mDestroyed)
++    return;
++  mDestroyed = true;
++  if (sWindows)
++    sWindows->RemoveElement(this);
++  // Quiesce compositor work before closing the native channel or freeing its
++  // target. No surface mutex is held while Gecko joins/stops the compositor.
++  nsTArray<RefPtr<nsIWidget>> children;
++  for (auto *child = GetFirstChild(); child; child = child->GetNextSibling())
++    children.AppendElement(child);
++  for (const auto &child : children)
++    child->Destroy();
++  DestroyLayerManager();
++  nsIWidget::OnDestroy();
++  nsIWidget::Destroy();
++  MutexAutoLock lock(mSurfaceMutex);
++  if (mHandle)
++    sys_ui_close(mHandle);
++  mHandle = 0;
++  mVisible = false;
++  mDrawTarget = nullptr;
++  mUpload = nullptr;
++  mUploadCapacity = 0;
++}
++LayoutDeviceIntRect nsWindow::GetBounds() {
++  MutexAutoLock lock(mGeometryMutex);
++  return mBounds;
++}
++LayoutDeviceIntPoint nsWindow::WidgetToScreenOffset() {
++  return GetBounds().TopLeft();
++}
++void nsWindow::AcceptBounds() {
++  LayoutDeviceIntRect next(mControl.x, mControl.y, mControl.width,
++                           mControl.height);
++  LayoutDeviceIntRect old;
++  {
++    MutexAutoLock lock(mGeometryMutex);
++    old = mBounds;
++    mBounds = next;
++  }
++  if (old.Size() != next.Size())
++    mDrawTarget = nullptr;
++  // Notifications run on the main thread, after the native transaction and
++  // surface lock have completed. PumpNativeEvents also reconciles WM changes.
++}
++bool nsWindow::SetBounds(const LayoutDeviceIntRect &bounds) {
++  RefPtr<nsWindow> hold(this);
++  MOZ_ASSERT(NS_IsMainThread());
++  auto old = GetBounds();
++  {
++    MutexAutoLock lock(mSurfaceMutex);
++    mControl.x = bounds.X();
++    mControl.y = bounds.Y();
++    mControl.width = std::max(1, bounds.Width());
++    mControl.height = std::max(1, bounds.Height());
++    if (!Control(USER_ATK_CONTROL_BOUNDS))
++      return false;
++    AcceptBounds();
++  }
++  NotifyBoundsChanged(old);
++  return true;
++}
++void nsWindow::Show(bool visible) {
++  MOZ_ASSERT(NS_IsMainThread());
++  if (mDestroyed || !mHandle)
++    return;
++  mControl.flags = visible ? 1 : 0;
++  if (Control(USER_ATK_CONTROL_VISIBLE)) {
++    mVisible = visible;
++    if (visible) {
++      RefPtr<nsWindow> hold(this);
++      if (mWindowType == WindowType::TopLevel ||
++          mWindowType == WindowType::Dialog)
++        SetFocus(Raise::Yes, mozilla::dom::CallerType::System);
++      Invalidate(GetBounds());
++    }
++  }
++}
++void nsWindow::SetFocus(Raise, mozilla::dom::CallerType) {
++  MOZ_ASSERT(NS_IsMainThread());
++  if (!mDestroyed && mHandle && mVisible && mEnabled)
++    Control(USER_ATK_CONTROL_FOCUS);
++}
++void nsWindow::Move(const DesktopPoint &point) {
++  RefPtr<nsWindow> hold(this);
++  auto position =
++      LayoutDeviceIntPoint::Round(point * GetDesktopToDeviceScale());
++  auto bounds = GetBounds();
++  bounds.MoveTo(position);
++  SetBounds(bounds);
++}
++void nsWindow::Resize(const DesktopSize &size, bool repaint) {
++  RefPtr<nsWindow> hold(this);
++  auto dimensions =
++      LayoutDeviceIntSize::Round(size * GetDesktopToDeviceScale());
++  auto bounds = GetBounds();
++  bounds.SizeTo(dimensions);
++  SetBounds(bounds);
++  if (repaint)
++    Invalidate(bounds);
++}
++void nsWindow::Resize(const DesktopRect &rect, bool repaint) {
++  RefPtr<nsWindow> hold(this);
++  auto bounds = RoundedToInt(rect * GetDesktopToDeviceScale());
++  SetBounds(bounds);
++  if (repaint)
++    Invalidate(bounds);
++}
++void nsWindow::SetSizeMode(nsSizeMode mode) {
++  RefPtr<nsWindow> hold(this);
++  if (mDestroyed || mSizeMode == mode)
++    return;
++  if (mode == nsSizeMode_Minimized)
++    Show(false);
++  else {
++    if (mSizeMode == nsSizeMode_Normal)
++      mRestoreBounds = GetBounds();
++    if (mode == nsSizeMode_Normal)
++      SetBounds(mRestoreBounds);
++    else if (Control(USER_ATK_CONTROL_QUERY))
++      SetBounds(LayoutDeviceIntRect(0, 0, mControl.screen_width,
++                                    mControl.screen_height));
++    Show(true);
++  }
++  mSizeMode = mode;
++  if (mWidgetListener)
++    mWidgetListener->SizeModeChanged(mode);
++}
++nsresult nsWindow::MakeFullScreen(bool fullscreen) {
++  RefPtr<nsWindow> hold(this);
++  if (mDestroyed)
++    return NS_ERROR_FAILURE;
++  if (mFullscreen == fullscreen)
++    return NS_OK;
++  if (fullscreen)
++    mRestoreBounds = GetBounds();
++  {
++    MutexAutoLock lock(mSurfaceMutex);
++    mControl.flags =
++        fullscreen ? 0
++                   : !(mDescription.flags & USER_ATK_WINDOW_FLAG_BORDERLESS);
++    if (!Control(USER_ATK_CONTROL_CHROME))
++      return NS_ERROR_FAILURE;
++    AcceptBounds();
++  }
++  if (fullscreen) {
++    if (!Control(USER_ATK_CONTROL_QUERY) ||
++        !SetBounds(LayoutDeviceIntRect(0, 0, mControl.screen_width,
++                                       mControl.screen_height)))
++      return NS_ERROR_FAILURE;
++  } else if (!SetBounds(mRestoreBounds))
++    return NS_ERROR_FAILURE;
++  mFullscreen = fullscreen;
++  mSizeMode = fullscreen ? nsSizeMode_Fullscreen : nsSizeMode_Normal;
++  if (mWidgetListener)
++    mWidgetListener->SizeModeChanged(mSizeMode);
++  return NS_OK;
++}
++nsresult nsWindow::SetTitle(const nsAString &title) {
++  auto utf8 = NS_ConvertUTF16toUTF8(title);
++  size_t bytes = std::min(utf8.Length(), uint32_t(sizeof(mControl.title) - 1));
++  while (bytes && bytes < utf8.Length() &&
++         (static_cast<unsigned char>(utf8[bytes]) & 0xc0) == 0x80)
++    --bytes;
++  memcpy(mControl.title, utf8.get(), bytes);
++  mControl.title[bytes] = 0;
++  return Control(USER_ATK_CONTROL_TITLE) ? NS_OK : NS_ERROR_FAILURE;
++}
++void *nsWindow::GetNativeData(uint32_t type) {
++  if (type == NS_NATIVE_WINDOW || type == NS_NATIVE_WIDGET)
++    return reinterpret_cast<void *>(static_cast<uintptr_t>(mHandle));
++  return nullptr;
++}
++void nsWindow::Invalidate(const LayoutDeviceIntRect &) {
++  RefPtr<nsWindow> hold(this);
++  if (mDestroyed || !mVisible)
++    return;
++  auto *listener =
++      mAttachedWidgetListener ? mAttachedWidgetListener : mWidgetListener;
++  if (listener)
++    listener->PaintWindow(this);
++}
++void nsWindow::CaptureRollupEvents(bool capture) {
++  if (mHandle &&
++      !sys_ui_capture(mHandle, capture ? USER_ATK_CAPTURE_ENABLE : 0))
++    mRollupCapture = capture;
++}
++void nsWindow::NotifyBoundsChanged(const LayoutDeviceIntRect &old) {
++  RefPtr<nsWindow> hold(this);
++  auto bounds = GetBounds();
++  if (mDestroyed)
++    return;
++  if (old.TopLeft() != bounds.TopLeft())
++    NotifyWindowMoved(bounds.TopLeft());
++  if (!mDestroyed && old.Size() != bounds.Size()) {
++    if (mWidgetListener)
++      mWidgetListener->WindowResized(this, bounds.Size());
++    if (!mDestroyed && mAttachedWidgetListener)
++      mAttachedWidgetListener->WindowResized(this, bounds.Size());
++  }
++}
++
++bool nsWindow::PreRender(WidgetRenderingContext *) {
++  mSurfaceMutex.Lock();
++  if (!mHandle) {
++    mSurfaceMutex.Unlock();
++    return false;
++  }
++  return true;
++}
++void nsWindow::PostRender(WidgetRenderingContext *) { mSurfaceMutex.Unlock(); }
++already_AddRefed<DrawTarget> nsWindow::StartRemoteDrawing() {
++  auto size = GetBounds().Size().ToUnknownSize();
++  if (size.IsEmpty())
++    return nullptr;
++  if (!mDrawTarget || mDrawTarget->GetSize() != size)
++    mDrawTarget = Factory::CreateDrawTarget(BackendType::SKIA, size,
++                                            SurfaceFormat::B8G8R8X8);
++  return do_AddRef(mDrawTarget);
++}
++void nsWindow::EndRemoteDrawing() {
++  if (!mDrawTarget || !mHandle)
++    return;
++  RefPtr<SourceSurface> snapshot = mDrawTarget->Snapshot();
++  RefPtr<DataSourceSurface> data =
++      snapshot ? snapshot->GetDataSurface() : nullptr;
++  if (!data)
++    return;
++  auto mapping =
++      MakeUnique<DataSourceSurface::ScopedMap>(data, DataSourceSurface::READ);
++  if (!mapping->IsMapped())
++    return;
++  auto size = data->GetSize();
++  if (size.width <= 0 || size.height <= 0 || size.width > 16384 ||
++      size.height > 16384)
++    return;
++  size_t count = size_t(size.width) * size.height;
++  if (mUploadCapacity < count) {
++    auto replacement = MakeUniqueFallible<uint32_t[]>(count);
++    if (!replacement)
++      return;
++    mUpload = std::move(replacement);
++    mUploadCapacity = count;
++  }
++  for (int row = 0; row < size.height; ++row) {
++    auto *source = reinterpret_cast<const uint32_t *>(
++        mapping->GetData() + row * mapping->GetStride());
++    for (int col = 0; col < size.width; ++col)
++      mUpload[size_t(row) * size.width + col] = source[col] | 0xff000000u;
++  }
++  sys_ui_present(mHandle, mUpload.get(), count * sizeof(uint32_t));
++}
++void nsWindow::CleanupRemoteDrawing() {
++  MutexAutoLock lock(mSurfaceMutex);
++  mDrawTarget = nullptr;
++  mUpload = nullptr;
++  mUploadCapacity = 0;
++}
++void nsWindow::DispatchMouse(const user_atk_event_t &native) {
++  auto bounds = GetBounds();
++  if (mRollupCapture &&
++      (native.flags &
++       (USER_ATK_MOUSE_FLAG_PRESS | USER_ATK_MOUSE_FLAG_RIGHT_PRESS)) &&
++      (native.x < 0 || native.y < 0 || native.x >= bounds.Width() ||
++       native.y >= bounds.Height())) {
++    if (auto *listener = GetActiveRollupListener())
++      listener->Rollup({});
++    return;
++  }
++  auto send = [&](EventMessage message, MouseButton button) {
++    WidgetMouseEvent event(true, message, this, WidgetMouseEvent::eReal);
++    event.mRefPoint = LayoutDeviceIntPoint(native.x, native.y);
++    event.mModifiers = mModifiers;
++    event.mButton = button;
++    event.mButtons = ((native.flags & USER_ATK_MOUSE_FLAG_LEFT)
++                          ? MouseButtonsFlag::ePrimaryFlag
++                          : MouseButtonsFlag::eNoButtons) |
++                     ((native.flags & USER_ATK_MOUSE_FLAG_RIGHT)
++                          ? MouseButtonsFlag::eSecondaryFlag
++                          : MouseButtonsFlag::eNoButtons);
++    if (message == eMouseDown || message == eMouseUp)
++      event.mClickCount = 1;
++    event.AssignEventTime(WidgetEventTime());
++    DispatchInputEvent(&event);
++  };
++  if (native.flags & USER_ATK_MOUSE_FLAG_PRESS)
++    send(eMouseDown, MouseButton::ePrimary);
++  if (!mDestroyed && (native.flags & USER_ATK_MOUSE_FLAG_RELEASE))
++    send(eMouseUp, MouseButton::ePrimary);
++  if (!mDestroyed && (native.flags & USER_ATK_MOUSE_FLAG_RIGHT_PRESS))
++    send(eMouseDown, MouseButton::eSecondary);
++  if (!mDestroyed && (native.flags & USER_ATK_MOUSE_FLAG_RIGHT_RELEASE))
++    send(eMouseUp, MouseButton::eSecondary);
++  if (!mDestroyed &&
++      !(native.flags &
++        (USER_ATK_MOUSE_FLAG_PRESS | USER_ATK_MOUSE_FLAG_RELEASE |
++         USER_ATK_MOUSE_FLAG_RIGHT_PRESS | USER_ATK_MOUSE_FLAG_RIGHT_RELEASE)))
++    send(eMouseMove, MouseButton::eNotPressed);
++}
++void nsWindow::DispatchKey(const user_atk_event_t &native) {
++  uint32_t code = native.data1 & 0x7f;
++  bool released = native.flags & USER_ATK_KEY_FLAG_RELEASE;
++  unsigned index =
++      code + ((native.flags & USER_ATK_KEY_FLAG_EXTENDED) ? 128 : 0);
++  mPressed[index] = !released;
++  if (code == 0x3a && !released && !(native.flags & USER_ATK_KEY_FLAG_REPEAT))
++    mCapsLock = !mCapsLock;
++  mModifiers = (mPressed[0x2a] || mPressed[0x36] ? MODIFIER_SHIFT : 0) |
++               (mPressed[0x1d] || mPressed[0x9d] ? MODIFIER_CONTROL : 0) |
++               (mPressed[0x38] || mPressed[0xb8] ? MODIFIER_ALT : 0) |
++               (mPressed[0xdb] || mPressed[0xdc] ? MODIFIER_META : 0) |
++               (mCapsLock ? MODIFIER_CAPSLOCK : 0);
++  bool modifier = code == 0x2a || code == 0x36 || code == 0x1d ||
++                  code == 0x38 || code == 0x5b || code == 0x5c || code == 0x3a;
++  WidgetKeyboardEvent event(true, released ? eKeyUp : eKeyDown, this);
++  event.mModifiers = mModifiers;
++  event.mIsRepeat = native.flags & USER_ATK_KEY_FLAG_REPEAT;
++  char16_t value = released ? mKeyValues[index] : char16_t(native.data0);
++  if (!released && (mModifiers & MODIFIER_CONTROL) && value >= 1 && value <= 26)
++    value += u'a' - 1;
++  if (!released)
++    mKeyValues[index] = value;
++  else
++    mKeyValues[index] = 0;
++  event.mKeyNameIndex =
++      value ? KEY_NAME_INDEX_USE_STRING : KEY_NAME_INDEX_Unidentified;
++  if (value)
++    event.mKeyValue.Assign(value);
++  if (value >= u'a' && value <= u'z')
++    event.mKeyCode = value - u'a' + NS_VK_A;
++  else if ((value >= u'A' && value <= u'Z') || (value >= u'0' && value <= u'9'))
++    event.mKeyCode = value;
++  if ((code >= 0x3b && code <= 0x44) || code == 0x57 || code == 0x58) {
++    unsigned function = code <= 0x44 ? code - 0x3b : code - 0x57 + 10;
++    event.mKeyNameIndex =
++        static_cast<KeyNameIndex>(KEY_NAME_INDEX_F1 + function);
++    event.mKeyCode = NS_VK_F1 + function;
++  }
++  switch (code) {
++  case 0x47:
++    event.mKeyNameIndex = KEY_NAME_INDEX_Home;
++    event.mKeyCode = NS_VK_HOME;
++    break;
++  case 0x4f:
++    event.mKeyNameIndex = KEY_NAME_INDEX_End;
++    event.mKeyCode = NS_VK_END;
++    break;
++  case 0x49:
++    event.mKeyNameIndex = KEY_NAME_INDEX_PageUp;
++    event.mKeyCode = NS_VK_PAGE_UP;
++    break;
++  case 0x51:
++    event.mKeyNameIndex = KEY_NAME_INDEX_PageDown;
++    event.mKeyCode = NS_VK_PAGE_DOWN;
++    break;
++  case 0x52:
++    event.mKeyNameIndex = KEY_NAME_INDEX_Insert;
++    event.mKeyCode = NS_VK_INSERT;
++    break;
++  case 0x53:
++    event.mKeyNameIndex = KEY_NAME_INDEX_Delete;
++    event.mKeyCode = NS_VK_DELETE;
++    break;
++  case 0x2a:
++  case 0x36:
++    event.mKeyNameIndex = KEY_NAME_INDEX_Shift;
++    event.mKeyCode = NS_VK_SHIFT;
++    break;
++  case 0x1d:
++    event.mKeyNameIndex = KEY_NAME_INDEX_Control;
++    event.mKeyCode = NS_VK_CONTROL;
++    break;
++  case 0x38:
++    event.mKeyNameIndex = KEY_NAME_INDEX_Alt;
++    event.mKeyCode = NS_VK_ALT;
++    break;
++  case 0x5b:
++  case 0x5c:
++    event.mKeyNameIndex = KEY_NAME_INDEX_Meta;
++    event.mKeyCode = NS_VK_META;
++    break;
++  case 0x3a:
++    event.mKeyNameIndex = KEY_NAME_INDEX_CapsLock;
++    event.mKeyCode = NS_VK_CAPS_LOCK;
++    break;
++  case 0x01:
++    event.mKeyNameIndex = KEY_NAME_INDEX_Escape;
++    event.mKeyCode = NS_VK_ESCAPE;
++    break;
++  case 0x0e:
++    event.mKeyNameIndex = KEY_NAME_INDEX_Backspace;
++    event.mKeyCode = NS_VK_BACK;
++    break;
++  case 0x0f:
++    event.mKeyNameIndex = KEY_NAME_INDEX_Tab;
++    event.mKeyCode = NS_VK_TAB;
++    break;
++  case 0x1c:
++    event.mKeyNameIndex = KEY_NAME_INDEX_Enter;
++    event.mKeyCode = NS_VK_RETURN;
++    break;
++  case 0x48:
++    event.mKeyNameIndex = KEY_NAME_INDEX_ArrowUp;
++    event.mKeyCode = NS_VK_UP;
++    break;
++  case 0x50:
++    event.mKeyNameIndex = KEY_NAME_INDEX_ArrowDown;
++    event.mKeyCode = NS_VK_DOWN;
++    break;
++  case 0x4b:
++    event.mKeyNameIndex = KEY_NAME_INDEX_ArrowLeft;
++    event.mKeyCode = NS_VK_LEFT;
++    break;
++  case 0x4d:
++    event.mKeyNameIndex = KEY_NAME_INDEX_ArrowRight;
++    event.mKeyCode = NS_VK_RIGHT;
++    break;
++  }
++  event.AssignEventTime(WidgetEventTime());
++  RefPtr<TextEventDispatcherListener> listener =
++      GetNativeTextEventDispatcherListener();
++  RefPtr<TextEventDispatcher> dispatcher = GetTextEventDispatcher();
++  if (NS_FAILED(dispatcher->BeginNativeInputTransaction()))
++    return;
++  nsEventStatus status = nsEventStatus_eIgnore;
++  dispatcher->DispatchKeyboardEvent(released ? eKeyUp : eKeyDown, event,
++                                    status);
++  if (!released && !mDestroyed && !modifier)
++    dispatcher->MaybeDispatchKeypressEvents(event, status);
++}
++void nsWindow::DispatchNativeEvent(const user_atk_event_t &native) {
++  if (native.type == USER_ATK_EVENT_CLOSE) {
++    if (mWidgetListener)
++      mWidgetListener->RequestWindowClose(this);
++    return;
++  }
++  if (native.type == USER_ATK_EVENT_FOCUS) {
++    if (!native.data0) {
++      mModifiers = 0;
++      memset(mPressed, 0, sizeof(mPressed));
++      memset(mKeyValues, 0, sizeof(mKeyValues));
++    }
++    if (mWidgetListener) {
++      if (native.data0)
++        mWidgetListener->WindowActivated();
++      else
++        mWidgetListener->WindowDeactivated();
++    }
++    return;
++  }
++  if (native.type == USER_ATK_EVENT_RESIZE ||
++      native.type == USER_ATK_EVENT_MOVE) {
++    auto old = GetBounds();
++    {
++      MutexAutoLock lock(mSurfaceMutex);
++      if (Control(USER_ATK_CONTROL_QUERY))
++        AcceptBounds();
++    }
++    NotifyBoundsChanged(old);
++    return;
++  }
++  if (!mEnabled)
++    return;
++  if (native.type == USER_ATK_EVENT_KEY)
++    DispatchKey(native);
++  if (native.type == USER_ATK_EVENT_MOUSE)
++    DispatchMouse(native);
++}
++bool nsWindow::PumpNativeEvents() {
++  MOZ_ASSERT(NS_IsMainThread());
++  if (!sWindows)
++    return false;
++  nsTArray<RefPtr<nsWindow>> snapshot;
++  for (auto *window : *sWindows)
++    snapshot.AppendElement(window);
++  bool processed = false;
++  for (const auto &window : snapshot) {
++    for (unsigned count = 0;
++         count < 64 && !window->mDestroyed && window->mHandle; ++count) {
++      if (sys_ui_poll_event(window->mHandle, &window->mEvent, 0) <= 0)
++        break;
++      processed = true;
++      // Dispatch may spin a nested native loop and overwrite mEvent. Each
++      // invocation owns an immutable heap snapshot through all callbacks.
++      auto event = MakeUnique<user_atk_event_t>(window->mEvent);
++      window->DispatchNativeEvent(*event);
++    }
++  }
++  return processed;
++}
+--- /dev/null
++++ b/widget/alix/nsWindow.h
+@@ -0,0 +1,92 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++#ifndef widget_alix_nsWindow_h
++#define widget_alix_nsWindow_h
++#include "AlixTextInput.h"
++#include "mozilla/Atomics.h"
++#include "mozilla/Mutex.h"
++#include "mozilla/StaticPtr.h"
++#include "mozilla/UniquePtr.h"
++#include "mozilla/gfx/2D.h"
++#include "nsIWidget.h"
++#include <user_atk_defs.h>
++
++class nsWindow final : public nsIWidget {
++public:
++  nsWindow();
++  NS_INLINE_DECL_REFCOUNTING_INHERITED(nsWindow, nsIWidget)
++  using nsIWidget::Create;
++  nsresult Create(nsIWidget *, const LayoutDeviceIntRect &,
++                  const InitData &) override;
++  void Destroy() override;
++  void GetCompositorWidgetInitData(
++      mozilla::widget::CompositorWidgetInitData *) override;
++  void Show(bool) override;
++  bool IsVisible() const override { return mVisible; }
++  void Enable(bool enabled) override { mEnabled = enabled; }
++  bool IsEnabled() const override { return mEnabled; }
++  void Move(const DesktopPoint &) override;
++  void Resize(const DesktopSize &, bool) override;
++  void Resize(const DesktopRect &, bool) override;
++  void SetSizeMode(nsSizeMode) override;
++  nsSizeMode SizeMode() override { return mSizeMode; }
++  nsresult MakeFullScreen(bool) override;
++  void SetFocus(Raise, mozilla::dom::CallerType) override;
++  LayoutDeviceIntRect GetBounds() override;
++  LayoutDeviceIntRect GetClientBounds() override { return GetBounds(); }
++  LayoutDeviceIntPoint WidgetToScreenOffset() override;
++  void *GetNativeData(uint32_t) override;
++  nsresult SetTitle(const nsAString &) override;
++  void Invalidate(const LayoutDeviceIntRect &) override;
++  void SetInputContext(const InputContext &context,
++                       const InputContextAction &) override {
++    mInputContext = context;
++  }
++  InputContext GetInputContext() override { return mInputContext; }
++  mozilla::widget::TextEventDispatcherListener *
++  GetNativeTextEventDispatcherListener() override;
++  bool PreRender(mozilla::widget::WidgetRenderingContext *) override;
++  void PostRender(mozilla::widget::WidgetRenderingContext *) override;
++  already_AddRefed<DrawTarget> StartRemoteDrawing() override;
++  void EndRemoteDrawing() override;
++  void CleanupRemoteDrawing() override;
++  void CaptureRollupEvents(bool) override;
++  static bool PumpNativeEvents();
++
++private:
++  ~nsWindow() override;
++  void DestroyImpl();
++  bool Control(uint32_t);
++  bool SetBounds(const LayoutDeviceIntRect &);
++  void AcceptBounds();
++  void NotifyBoundsChanged(const LayoutDeviceIntRect &);
++  void DispatchNativeEvent(const user_atk_event_t &);
++  void DispatchKey(const user_atk_event_t &);
++  void DispatchMouse(const user_atk_event_t &);
++  static mozilla::StaticAutoPtr<nsTArray<nsWindow *>> sWindows;
++  // Surface ownership extends through PreRender/PostRender. Geometry readers
++  // use a separate mutex, including compositor calls made inside a frame.
++  mozilla::Mutex mSurfaceMutex{"AlixWindowSurface"};
++  mozilla::Mutex mGeometryMutex{"AlixWindowGeometry"};
++  LayoutDeviceIntRect mBounds;
++  LayoutDeviceIntRect mRestoreBounds;
++  mozilla::Atomic<uint32_t> mHandle{0};
++  bool mVisible = false, mEnabled = true, mDestroyed = false,
++       mFullscreen = false;
++  bool mRollupCapture = false;
++  nsSizeMode mSizeMode = nsSizeMode_Normal;
++  mozilla::Modifiers mModifiers = 0;
++  bool mPressed[256]{};
++  bool mCapsLock = false;
++  char16_t mKeyValues[256]{};
++  InputContext mInputContext;
++  RefPtr<mozilla::widget::AlixTextInput> mTextInput;
++  user_atk_window_desc_t mDescription{};
++  user_atk_window_control_t mControl{};
++  user_atk_event_t mEvent{};
++  RefPtr<DrawTarget> mDrawTarget;
++  mozilla::UniquePtr<uint32_t[]> mUpload;
++  size_t mUploadCapacity = 0;
++};
++#endif

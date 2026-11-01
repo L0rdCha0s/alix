@@ -14,6 +14,7 @@
 #include "smp.h"
 #include "paging.h"
 #include "lapic.h"
+#include "ioapic.h"
 #include "arch/x86/smp_boot.h"
 #include "arch/x86/cpu.h"
 
@@ -471,6 +472,7 @@ __attribute__((interrupt)) static void irq1_handler(interrupt_frame_t *frame)
 
     }
     pic_send_eoi(1);
+    lapic_eoi();
 }
 
 __attribute__((interrupt)) static void irq0_handler(interrupt_frame_t *frame)
@@ -482,6 +484,7 @@ __attribute__((interrupt)) static void irq0_handler(interrupt_frame_t *frame)
         smp_broadcast_schedule_ipi(false);
     }
     pic_send_eoi(0);
+    lapic_eoi();
 }
 
 __attribute__((interrupt)) static void irq10_handler(interrupt_frame_t *frame)
@@ -513,6 +516,7 @@ __attribute__((interrupt)) static void irq12_handler(interrupt_frame_t *frame)
     if ((status & 0x20) == 0)
     {
         pic_send_eoi(12);
+        lapic_eoi();
         irq12_log_count++;
         return;
     }
@@ -527,6 +531,7 @@ __attribute__((interrupt)) static void irq12_handler(interrupt_frame_t *frame)
     }
     mouse_on_irq(data);
     pic_send_eoi(12);
+    lapic_eoi();
     irq12_log_count++;
 }
 
@@ -661,6 +666,11 @@ __attribute__((interrupt)) static void smp_tlb_flush_ipi_handler(interrupt_frame
     lapic_eoi();
 }
 
+__attribute__((interrupt)) static void lapic_spurious_handler(interrupt_frame_t *frame)
+{
+    (void)frame; /* A spurious LAPIC interrupt must not send EOI. */
+}
+
 void interrupts_init(void)
 {
     idt_init();
@@ -689,15 +699,19 @@ void interrupts_init(void)
     idt_set_gate(47, (void *)irq15_handler);
     idt_set_gate(SMP_SCHEDULE_IPI_VECTOR, (void *)smp_schedule_ipi_handler);
     idt_set_gate(SMP_TLB_FLUSH_IPI_VECTOR, (void *)smp_tlb_flush_ipi_handler);
+    idt_set_gate(0xff, (void *)lapic_spurious_handler);
     /* Syscalls should not mask interrupts; use a trap gate. */
     idt_set_trap_gate_dpl(0x80, syscall_entry, 3);
     idt_load();
     pic_remap();
     pic_set_masks();
+    ioapic_init();
 }
 
 void interrupts_enable_irq(uint8_t irq)
 {
+    if (irq >= INTERRUPTS_IRQ_COUNT) return;
+    if (ioapic_enable_isa_irq(irq)) return;
     static int log_count = 0;
     if (irq < 8)
     {

@@ -18,6 +18,13 @@ make zen-js-build
 python3 tests/spidermonkey_qemu_test.py --extended
 make zen-gecko-configure
 make zen-gecko-build
+make zen-posix-runtime-qemu-test zen-fd-stream-qemu-test
+make zen-rust-libc-ffi-qemu-test zen-executable-path-qemu-test
+make zen-netdb-qemu-test
+make zen-gecko-os-interfaces-qemu-test
+make zen-select-qemu-test
+make zen-cxx-random-qemu-test
+make zen-filesystem-primitives-qemu-test
 ```
 
 The source-acquisition commands precede patching. Once the source contains Alix
@@ -119,6 +126,10 @@ installation prefix. It does not replace the machine's tools.
 The selected immutable native Rust std snapshot contributes an unused cfg flag
 to Cargo's input fingerprint, forcing target crates to rebuild after a sysroot
 update. It does not change an engine feature or fabricate a configure result.
+Verified Rust port source digests contribute a separate cfg fingerprint. Cargo
+otherwise treats vendored registry sources as immutable and can reuse the old
+empty libc artifact after native bindings have changed. The fingerprint update
+forces real recompilation while preserving previous cache artifacts.
 Native header, object, archive and driver contents also fingerprint Mozilla's
 compiler-probe cache. When those inputs change, the old `configure.cache` is
 archived under project-specific `upstream/alix-toolchain/configure-cache-{js,browser}/configure-cache-history/` and configure
@@ -178,13 +189,89 @@ suite, `os.spawn` command execution or Wasm subprocess serialization.
 separate from standalone SpiderMonkey; native headers/libraries and target
 identity remain the same. Browser configuration does not pass the JS-only
 `--disable-shared-js` option. `ZEN_GECKO_KEEP_GOING=1` selects the upstream
-keep-going build mode. Normal `make` remains independent of upstream builds.
+keep-going build mode. `ZEN_GECKO_JOBS` controls parallel compilation (default
+two). Normal `make` remains independent of upstream builds.
 
-The first native browser configure now passes the toolkit-selection gate and
-reaches an inherited generic Unix requirement for `libpulse`. Alix needs a
-native cubeb audio backend using its actual audio API. The GUI/window backend
-is also unfinished; declaring a toolkit name does not implement it. The full
-browser configure has not completed, and Gecko/Zen have not run.
+The native browser configure passes toolkit/audio selection, the WASI sandbox
+compiler/header/link probes and NSPR target selection. It now completes with `MOZ_WIDGET_ALIX` and the tracked native widget backend.
+The browser build now passes the earlier executable-path, `putenv` and LLVM
+file-stream compilation errors. The native Rust libc branch recompiles with its
+new Cargo fingerprint; C/Rust ABI and file operations have separate guest proof.
+Complete POSIX socket integration and further native platform dispatch remain build gaps.
+The initial headers and outbound IPv4 TCP socket calls now pass a separate
+eight-CPU guest test (`make zen-socket-qemu-test`), including 128 KiB transfer,
+atomic flags, peek, per-call nonblocking and safe-copy checks. Native endpoint
+and supported option queries also pass, including packet-matched addresses and
+single-consumer SO_ERROR transactions after failed copyout. The actual vendored
+Rust libc passes native socket ABI checks. Additional options, local IPC and UDP
+still need implementation.
+IPv4 DNS/netdb now passes a separate eight-CPU guest test with a controlled UDP
+resolver: multiple records, CNAME follow-up, negative/malformed replies,
+thread-local/reentrant results, resolved TCP transfers and killed-caller
+cleanup. The actual Rust libc address-lookup ABI and NSPR's public networking
+header also pass targeted checks. Default external DNS, full NSPR/NSS and the
+complete browser remain unverified; see
+[`docs/kernel/resolver.md`](../../docs/kernel/resolver.md).
+The seventh complete diagnostic pass clears the missing netdb/select headers
+and reaches Rust style compilation. It still fails after 21:14 on remaining
+native platform interfaces. Native `fsync`,
+physical-page `sysconf` queries and checked `MADV_WILLNEED` now pass eight-CPU
+execution. The fsync fixture remounts a private disk in a second boot and reads
+all 64 KiB plus metadata; it also caught and fixed AlixFS leaking the former
+mount-point name into the new mount. Gecko's actual MemUtils and ggml-cpu objects
+now compile. Dynamic loading, remaining NSPR definitions, local IPC/shared memory
+and remaining Rust platform branches still block the complete browser build.
+Native select now passes eight-CPU descriptor/TCP, signal, safe-copy,
+close/reuse and killed-caller tests, plus real vendored Rust ABI/call checks.
+NSPR uses the native descriptor-set header and implemented reentrant host and
+protocol queries; its actual prnetdb.c compiles. The native style pthread header
+fix also allows the complete nsDeviceContext.cpp source to compile. These are
+individual translation-unit checks, not a complete NSPR/Gecko library link.
+LLVM's actual random_device is now enabled with the native getentropy backend.
+It passes eight-CPU diversity, descriptor exhaustion and real failure-path
+tests. The complete existing libc++/libc++abi guest regression remains green,
+and the actual llama-sampler.cpp source compiles. Native Rust pthread ownership
+and handle extensions now pass eight-CPU identity/name/stack, consuming join,
+detach and TLS checks. Gecko's actual Rust root build emits a fresh native style
+library after selecting that API. Other root crate/platform errors still stop
+the full Rust edge; the browser remains unbuilt.
+Native ftruncate, realpath and directory-only rmdir now pass eight-CPU and
+Rust libc ABI tests. The resized-file zero-fill survives an independent AlixFS
+remount. NSPR's actual uxshm.c compiles, but file/shared mappings and the full
+Rust filesystem backend remain unfinished.
+Bindgen now receives the same native ABI/header configuration as the compiler
+through its target-specific environment override; the actual profiler build
+script generates bindings successfully. Native `sched_yield`/`sched_getcpu`
+pass the eight-CPU C++ fixture. Gecko/Zen
+have not run; successful configuration does not prove the widget C++ code builds
+or executes.
+
+`make zen-wasi-sdk` installs the pinned, hash-checked WASI SDK 34 used by the
+browser's library sandboxes; it does not replace the native Alix target compiler.
+The installer verifies every installed tool/sysroot file before reuse.
+
+`make zen-cubeb-test` builds real upstream cubeb/Speex with the Alix mixer.
+`python3 tests/cubeb_qemu_test.py` exercises native hardware playback, rate/format
+conversion, simultaneous streams, pause/resume, drain, restart and destruction
+from a callback. It also checks a captured window for both mixed tones, their
+relative volume and frequency controls. Build/boot/ELF hashes and scope are saved
+in `build/test-out/cubeb-native-qemu.acceptance.json`. The companion
+`make zen-cubeb-profiler-test` and
+`python3 tests/cubeb_qemu_test.py --profiler-provider` verify optional static
+profiler hooks against a strong test provider. These are targeted smoke tests,
+not the complete cubeb conformance suite or full audio quality acceptance.
+
+`make zen-poll-qemu-test` verifies native private-descriptor polling. The kernel
+pins every original description in a heap-owned request. Pipes, TCP, regular
+files and imported non-TTY streams supply bounded readiness snapshots. Poll
+supports monotonic timeouts, caught-signal interruption and killed-waiter cleanup.
+The targeted acceptance receipt is `build/test-out/poll-native-qemu.acceptance.json`.
+
+For kernel regressions against the already-built SpiderMonkey shell, use
+`python3 tests/spidermonkey_qemu_test.py --extended --existing-image`. It skips
+compilation, revalidates the upstream/native ELF load and TLS images, then runs
+the existing executable and records the actual tested boot-image hashes. The
+default test still rebuilds SpiderMonkey before running.
 
 Native `posix_spawn`/`posix_spawnp` now pass environment visibility before main,
 ordered close/dup2/open actions, CLOEXEC ordering, self-dup, PATH lookup, signal
@@ -220,3 +307,58 @@ ET_EXEC, PT_TLS, no dynamic interpreter and no unresolved symbols. Its output is
 The standalone shell builds and executes JavaScript, with JIT and GC checks passing.
 Gecko and the Zen UI are later native build/runtime gates, including the VM,
 filesystem, networking and graphics interfaces demanded by their real source.
+
+## Native widget implementation
+
+`0015-native-alix-widget-backend.patch` selects the actual Alix widget directory,
+application shell, XPCOM services, screen metadata, portable Gecko control theme,
+text-event dispatcher and CPU-surface presentation. Window records, render
+buffers and callback snapshots are heap-owned. The event pump preserves each
+input snapshot across nested callbacks. Render/resize locks and compositor
+shutdown protect the native window and draw target from concurrent destruction.
+
+The implementation still needs full compilation and browser runtime validation.
+File dialogs, the OS clipboard bridge, wheel input and the graphics/font platform
+remain integration work. Native OpenGL is reported unavailable because Alix has
+no native GL context API; the adapter supplies a software draw target. Mozilla's
+explicit headless mode retains its ordinary headless widget implementation.
+
+`0017-native-alix-rust-libc.patch` adds Alix's scalar ABI and implemented native
+C entry points to Gecko's vendored libc crate, including vendor checksums.
+The direct FFI fixture passes in an eight-CPU guest, including native fsync and
+physical-page queries; this is not the complete
+Rust dependency or standard-library filesystem/network port. The same managed
+branch provides native fd_set/timeval/select bindings and bit operations, which
+pass the actual Rust-to-Alix call fixture.
+`0018-native-alix-executable-path.patch` calls the native launch-path API instead
+of relying on argv or another OS's procfs. `0019-native-alix-portable-platform-types.patch`
+selects native pthread thread IDs, ANGLE's generic POSIX TLS implementation and
+opaque EGL declaration types. ANGLE's real TLS source and platform header probes
+compile as native x86-64 ELF. This does not provide an EGL context or WebGL.
+`0020-native-alix-library-headers.patch` avoids Cairo's internal `struct stat`
+collision and selects Alix's alloca/endian headers in both NSS KaRaMeL copies.
+The actual Cairo mask compositor, HACL/libcrux header probes and Gecko color-space
+header compile. The browser C++ flags use the default rounding environment for
+constant expressions; native C math keeps its separately tested fenv semantics.
+These compile checks do not establish full Cairo/NSS runtime acceptance.
+`0021-native-alix-style-thread-handle.patch` directly includes Alix's pthread
+definition for cbindgen's existing native style-worker handle alias. The real
+nsDeviceContext.cpp source now compiles; complete style Rust bindings and
+runtime behavior still require full-build acceptance.
+`0022-native-alix-rust-style-thread-handles.patch` selects the real Alix std
+thread extension and maps its native handle condition through cbindgen.
+The generated C++ alias remains Alix's actual pthread_t. A fresh native style
+library and its get_thread_handles symbol are retained under obj-gecko-alix;
+the regenerated-header C++ consumer also compiles. This is compile evidence,
+not a running style engine or full browser.
+
+`0016-native-alix-angle-program-version.patch` supplies the missing native rule
+for ANGLE shader serialization metadata. It hashes the same common source set
+already shared by Android and Linux; it does not select a Linux window or driver
+implementation. The real generated header is under `obj-gecko-alix`.
+
+`tests/keyboard_event_contract_test.py` verifies raw navigation/repeat events and
+legacy terminal ANSI translation. The native window test additionally injects
+an actual USB arrow press/release after the debugger resumes and requires one
+raw down/up pair with no escaped text. This is OS input evidence, separate from
+Gecko's still-unverified text-event adapter.

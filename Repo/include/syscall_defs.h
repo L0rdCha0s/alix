@@ -79,12 +79,22 @@ typedef enum
     SYSCALL_DIRECTORY = 70,
     SYSCALL_FILE_IO = 71,
     SYSCALL_PROCESS = 72,
+    SYSCALL_UI_CONTROL = 73,
+    SYSCALL_MEMORY_PAGES = 74,
 } syscall_id_t;
+
+/* Physical RAM counts in 4096-byte pages. TOTAL is the boot E820 usable RAM
+ * before kernel reservations; AVAILABLE is the current locked PMM free count.
+ * No user pointer is retained or accessed. Unknown selectors return -EINVAL. */
+#define SYSCALL_MEMORY_TOTAL_PAGES 0u
+#define SYSCALL_MEMORY_AVAILABLE_PAGES 1u
 
 #define SYSCALL_PROCESS_SPAWN 0u
 #define SYSCALL_PROCESS_WAIT 1u
 #define SYSCALL_PROCESS_NOHANG 1u
 #define SYSCALL_PROCESS_SPAWN_EX 2u
+#define SYSCALL_PROCESS_EXECUTABLE_PATH 3u
+#define SYSCALL_EXECUTABLE_PATH_MAX 4096u
 #define SYSCALL_SPAWN_VERSION 1u
 #define SYSCALL_SPAWN_SETSIGMASK 1u
 #define SYSCALL_SPAWN_SETSIGDEF 2u
@@ -119,11 +129,96 @@ typedef enum
     SYSCALL_FILE_DUP2, SYSCALL_FILE_DUP3,
     SYSCALL_FILE_SOCKET_OPEN, SYSCALL_FILE_SOCKET_CONNECT, SYSCALL_FILE_SOCKET_AVAILABLE,
     SYSCALL_FILE_PIPE, SYSCALL_FILE_STAT_PATH, SYSCALL_FILE_CHDIR, SYSCALL_FILE_GETCWD,
-    SYSCALL_FILE_REMOVE, SYSCALL_FILE_RENAME
+    SYSCALL_FILE_REMOVE, SYSCALL_FILE_RENAME,
+    SYSCALL_FILE_AUDIO_OPEN, SYSCALL_FILE_AUDIO_WRITE,
+    SYSCALL_FILE_AUDIO_STATUS, SYSCALL_FILE_AUDIO_DRAIN,
+    SYSCALL_FILE_POLL, SYSCALL_FILE_GETFL, SYSCALL_FILE_SETFL,
+    SYSCALL_FILE_NET_OPEN, SYSCALL_FILE_NET_CONNECT, SYSCALL_FILE_NET_SEND, SYSCALL_FILE_NET_RECV,
+    SYSCALL_FILE_NET_GETOPT, SYSCALL_FILE_NET_SETOPT, SYSCALL_FILE_NET_GETNAME,
+    SYSCALL_FILE_DNS_RESOLVE, SYSCALL_FILE_SYNC, SYSCALL_FILE_SELECT,
+    SYSCALL_FILE_TRUNCATE, SYSCALL_FILE_REALPATH, SYSCALL_FILE_MKDIR
 } syscall_file_operation_t;
+#define SYSCALL_REMOVE_ALLOW_DIRECTORY 1u
+#define SYSCALL_REMOVE_DIRECTORY_ONLY 2u
+
+#define SYSCALL_SELECT_VERSION 1u
+#define SYSCALL_SELECT_FD_MAX 256u
+typedef struct { uint64_t bits[SYSCALL_SELECT_FD_MAX / 64u]; } syscall_fd_set_t;
+/* FILE_SELECT takes this query and its exact byte size. Timeout points to a
+ * native pair of signed 64-bit seconds/microseconds; zero means indefinite.
+ * Input sets/timeval are captured before queueing. Workers retain only owned
+ * descriptions and readiness masks, never these user addresses. */
+typedef struct
+{
+    uint32_t version, size;
+    int32_t nfds;
+    uint32_t flags;
+    uint64_t readfds, writefds, exceptfds, timeout;
+} syscall_select_t;
+#define SYSCALL_DNS_VERSION 1u
+#define SYSCALL_DNS_NAME_MAX 255u
+#define SYSCALL_DNS_ADDR_MAX 8u
+#define SYSCALL_DNS_OK 0u
+#define SYSCALL_DNS_NOT_FOUND 1u
+#define SYSCALL_DNS_AGAIN 2u
+#define SYSCALL_DNS_FAILURE 3u
+typedef struct
+{
+    uint32_t version, size, status, address_count;
+    uint32_t addresses[SYSCALL_DNS_ADDR_MAX]; /* Native host-order IPv4 values. */
+    uint32_t canonical_length, reserved;
+    char canonical[SYSCALL_DNS_NAME_MAX + 1u];
+} syscall_dns_reply_t;
+#define SYSCALL_SOL_SOCKET 1u
+#define SYSCALL_SO_REUSEADDR 2u
+#define SYSCALL_SO_TYPE 3u
+#define SYSCALL_SO_ERROR 4u
+#define SYSCALL_SO_SNDBUF 7u
+#define SYSCALL_SO_RCVBUF 8u
+#define SYSCALL_SO_KEEPALIVE 9u
+#define SYSCALL_SO_ACCEPTCONN 30u
+#define SYSCALL_SO_PROTOCOL 38u
+#define SYSCALL_SO_DOMAIN 39u
+#define SYSCALL_TCP_NODELAY 1u
+#define SYSCALL_TCP_MAXSEG 2u
+#define SYSCALL_AF_INET 2u
+#define SYSCALL_SOCK_STREAM 1u
+#define SYSCALL_IPPROTO_TCP 6u
+#define SYSCALL_MSG_PEEK 2u
+#define SYSCALL_MSG_DONTWAIT 0x40u
+#define SYSCALL_MSG_NOSIGNAL 0x4000u
+typedef struct
+{
+    uint16_t family, port_be;
+    uint32_t address_be;
+    uint8_t reserved[8];
+} syscall_sockaddr_in_t;
 #define SYSCALL_FILE_CLOEXEC 1u
 #define SYSCALL_OPEN_CLOEXEC (1u << 17)
 #define SYSCALL_STAT_NOFOLLOW 1u
+
+#define SYSCALL_POLL_IN 0x0001u
+#define SYSCALL_POLL_PRI 0x0002u
+#define SYSCALL_POLL_OUT 0x0004u
+#define SYSCALL_POLL_ERR 0x0008u
+#define SYSCALL_POLL_HUP 0x0010u
+#define SYSCALL_POLL_NVAL 0x0020u
+typedef struct
+{
+    int32_t fd;
+    int16_t events, revents;
+} syscall_pollfd_t;
+
+#define SYSCALL_AUDIO_STATUS_VERSION 1u
+#define SYSCALL_AUDIO_FAILED 1u
+#define SYSCALL_AUDIO_RECOVERING 2u
+typedef struct
+{
+    uint32_t version, size;
+    uint32_t rate, channels, frame_bytes, flags;
+    uint64_t submitted_frames, played_frames, dropped_frames;
+    uint64_t queued_frames, latency_frames;
+} syscall_audio_status_t;
 
 #define SYSCALL_USAGE_VERSION 1u
 #define SYSCALL_USAGE_SELF 0
@@ -196,6 +291,7 @@ typedef struct syscall_timezone_info
 #define SYSCALL_OPEN_TRUNCATE (1u << 3)
 #define SYSCALL_OPEN_EXCLUSIVE (1u << 4)
 #define SYSCALL_OPEN_APPEND (1u << 16)
+#define SYSCALL_OPEN_NONBLOCK (1u << 18)
 
 #define SYSCALL_SEEK_SET 0
 #define SYSCALL_SEEK_CUR 1

@@ -1,5 +1,9 @@
 #include "pci.h"
 #include "io.h"
+#include "spinlock.h"
+
+/* CF8/CFC is a shared address/data latch across every CPU. */
+static spinlock_t g_config_lock;
 
 #define PCI_CONFIG_ADDRESS 0xCF8
 #define PCI_CONFIG_DATA    0xCFC
@@ -16,8 +20,11 @@ static uint32_t pci_build_address(pci_device_t dev, uint8_t offset)
 uint32_t pci_config_read32(pci_device_t dev, uint8_t offset)
 {
     uint32_t address = pci_build_address(dev, offset);
+    uint64_t flags = spinlock_lock_irqsave(&g_config_lock);
     outl(PCI_CONFIG_ADDRESS, address);
-    return inl(PCI_CONFIG_DATA);
+    uint32_t value = inl(PCI_CONFIG_DATA);
+    spinlock_unlock_irqrestore(&g_config_lock, flags);
+    return value;
 }
 
 uint16_t pci_config_read16(pci_device_t dev, uint8_t offset)
@@ -37,26 +44,26 @@ uint8_t pci_config_read8(pci_device_t dev, uint8_t offset)
 void pci_config_write32(pci_device_t dev, uint8_t offset, uint32_t value)
 {
     uint32_t address = pci_build_address(dev, offset);
+    uint64_t flags = spinlock_lock_irqsave(&g_config_lock);
     outl(PCI_CONFIG_ADDRESS, address);
     outl(PCI_CONFIG_DATA, value);
+    spinlock_unlock_irqrestore(&g_config_lock, flags);
 }
 
 void pci_config_write16(pci_device_t dev, uint8_t offset, uint16_t value)
 {
-    uint32_t full = pci_config_read32(dev, offset);
-    uint8_t shift = (uint8_t)((offset & 0x02) * 8);
-    full &= ~(0xFFFFU << shift);
-    full |= ((uint32_t)value << shift);
-    pci_config_write32(dev, offset, full);
+    uint64_t flags = spinlock_lock_irqsave(&g_config_lock);
+    outl(PCI_CONFIG_ADDRESS, pci_build_address(dev, offset));
+    outw(PCI_CONFIG_DATA + (offset & 2), value);
+    spinlock_unlock_irqrestore(&g_config_lock, flags);
 }
 
 void pci_config_write8(pci_device_t dev, uint8_t offset, uint8_t value)
 {
-    uint32_t full = pci_config_read32(dev, offset);
-    uint8_t shift = (uint8_t)((offset & 0x03) * 8);
-    full &= ~(0xFFU << shift);
-    full |= ((uint32_t)value << shift);
-    pci_config_write32(dev, offset, full);
+    uint64_t flags = spinlock_lock_irqsave(&g_config_lock);
+    outl(PCI_CONFIG_ADDRESS, pci_build_address(dev, offset));
+    outb(PCI_CONFIG_DATA + (offset & 3), value);
+    spinlock_unlock_irqrestore(&g_config_lock, flags);
 }
 
 bool pci_find_device(uint16_t vendor, uint16_t device_id, pci_device_t *out_dev)

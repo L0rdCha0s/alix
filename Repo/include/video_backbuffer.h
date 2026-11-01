@@ -6,10 +6,9 @@
 /*
  * Kernel GUI backbuffer.
  *
- * The video driver currently uses a fixed physical address for its software
- * backbuffer (identity-mapped). With the PMM in place, this range must be
- * reserved so it is never handed out as allocatable RAM (e.g. for user heap
- * pages), otherwise video drawing will corrupt unrelated memory.
+ * Historical backbuffer layout, retained for source compatibility. The video
+ * driver now allocates a persistent heap surface at the active mode's size.
+ * PMM no longer reserves this obsolete fixed physical range.
  */
 
 #define VIDEO_BACKBUFFER_BASE  0x0000000001800000ULL

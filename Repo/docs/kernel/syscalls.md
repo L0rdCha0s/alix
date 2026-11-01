@@ -2,6 +2,39 @@
 
 This kernel exposes a small syscall surface for user programs. Syscalls are dispatched via vector 0x80.
 
+Syscall 74 (`MEMORY_PAGES`) takes a selector in RDI: zero returns boot E820
+usable RAM before kernel reservations; one returns the current locked PMM free
+count. Both results are in 4096-byte pages. Other selectors return -EINVAL;
+an unready PMM returns -EAGAIN. The call accesses no user pointers.
+
+The owned `FILE_IO` operation `SYSCALL_FILE_SYNC` takes only a private file
+descriptor; other arguments must be zero. It pins that description in a
+registered request and performs AlixFS writeback/commit/device flush through the
+protected storage service. See [libc](libc.md) for supported descriptor types
+and the separate-boot readback test.
+
+`SYSCALL_FILE_SELECT` takes a versioned 48-byte query and its exact size;
+remaining arguments must be zero. The query names nullable 32-byte descriptor
+sets and an input-only native timeval. It safely captures inputs, uses the
+protected event service and copies readiness back only in the live caller.
+See [poll/select](poll.md) for the ABI, 64-bit timeout policy, ownership and
+native validation.
+
+`SYSCALL_FILE_TRUNCATE` takes a private fd and nonnegative signed-64-bit length;
+remaining arguments must be zero. The storage request pins the original open
+description, serializes its offset gate and changes node data under the data
+lock without changing the offset. `SYSCALL_FILE_REALPATH` takes an input path,
+output buffer and capacity up to VFS_PATH_MAX; the fourth argument is zero.
+Its protected worker resolves/canonicalizes copied path bytes using a retained
+cwd, then the live caller performs the checked output copy. REMOVE mode 2 is
+directory-only; modes 0/1 retain the earlier unlink/C-remove behavior.
+
+`SYSCALL_FILE_MKDIR` takes an input path and three zero arguments. A registered
+storage request captures its path, cwd and uid/gid. One VFS tree transaction
+creates the directory with those credentials or returns EEXIST for an existing
+leaf. This strict owned-profile operation preserves the kernel helper's older
+create-or-return behavior. Mode/ACL enforcement remains unimplemented.
+
 Syscall 69 (`RESOURCE_USAGE`) returns a versioned 48-byte snapshot for the
 current process: clock frequency, sampled user/system ticks and minor/major
 fault counters. The kernel holds process ownership through a bounded guard,

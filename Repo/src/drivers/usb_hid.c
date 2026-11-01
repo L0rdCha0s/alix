@@ -1,4 +1,8 @@
 #include "usb_hid.h"
+#include "usb_storage.h"
+#include "acpi.h"
+
+extern bool hardware_usb_boot_test(void) __attribute__((weak));
 #include "keyboard.h"
 #include "mouse.h"
 #include "serial.h"
@@ -331,8 +335,10 @@ static void keyboard_thread(void *arg)
                 hid_clear_endpoint_halt(g_kbd, &g_kbd_ep);
             }
         }
-        /* USB interrupt transfer already waits per endpoint interval; avoid extra 10ms sleep. */
-        process_yield();
+        /* xHCI keeps its IN TD pending between nonblocking event polls. Sleeping
+         * lets the BSP service timer housekeeping even on a one-CPU system. */
+        if (g_kbd && g_kbd->xhci) process_sleep_ms(1);
+        else process_yield();
     }
 }
 
@@ -451,9 +457,12 @@ void usb_hid_init(void)
     if (!usb_bus_init())
     {
         serial_printf("%s", "[usb] bus init failed\r\n");
+        if (acpi_has_i8042()) { keyboard_enable_ps2(); mouse_enable_ps2(); }
         return;
     }
 
+    usb_storage_init();
+    if (hardware_usb_boot_test && !hardware_usb_boot_test()) return;
     size_t count = usb_bus_device_count();
     serial_printf("[usb] hid devices=%u\r\n", (unsigned)count);
     for (size_t i = 0; i < count; ++i)
@@ -508,6 +517,11 @@ void usb_hid_init(void)
         }
     }
 
+    if (acpi_has_i8042())
+    {
+        if (!g_kbd) keyboard_enable_ps2();
+        if (!g_mouse) mouse_enable_ps2();
+    }
     if (g_kbd)
     {
         process_t *kbd_thread = process_create_kernel("usb_kbd", keyboard_thread, NULL, 0, -1);

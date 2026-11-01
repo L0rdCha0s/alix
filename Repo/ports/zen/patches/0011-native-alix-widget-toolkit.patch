@@ -1,6 +1,42 @@
 --- a/toolkit/moz.configure
 +++ b/toolkit/moz.configure
-@@ -648,6 +648,8 @@
+@@ -377,6 +377,8 @@
+ # ==============================================================
+ @depends(target)
+ def audio_backends_default(target):
++    if target.os == "Alix":
++        return ("alix",)
+     if target.os == "Android":
+         return (
+             "aaudio",
+@@ -402,6 +404,7 @@
+     "--enable-audio-backends",
+     nargs="+",
+     choices=(
++        "alix",
+         "aaudio",
+         "alsa",
+         "audiounit",
+@@ -528,6 +531,18 @@
+ set_config("MOZ_SUNAUDIO", imply_sunaudio, when="--enable-audio-backends")
+ 
+ set_config("MOZ_WASAPI", imply_wasapi, when="--enable-audio-backends")
++
++# Alix uses its native PCM channel, not a Unix host sound server.
++@depends("--enable-audio-backends", target)
++def imply_alix_audio(values, target):
++    enabled = "alix" in values
++    if enabled and target.os != "Alix":
++        die("Cannot enable Alix audio on %s", target.os)
++    return enabled or None
++
++
++set_config("MOZ_ALIX_AUDIO", imply_alix_audio, when="--enable-audio-backends")
++
+ 
+ # ALSA cubeb backend
+ # ==============================================================
+@@ -648,6 +663,8 @@
          return ("cairo-uikit",)
      elif target.os == "Android":
          return ("cairo-android",)

@@ -3,6 +3,7 @@
 
 #include <stdarg.h>
 #include "types.h"
+#include "sys/types.h"
 
 #ifndef KERNEL_BUILD
 #ifdef TTF_HOST_BUILD
@@ -86,6 +87,7 @@ int vscanf(const char *format, va_list arguments);
 int vsscanf(const char *text, const char *format, va_list arguments);
 
 FILE *fopen(const char *path, const char *mode);
+FILE *fdopen(int descriptor, const char *mode);
 FILE *freopen(const char *path, const char *mode, FILE *stream);
 FILE *tmpfile(void);
 char *tmpnam(char *output);
@@ -96,6 +98,8 @@ size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream);
 int fflush(FILE *stream);
 int fseek(FILE *stream, long offset, int whence);
 long ftell(FILE *stream);
+int fseeko(FILE *stream, off_t offset, int whence);
+off_t ftello(FILE *stream);
 int fgetpos(FILE *stream, fpos_t *position);
 int fsetpos(FILE *stream, const fpos_t *position);
 void rewind(FILE *stream);

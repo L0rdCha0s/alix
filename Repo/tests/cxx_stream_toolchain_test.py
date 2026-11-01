@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the actual native libc++ stream/locale acceptance executable."""
+"""Build actual native libc++ acceptance fixtures with the Alix runtime."""
 import json
 import argparse
 import os
@@ -17,6 +17,7 @@ def main():
     modes.add_argument("--wide-float", action="store_true")
     modes.add_argument("--nearbyint", action="store_true")
     modes.add_argument("--math-support", action="store_true")
+    modes.add_argument("--random-device", action="store_true")
     args = parser.parse_args()
     objects = shlex.split(os.environ.get("ALIX_RUNTIME_OBJECTS", ""))
     if not objects:
@@ -29,7 +30,15 @@ def main():
     temporary.replace(manifest)
     env = os.environ.copy()
     env["ALIX_RUNTIME_MANIFEST"] = str(manifest)
-    if args.wide_float or args.nearbyint or args.math_support:
+    if args.random_device:
+        output = ROOT / "build/user/random_device_test.elf"
+        sources = [ROOT / "tests/random_device_test.cpp"]
+        compiler, standard = "alix-clang++", "-std=c++20"
+        macros = subprocess.check_output([str(ROOT / "ports/zen/toolchain" / compiler),
+            "-std=c++20", "-dM", "-E", "-x", "c++", "-"], input="#include <random>\n", env=env, text=True)
+        if "#define _LIBCPP_HAS_RANDOM_DEVICE 1" not in macros or "#define _LIBCPP_USING_GETENTROPY" not in macros:
+            raise RuntimeError("rebuild make zen-cxx-runtime with native random_device/getentropy enabled")
+    elif args.wide_float or args.nearbyint or args.math_support:
         name = "math_support_test" if args.math_support else ("math_nearbyint_test" if args.nearbyint else "wchar_float_test")
         output = ROOT / f"build/user/{name}.elf"
         sources = [ROOT / f"tests/{name}.c"]
@@ -43,8 +52,9 @@ def main():
                     *map(str, sources), "-o", str(output)], env=env, check=True)
     if subprocess.check_output(["x86_64-elf-nm", "--undefined-only", str(output)], text=True).strip():
         raise RuntimeError("native C++ stream acceptance ELF contains unresolved symbols")
-    print(f"Native C++ stream and C/POSIX locale fixture linked: {output}")
-    print("The fixture must run in Alix before claiming stream behavior is verified.")
+    label = "libc++ random-device" if args.random_device else "C++ stream and C/POSIX locale"
+    print(f"Native {label} fixture linked: {output}")
+    print("The fixture must run in Alix before claiming its behavior is verified.")
 
 
 if __name__ == "__main__":

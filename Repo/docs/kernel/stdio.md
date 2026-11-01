@@ -12,6 +12,16 @@ The application must prevent concurrent use while it closes and destroys a
 its allocation. Sharing a live stream is supported; sharing another thread's
 stack storage as an asynchronous callback argument is not.
 
+The owned-descriptor profile provides `fdopen` without reopening, truncating or
+resetting the descriptor offset. Mode access must fit the original access mode;
+failure leaves the descriptor open, and success transfers its closing lifetime
+to the FILE. Append mode sets the shared description's atomic append status;
+pipe streams do not attempt regular-file seeks. The legacy global-descriptor
+profile reports ENOTSUP instead of interpreting an integer in a different
+namespace. `fseeko`/`ftello` use native signed 64-bit positions under the stream
+mutex. Native evidence is `build/test-out/fd-stream-native-qemu.log`; upstream
+LLVM file-stream roundtrips additionally pass in `libcxx-runtime-qemu.log`.
+
 `ungetc` converts input to `unsigned char`, pushes it in reverse consumption
 order and clears EOF on success. The first byte requires no allocation; further
 pushes grow a heap-owned buffer under the stream mutex. Allocation failure

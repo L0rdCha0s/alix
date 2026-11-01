@@ -7,7 +7,6 @@
 #include "libc.h"
 #include "serial.h"
 #include "spinlock.h"
-#include "video_backbuffer.h"
 
 #define PMM_PAGE_SIZE 4096ULL
 
@@ -21,6 +20,7 @@ typedef struct pmm_range
 static spinlock_t g_pmm_lock;
 static pmm_range_t *g_free_ranges = NULL;
 static uint64_t g_free_bytes = 0;
+static uint64_t g_total_bytes = 0;
 static bool g_pmm_ready = false;
 
 extern uintptr_t kernel_heap_base;
@@ -203,6 +203,14 @@ size_t pmm_available_bytes(void)
     return (size_t)available;
 }
 
+size_t pmm_total_bytes(void)
+{
+    spinlock_lock(&g_pmm_lock);
+    uint64_t total = g_total_bytes;
+    spinlock_unlock(&g_pmm_lock);
+    return (size_t)total;
+}
+
 bool pmm_alloc_range(size_t bytes,
                      size_t alignment,
                      pmm_alloc_flags_t flags,
@@ -376,16 +384,18 @@ void pmm_init(void)
         pmm_add_range((paddr_t)start, (paddr_t)end);
     }
 
+    /* Snapshot usable RAM before reserving kernel/bootstrap/heap pages. This
+     * total never changes as callers allocate, reserve or free backing. */
+    g_total_bytes = g_free_bytes;
     spinlock_unlock(&g_pmm_lock);
 
     pmm_reserve_range(0, 0x200000ULL);
-    pmm_reserve_range((paddr_t)VIDEO_BACKBUFFER_BASE, (size_t)VIDEO_BACKBUFFER_BYTES);
     pmm_reserve_range((paddr_t)(uintptr_t)__kernel_vma_start,
                       (size_t)((uintptr_t)__kernel_vma_end - (uintptr_t)__kernel_vma_start));
-    pmm_reserve_range((paddr_t)(uintptr_t)(STACK_TOP - STACK_SIZE), (size_t)STACK_SIZE);
-    pmm_reserve_range((paddr_t)(uintptr_t)PAGE_TABLE_BASE, (size_t)(PAGE_TABLE_PAGES * PMM_PAGE_SIZE));
+    pmm_reserve_range((paddr_t)(uintptr_t)(boot_info.stack_top - STACK_SIZE), (size_t)STACK_SIZE);
+    pmm_reserve_range((paddr_t)(uintptr_t)boot_info.page_table_base, (size_t)(PAGE_TABLE_PAGES * PMM_PAGE_SIZE));
     pmm_reserve_range((paddr_t)(uintptr_t)SMP_BOOT_DATA_PHYS, (size_t)0x1000);
-    pmm_reserve_range((paddr_t)(uintptr_t)SMP_TRAMPOLINE_PHYS, (size_t)(64 * 1024u));
+    pmm_reserve_range((paddr_t)(uintptr_t)SMP_TRAMPOLINE_PHYS, (size_t)4096);
 
     if (kernel_heap_end > kernel_heap_base)
     {

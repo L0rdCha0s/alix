@@ -11,8 +11,12 @@ extern "C" {
 #endif
 
 ssize_t read(int fd, void *buffer, size_t count);
+ssize_t pread(int fd, void *buffer, size_t count, off_t offset);
 ssize_t write(int fd, const void *buffer, size_t count);
 int close(int fd);
+int fsync(int fd);
+int ftruncate(int fd, off_t length);
+void _exit(int status) __attribute__((__noreturn__));
 int dup(int fd);
 int dup2(int source, int destination);
 int dup3(int source, int destination, int flags);
@@ -24,8 +28,13 @@ int execv(const char *path, char *const argv[]);
 int execvp(const char *file, char *const argv[]);
 int chdir(const char *path);
 char *getcwd(char *buffer, size_t capacity);
+/* Absolute launch-path snapshot, including NUL on success. Return byte length
+ * excluding NUL, or -1/errno; ERANGE never returns a truncated path. Anonymous
+ * in-memory images have no path and report ENOENT. */
+ssize_t alix_get_executable_path(char *buffer, size_t capacity);
 int access(const char *path, int mode);
 int unlink(const char *path);
+int rmdir(const char *path);
 ssize_t readlink(const char *path, char *buffer, size_t capacity);
 int64_t lseek(int fd, int64_t offset, int whence);
 uint32_t getuid(void);
@@ -48,5 +57,7 @@ int getentropy(void *buffer, size_t length);
 #define _SC_PAGE_SIZE _SC_PAGESIZE
 #define _SC_NPROCESSORS_ONLN 2
 #define _SC_NPROCESSORS_CONF 3
+#define _SC_PHYS_PAGES 4
+#define _SC_AVPHYS_PAGES 5
 
 #endif /* UNISTD_H */

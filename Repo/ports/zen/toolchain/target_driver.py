@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[3]
 RUNTIME = ROOT / "ports/zen/upstream/libcxx-alix-build"
 
 
-def main(cxx=False):
+def compiler_configuration(cxx=False):
     llvm = Path(os.environ.get("ALIX_LLVM_PREFIX", "/opt/homebrew/opt/llvm"))
     compiler = llvm / "bin" / ("clang++" if cxx else "clang")
     gcc = shutil.which("x86_64-elf-gcc")
@@ -29,6 +29,26 @@ def main(cxx=False):
                   "-I" + str(ROOT / "ports/zen/libcxx")]
     flags += ["-isystem", resource + "/include", "-isystem", str(ROOT / "include"),
               "-I" + str(ROOT / "user/lib")]
+    return compiler, flags
+
+
+def native_bindgen_flags():
+    """Use the native ABI and header search with libclang's parser directly."""
+    _, flags = compiler_configuration(True)
+    result = []
+    skip = False
+    for flag in flags:
+        if skip:
+            skip = False
+        elif flag == "-ccc-gcc-name":
+            skip = True
+        elif flag not in ("--no-default-config", "-frounding-math"):
+            result.append(flag)
+    return result
+
+
+def main(cxx=False):
+    compiler, flags = compiler_configuration(cxx)
     arguments = sys.argv[1:]
     no_link = (not arguments or any(arg in ("-c", "-S", "-E", "-fsyntax-only", "-M", "-MM")
                                    for arg in arguments) or
@@ -43,7 +63,9 @@ def main(cxx=False):
             raise RuntimeError("native Alix startup objects are missing")
         names = [Path(obj).name for obj in objects]
         if ("syscall.o" in names or names.count("syscall-owned.o") != 1 or names.count("fcntl.o") != 1 or
-                "libc.o" in names or names.count("libc-upstream.o") != 1):
+                "libc.o" in names or names.count("libc-upstream.o") != 1 or
+                "socket.o" in names or names.count("socket-owned.o") != 1 or
+                "select.o" in names or names.count("select-owned.o") != 1):
             raise RuntimeError("upstream links require the owned-FD runtime; use the current make zen-* target")
         for obj in objects:
             path = Path(obj)

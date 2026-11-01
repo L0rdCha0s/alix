@@ -508,6 +508,14 @@ static bool alixfs_assign_node_id(alixfs_mount_t *fs, vfs_node_t *node)
     return false;
 }
 
+static size_t alixfs_node_name_length(const vfs_node_t *node)
+{
+    /* A filesystem root has no name inside its own filesystem. The mount
+     * point's name belongs to the containing tree and can differ next boot. */
+    if (node->mount && node->mount->mount_point == node) return 0;
+    return node->name ? strlen(node->name) : 0;
+}
+
 static bool alixfs_serialize_node(vfs_node_t *node,
                                   uint32_t version,
                                   bool metadata_only,
@@ -525,7 +533,9 @@ static bool alixfs_serialize_node(vfs_node_t *node,
     {
         return false;
     }
-    size_t name_len = (node->name) ? strlen(node->name) : 0;
+    size_t name_len = alixfs_node_name_length(node);
+    uint32_t parent_id = node->parent && node->parent->mount == node->mount ?
+                             node->parent->disk_id : UINT32_MAX;
     size_t data_len = 0;
     if (node->type == VFS_NODE_FILE || node->type == VFS_NODE_SYMLINK)
     {
@@ -543,7 +553,7 @@ static bool alixfs_serialize_node(vfs_node_t *node,
     {
         alixfs_node_disk_v4_t disk = {
             .id = node->disk_id,
-            .parent_id = node->parent ? node->parent->disk_id : 0xFFFFFFFFu,
+            .parent_id = parent_id,
             .type = node->type,
             .name_len = (uint32_t)name_len,
             .data_len = (uint32_t)data_len,
@@ -560,7 +570,7 @@ static bool alixfs_serialize_node(vfs_node_t *node,
     {
         alixfs_node_disk_v3_t disk = {
             .id = node->disk_id,
-            .parent_id = node->parent ? node->parent->disk_id : 0xFFFFFFFFu,
+            .parent_id = parent_id,
             .type = node->type,
             .name_len = (uint32_t)name_len,
             .data_len = (uint32_t)data_len,
@@ -574,7 +584,7 @@ static bool alixfs_serialize_node(vfs_node_t *node,
     {
         alixfs_node_disk_v2_t disk = {
             .id = node->disk_id,
-            .parent_id = node->parent ? node->parent->disk_id : 0xFFFFFFFFu,
+            .parent_id = parent_id,
             .type = node->type,
             .name_len = (uint32_t)name_len,
             .data_len = (uint32_t)data_len
@@ -641,7 +651,7 @@ static bool alixfs_write_node(alixfs_mount_t *fs, vfs_node_t *node, bool force_a
     }
     node_id = node->disk_id;
     alixfs2_chunk_entry_t *entry = &fs->chunks[node_id];
-    size_t name_len = node->name ? strlen(node->name) : 0;
+    size_t name_len = alixfs_node_name_length(node);
     size_t data_len = (node->type == VFS_NODE_FILE || node->type == VFS_NODE_SYMLINK)
         ? node->size : 0;
     size_t stored_len = alixfs_node_disk_header_size(fs->header.version) + name_len + data_len;
@@ -1078,7 +1088,7 @@ bool alixfs_mount_load(alixfs_mount_t *fs, vfs_mount_t *mount)
         node->mtime = node_mtime;
         node->ctime = node_ctime;
         size_t offset = node_header_size;
-        if (disk_common.name_len > 0)
+        if (disk_common.name_len > 0 && id != fs->header.root_id)
         {
             char *name = (char *)malloc(disk_common.name_len + 1);
             if (!name)
@@ -1095,8 +1105,10 @@ bool alixfs_mount_load(alixfs_mount_t *fs, vfs_mount_t *mount)
                 free(node->name);
             }
             node->name = name;
-            offset += disk_common.name_len;
         }
+        /* Old disks may contain the former mount-point spelling. Retain the
+         * caller's mount point name, but always skip those on-disk bytes. */
+        offset += disk_common.name_len;
         if ((node->type == VFS_NODE_FILE || node->type == VFS_NODE_SYMLINK) &&
             disk_common.data_len > 0)
         {

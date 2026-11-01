@@ -10,8 +10,8 @@ from audio_stream_contract_test import ROOT, compile_and_run
 
 
 def rename(text):
-    names = ("FILE", "fpos_t", "stdout", "stderr", "stdin", "fopen", "freopen", "fclose", "fread", "fwrite",
-             "fflush", "fseek", "ftell", "fgetpos", "fsetpos", "rewind", "fputc", "fgetc", "getc",
+    names = ("FILE", "fpos_t", "stdout", "stderr", "stdin", "fopen", "fdopen", "freopen", "fclose", "fread", "fwrite",
+             "fflush", "fseek", "ftell", "fseeko", "ftello", "fgetpos", "fsetpos", "rewind", "fputc", "fgetc", "getc",
              "ungetc", "fgets", "feof", "ferror", "clearerr", "fileno", "fputs", "setbuf", "setvbuf", "getchar")
     for name in names:
         text = re.sub(r"\b" + name + r"\b", "native_" + name, text)

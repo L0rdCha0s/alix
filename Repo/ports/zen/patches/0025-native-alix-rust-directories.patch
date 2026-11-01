@@ -1,0 +1,55 @@
+--- a/third_party/rust/dirs-sys/src/lib.rs
++++ b/third_party/rust/dirs-sys/src/lib.rs
+@@ -96,10 +96,10 @@
+ #[cfg(target_os = "redox")]
+ pub use self::target_redox::home_dir;
+ 
+-#[cfg(all(unix, not(any(target_os = "macos", target_os = "ios"))))]
++#[cfg(any(target_os = "alix", all(unix, not(any(target_os = "macos", target_os = "ios")))))]
+ mod xdg_user_dirs;
+ 
+-#[cfg(all(unix, not(any(target_os = "macos", target_os = "ios"))))]
++#[cfg(any(target_os = "alix", all(unix, not(any(target_os = "macos", target_os = "ios")))))]
+ mod target_unix_not_mac {
+ 
+ use std::collections::HashMap;
+@@ -128,7 +128,7 @@
+ 
+ }
+ 
+-#[cfg(all(unix, not(any(target_os = "macos", target_os = "ios"))))]
++#[cfg(any(target_os = "alix", all(unix, not(any(target_os = "macos", target_os = "ios")))))]
+ pub use self::target_unix_not_mac::{user_dir, user_dirs};
+ 
+ #[cfg(target_os = "windows")]
+@@ -214,3 +214,11 @@
+     known_folder_music, known_folder_desktop, known_folder_documents, known_folder_downloads,
+     known_folder_pictures, known_folder_public, known_folder_templates, known_folder_videos
+ };
++
++// The native std adapter uses Alix's owned environment snapshot and exact-uid
++// account lookup; do not fall back to a fabricated root home on lookup failure.
++#[cfg(target_os = "alix")]
++#[allow(deprecated)]
++pub fn home_dir() -> Option<PathBuf> {
++    std::env::home_dir()
++}
+--- a/third_party/rust/dirs-sys/src/xdg_user_dirs.rs
++++ b/third_party/rust/dirs-sys/src/xdg_user_dirs.rs
+@@ -2,6 +2,9 @@
+ use std::ffi::OsString;
+ use std::fs;
+ use std::io::{self, Read};
++#[cfg(target_os = "alix")]
++use std::os::alix::ffi::OsStringExt;
++#[cfg(not(target_os = "alix"))]
+ use std::os::unix::ffi::OsStringExt;
+ use std::path::{Path, PathBuf};
+ use std::str;
+--- a/third_party/rust/dirs-sys/.cargo-checksum.json
++++ b/third_party/rust/dirs-sys/.cargo-checksum.json
+@@ -1 +1 @@
+-{"files":{".appveyor.yml":"b23ce89c7619a85a5e74feafe721a1684ce29121e66776759a97efd12f0a734d",".cargo_vcs_info.json":"81f229bd8310a3132e636e49a051bc0e30fedcd56d8f7ced63f662988264bd7e",".travis.yml":"f769cf9bd5154edd6c42e9f727ff791047103f66c60842bfa58be9a02a880e6c","Cargo.toml":"dd6c411fb23e7e3b48627706969919b0f8d9f7bd7411ba70c71ca9067fc2e53f","Cargo.toml.orig":"6df0be18ce0dd00186ad5df398b6d8e50a6f87641356538280c00540096febf2","LICENSE-APACHE":"d3174ad63e721d4c9dccb8ad4320848992d314369bc46319720b5802c9153fe9","LICENSE-MIT":"6a2e0ade09a7d5f816f11566fee2b151b32235a7fad52b41d49cce96f833c1a9","README.md":"1c818a4ea3bf85aaafe27421528a285db92c1f20ae9651c669379cb603495f37","src/lib.rs":"533a5fb5b6506d3719d0b4abb1c3b3334cb1e2ad01aed7eb799e64b435b04c23","src/xdg_user_dirs.rs":"225ae21a97b839330a8c3bc8e0a0b48e40580cbae25bfc47581dff724bb0ebec"},"package":"1b1d1d91c932ef41c0f2663aa8b0ca0342d444d842c06914aa0a7e352d0bada6"}
+\ No newline at end of file
++{"files":{".appveyor.yml":"b23ce89c7619a85a5e74feafe721a1684ce29121e66776759a97efd12f0a734d",".cargo_vcs_info.json":"81f229bd8310a3132e636e49a051bc0e30fedcd56d8f7ced63f662988264bd7e",".travis.yml":"f769cf9bd5154edd6c42e9f727ff791047103f66c60842bfa58be9a02a880e6c","Cargo.toml":"dd6c411fb23e7e3b48627706969919b0f8d9f7bd7411ba70c71ca9067fc2e53f","Cargo.toml.orig":"6df0be18ce0dd00186ad5df398b6d8e50a6f87641356538280c00540096febf2","LICENSE-APACHE":"d3174ad63e721d4c9dccb8ad4320848992d314369bc46319720b5802c9153fe9","LICENSE-MIT":"6a2e0ade09a7d5f816f11566fee2b151b32235a7fad52b41d49cce96f833c1a9","README.md":"1c818a4ea3bf85aaafe27421528a285db92c1f20ae9651c669379cb603495f37","src/lib.rs":"074ef9e977dd55da51ed9d33f1eee452c4a158474c8a9db69f498c2ec6c08b4c","src/xdg_user_dirs.rs":"1a640dfa8b7fb69b273e35165650396210b552114dfad9cb8176b2f26d1d65f1"},"package":"1b1d1d91c932ef41c0f2663aa8b0ca0342d444d842c06914aa0a7e352d0bada6"}
+\ No newline at end of file

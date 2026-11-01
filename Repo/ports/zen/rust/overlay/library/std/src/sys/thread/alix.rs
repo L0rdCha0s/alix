@@ -19,31 +19,51 @@ impl Thread {
         if stack > isize::MAX as usize - 4095 {
             return Err(io::Error::from_raw_os_error(22));
         }
-        unsafe extern "C" fn start(argument: *mut crate::ffi::c_void) {
+        unsafe extern "C" fn start(argument: *mut crate::ffi::c_void) -> *mut crate::ffi::c_void {
             // The parent publishes only a heap-owned ThreadInit allocation.
             let init = unsafe { Box::from_raw(argument.cast::<ThreadInit>()) };
             let rust_start = init.init();
             rust_start();
-            // Native C++-ABI TLS destructors and TSD cleanup run before exit.
-            unsafe { ffi::alix_thread_exit(0) }
+            // Returning to pthread's trampoline publishes completion and runs
+            // native C++-ABI TLS/TSD destruction before the kernel exit.
+            crate::ptr::null_mut()
         }
+        let mut attribute = Box::new(ffi::pthread_attr_t {
+            stack_size: 0, guard_size: 0, stack_address: crate::ptr::null_mut(), detach_state: 0, magic: 0,
+        });
+        let status = unsafe { ffi::pthread_attr_init(&mut *attribute) };
+        if status != 0 { return Err(io::Error::from_raw_os_error(status)); }
+        let status = unsafe { ffi::pthread_attr_setstacksize(&mut *attribute, stack) };
+        if status != 0 {
+            unsafe { ffi::pthread_attr_destroy(&mut *attribute); }
+            return Err(io::Error::from_raw_os_error(status));
+        }
+        let mut id = Box::new(0);
         let argument = Box::into_raw(init);
-        let id = unsafe { ffi::sys_thread_create(start as *const () as usize, argument as usize,
-                                                stack, c"rust_thread".as_ptr()) };
-        if id < 0 {
+        // All published arguments and publication storage are heap-owned.
+        // pthread_create captures attributes before starting the callback.
+        let status = unsafe { ffi::pthread_create(&mut *id, &*attribute, start, argument.cast()) };
+        unsafe { ffi::pthread_attr_destroy(&mut *attribute); }
+        if status != 0 {
             unsafe { drop(Box::from_raw(argument)); }
-            Err(io::Error::from_raw_os_error(11))
-        } else { Ok(Self { id: id as u64 }) }
+            Err(io::Error::from_raw_os_error(status))
+        } else { Ok(Self { id: *id }) }
+    }
+    pub fn id(&self) -> u64 { self.id }
+    pub fn into_id(self) -> u64 {
+        // Transfer the actual joinable pthread to the caller. Do not detach
+        // when consuming the Rust handle; its new owner must join or detach.
+        ManuallyDrop::new(self).id
     }
     pub fn join(self) {
         let thread = ManuallyDrop::new(self);
-        let status = unsafe { ffi::alix_thread_join(thread.id, crate::ptr::null_mut()) };
+        let status = unsafe { ffi::pthread_join(thread.id, crate::ptr::null_mut()) };
         if status != 0 { rtabort!("Alix thread join failed: {}", status); }
     }
 }
 impl Drop for Thread {
     fn drop(&mut self) {
-        if unsafe { ffi::alix_thread_detach(self.id) } != 0 { rtabort!("Alix thread detach failed"); }
+        if unsafe { ffi::pthread_detach(self.id) } != 0 { rtabort!("Alix thread detach failed"); }
     }
 }
 pub fn current_os_id() -> Option<u64> { NonZero::new(unsafe { ffi::sys_thread_self() }).map(NonZero::get) }
@@ -61,6 +81,7 @@ pub fn sleep(duration: Duration) {
         milliseconds -= u128::from(part);
     }
 }
-// Rust preserves Builder names in its own Thread metadata. Alix currently has
-// no native rename syscall; the OS-level name remains "rust_thread".
-pub fn set_name(_name: &CStr) {}
+pub fn set_name(name: &CStr) {
+    // OS naming is best-effort, with the same length limits as native pthreads.
+    unsafe { ffi::pthread_setname_np(ffi::sys_thread_self(), name.as_ptr()); }
+}

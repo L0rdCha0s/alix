@@ -695,7 +695,7 @@ static int atk_mask_background_regions(const atk_state_t *state,
         ATK_LIST_FOR_EACH(node, &state->windows)
         {
             atk_widget_t *window = (atk_widget_t *)node->value;
-            if (!window || !window->used)
+            if (!atk_window_is_visible(window))
             {
                 continue;
             }
@@ -1165,6 +1165,21 @@ void atk_enter_mode(void)
                                     action_open_atk_fileman,
                                     state);
     atk_desktop_set_button_icon(button, ATK_DESKTOP_ICON_BASE "/partitionmanager.png");
+    /* Firmware may offer a smaller mode than the Bochs desktop default. */
+    if (video_screen_width() < 840)
+    {
+        int columns = (video_screen_width() - 48) / 112;
+        if (columns < 1) columns = 1;
+        int index = 0;
+        ATK_LIST_FOR_EACH(node, &state->desktop_buttons)
+        {
+            atk_widget_t *icon = node->value;
+            if (!icon || !icon->used) continue;
+            icon->x = 24 + (index % columns) * 112;
+            icon->y = 80 + (index / columns) * 132;
+            ++index;
+        }
+    }
 #else
     (void)action_exit_to_text;
 #endif
@@ -1329,7 +1344,7 @@ atk_mouse_event_result_t atk_handle_mouse_event(int dx,
         ATK_LIST_FOR_EACH_REVERSE(resize_node, &state->windows)
         {
             atk_widget_t *win = (atk_widget_t *)resize_node->value;
-            if (!win || !win->used)
+            if (!atk_window_is_visible(win))
             {
                 continue;
             }

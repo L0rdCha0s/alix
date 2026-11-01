@@ -60,7 +60,7 @@ static void vfs_mark_meta_dirty(vfs_node_t *n) { (void)n; }
                       "static bool is_dot_dot(", "static char *vfs_strdup(", "static bool next_component(",
                       "static const char *vfs_node_symlink_target(", "static bool vfs_assign_symlink_target(",
                       "static vfs_node_t *vfs_readlink_resolve_locked(", "ssize_t vfs_readlink_snapshot(",
-                      "bool vfs_stat(", "ssize_t vfs_path_snapshot(", "int vfs_path_stat_snapshot(",
+                      "bool vfs_stat(", "ssize_t vfs_node_path_snapshot(", "ssize_t vfs_path_snapshot(", "int vfs_path_stat_snapshot(",
                       "bool vfs_node_try_retain(", "int vfs_resolve_owned("):
         code += function_definition(source, signature) + "\n"
     code += r'''

@@ -1,4 +1,5 @@
 #include "arch/x86/bootlayout.h"
+#include "arch/x86/smp_boot.h"
 #include "bootinfo.h"
 #include "uefi.h"
 
@@ -59,6 +60,7 @@ typedef struct __attribute__((packed))
 
 static EFI_SYSTEM_TABLE *g_st = NULL;
 static EFI_BOOT_SERVICES *g_bs = NULL;
+static bool g_serial_present;
 
 typedef void (*kernel_entry_t)(bootinfo_t *) __attribute__((sysv_abi));
 
@@ -174,15 +176,23 @@ static void serial_early_init(void)
     outb(com1 + 3, 0x03);
     outb(com1 + 2, 0xC7);
     outb(com1 + 4, 0x0B);
+    uint8_t saved = inb(com1 + 7);
+    outb(com1 + 7, 0x5a);
+    g_serial_present = inb(com1 + 7) == 0x5a;
+    outb(com1 + 7, saved);
     initialized = true;
 }
 
 static void serial_early_write_char(char c)
 {
     const uint16_t com1 = 0x3F8;
-    while ((inb(com1 + 5) & 0x20) == 0)
+    if (!g_serial_present) return;
+    unsigned polls = 100000;
+    while ((inb(com1 + 5) & 0x20) == 0 && --polls)
     {
+        __asm__ volatile ("pause");
     }
+    if (!polls) { g_serial_present = false; return; }
     outb(com1, (uint8_t)c);
 }
 
@@ -423,11 +433,14 @@ static EFI_STATUS load_kernel_segments(const uint8_t *image,
     {
         return EFI_UNSUPPORTED;
     }
-    if (eh->e_phoff == 0 || eh->e_phentsize != sizeof(elf64_phdr_t))
+    if (eh->e_machine != 62 || eh->e_type != 2 || !eh->e_phnum || eh->e_phnum > 64 ||
+        eh->e_phoff > image_size || eh->e_phnum > (image_size - eh->e_phoff) / sizeof(elf64_phdr_t) ||
+        eh->e_phoff == 0 || eh->e_phentsize != sizeof(elf64_phdr_t))
     {
         return EFI_LOAD_ERROR;
     }
 
+    bool executable_entry = false;
     const elf64_phdr_t *ph = (const elf64_phdr_t *)(image + eh->e_phoff);
     for (uint16_t i = 0; i < eh->e_phnum; ++i, ++ph)
     {
@@ -435,10 +448,15 @@ static EFI_STATUS load_kernel_segments(const uint8_t *image,
         {
             continue;
         }
-        if (ph->p_offset + ph->p_filesz > image_size)
+        if (ph->p_offset > image_size || ph->p_filesz > image_size - ph->p_offset ||
+            ph->p_filesz > ph->p_memsz || !ph->p_memsz || ph->p_paddr != ph->p_vaddr ||
+            ph->p_paddr < KERNEL_VMA_BASE || ph->p_paddr >= 0x100000000ULL ||
+            ph->p_memsz > 0x100000000ULL - ph->p_paddr)
         {
             return EFI_LOAD_ERROR;
         }
+        if ((ph->p_flags & 1) && eh->e_entry >= ph->p_vaddr && eh->e_entry - ph->p_vaddr < ph->p_memsz)
+            executable_entry = true;
 
         EFI_PHYSICAL_ADDRESS segment_start = ph->p_paddr & ~(EFI_PAGE_SIZE - 1);
         UINTN segment_pages = EFI_SIZE_TO_PAGES(ph->p_memsz + (ph->p_paddr - segment_start));
@@ -457,6 +475,7 @@ static EFI_STATUS load_kernel_segments(const uint8_t *image,
         }
     }
 
+    if (!executable_entry) return EFI_LOAD_ERROR;
     if (entry_out)
     {
         *entry_out = (kernel_entry_t)(uintptr_t)(eh->e_entry);
@@ -561,7 +580,7 @@ static void capture_framebuffer(bootinfo_t *info)
         return;
     }
 
-    info->framebuffer_enabled = 1;
+    info->framebuffer_enabled = 0;
     info->framebuffer_base = (uint64_t)gop->Mode->FrameBufferBase;
     info->framebuffer_size = (uint64_t)gop->Mode->FrameBufferSize;
     info->framebuffer_width = gop->Mode->Info->HorizontalResolution;
@@ -570,31 +589,57 @@ static void capture_framebuffer(bootinfo_t *info)
     switch (gop->Mode->Info->PixelFormat)
     {
         case PixelBlueGreenRedReserved8BitPerColor:
+            info->framebuffer_red_mask = 0xff0000;
+            info->framebuffer_green_mask = 0xff00;
+            info->framebuffer_blue_mask = 0xff;
+            info->framebuffer_bpp = 32;
+            break;
         case PixelRedGreenBlueReserved8BitPerColor:
+            info->framebuffer_red_mask = 0xff;
+            info->framebuffer_green_mask = 0xff00;
+            info->framebuffer_blue_mask = 0xff0000;
+            info->framebuffer_bpp = 32;
+            break;
         case PixelBitMask:
+            info->framebuffer_red_mask = gop->Mode->Info->PixelInformation.RedMask;
+            info->framebuffer_green_mask = gop->Mode->Info->PixelInformation.GreenMask;
+            info->framebuffer_blue_mask = gop->Mode->Info->PixelInformation.BlueMask;
             info->framebuffer_bpp = 32;
             break;
         default:
             info->framebuffer_bpp = 0;
             break;
     }
+    uint64_t bytes = (uint64_t)info->framebuffer_pitch * info->framebuffer_height * 4;
+    if (info->framebuffer_bpp == 32 && info->framebuffer_base &&
+        info->framebuffer_width && info->framebuffer_height &&
+        info->framebuffer_pitch >= info->framebuffer_width && bytes <= info->framebuffer_size &&
+        info->framebuffer_base + info->framebuffer_size >= info->framebuffer_base)
+        info->framebuffer_enabled = 1;
 }
 
-static void reserve_region(EFI_PHYSICAL_ADDRESS base, uint64_t size)
+static EFI_PHYSICAL_ADDRESS allocate_boot_pages(UINTN pages)
 {
-    UINTN pages = EFI_SIZE_TO_PAGES(size);
-    EFI_PHYSICAL_ADDRESS address = base & ~(EFI_PAGE_SIZE - 1);
-    g_bs->AllocatePages(EfiAllocateAddress, EfiLoaderData, pages, &address);
+    EFI_PHYSICAL_ADDRESS address = 0xffffffffULL;
+    EFI_STATUS status = g_bs->AllocatePages(EfiAllocateMaxAddress, EfiReservedMemoryType, pages, &address);
+    if (efi_error(status)) panic_status(L"Cannot allocate boot memory below 4 GiB", status);
+    return address;
 }
 
-static void reserve_kernel_regions(void)
+static void reserve_kernel_regions(bootinfo_t *info)
 {
-    reserve_region(PAGE_TABLE_BASE, PAGE_TABLE_PAGES * EFI_PAGE_SIZE);
-    reserve_region(STACK_TOP - STACK_SIZE, STACK_SIZE);
+    info->page_table_base = allocate_boot_pages(PAGE_TABLE_PAGES);
+    info->stack_top = allocate_boot_pages(EFI_SIZE_TO_PAGES(STACK_SIZE)) + STACK_SIZE;
+    /* The real-mode trampoline currently has fixed relocations. If firmware
+     * owns those pages, continue with one CPU instead of overwriting them. */
+    EFI_PHYSICAL_ADDRESS low = SMP_BOOT_DATA_PHYS - EFI_PAGE_SIZE;
+    EFI_STATUS status = g_bs->AllocatePages(EfiAllocateAddress, EfiReservedMemoryType, 3, &low);
+    info->smp_boot_reserved = !efi_error(status);
+    if (!info->smp_boot_reserved) log_line(L"AP bootstrap memory unavailable; using one CPU");
 }
 
 
-static void convert_to_e820(bootinfo_t *info,
+static bool convert_to_e820(bootinfo_t *info,
                             EFI_MEMORY_DESCRIPTOR *map,
                             UINTN map_size,
                             UINTN descriptor_size)
@@ -606,7 +651,7 @@ static void convert_to_e820(bootinfo_t *info,
     {
         if (info->e820_entry_count >= BOOTINFO_MAX_E820_ENTRIES)
         {
-            break;
+            return false;
         }
         EFI_MEMORY_DESCRIPTOR *desc = (EFI_MEMORY_DESCRIPTOR *)(cursor + (i * descriptor_size));
         bootinfo_e820_entry_t *entry = &info->e820[info->e820_entry_count++];
@@ -615,6 +660,7 @@ static void convert_to_e820(bootinfo_t *info,
         entry->type = efi_type_to_e820(desc->Type);
         entry->attr = (uint32_t)(desc->Attribute & 0xFFFFFFFFULL);
     }
+    return true;
 }
 
 static EFI_STATUS exit_boot_services(EFI_HANDLE image_handle, bootinfo_t *info)
@@ -681,8 +727,11 @@ static EFI_STATUS exit_boot_services(EFI_HANDLE image_handle, bootinfo_t *info)
             return status;
         }
 
+        if (descriptor_size < sizeof(EFI_MEMORY_DESCRIPTOR) || size % descriptor_size != 0)
+        { g_bs->FreePool(map); return EFI_LOAD_ERROR; }
         map_size = size;
-        convert_to_e820(info, map, map_size, descriptor_size);
+        if (!convert_to_e820(info, map, map_size, descriptor_size))
+        { g_bs->FreePool(map); return EFI_BUFFER_TOO_SMALL; }
 
         serial_early_write_string("[alix-serial]  calling ExitBootServices map_key 0x");
         serial_early_write_hex64(map_key);
@@ -731,10 +780,14 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
 
     log_line(L"[alix] loader start");
 
-    bootinfo_t boot_info;
-    zero_memory(&boot_info, sizeof(boot_info));
-    boot_info.magic = BOOTINFO_MAGIC;
-    boot_info.version = BOOTINFO_VERSION;
+    uint64_t cr4;
+    __asm__ volatile ("mov %%cr4, %0" : "=r"(cr4));
+    if (cr4 & (1ULL << 12)) panic(L"Five-level firmware paging is not supported");
+    EFI_PHYSICAL_ADDRESS boot_info_phys = allocate_boot_pages(EFI_SIZE_TO_PAGES(sizeof(bootinfo_t)));
+    bootinfo_t *boot_info = (bootinfo_t *)(uintptr_t)boot_info_phys;
+    zero_memory(boot_info, sizeof(*boot_info));
+    boot_info->magic = BOOTINFO_MAGIC;
+    boot_info->version = BOOTINFO_VERSION;
 
     EFI_FILE_PROTOCOL *root = NULL;
     EFI_STATUS status = open_root_volume(image_handle, &root);
@@ -773,21 +826,11 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     }
     log_line(L"Kernel segments loaded");
 
-    capture_framebuffer(&boot_info);
-    capture_acpi_rsdp(&boot_info);
-    reserve_kernel_regions();
+    capture_framebuffer(boot_info);
+    capture_acpi_rsdp(boot_info);
+    reserve_kernel_regions(boot_info);
     log_line(L"System info captured");
 
-    EFI_PHYSICAL_ADDRESS boot_info_phys = 0;
-    status = g_bs->AllocatePages(EfiAllocateAnyPages,
-                                 EfiLoaderData,
-                                 EFI_SIZE_TO_PAGES(sizeof(bootinfo_t)),
-                                 &boot_info_phys);
-    if (efi_error(status))
-    {
-        panic(L"Failed to allocate bootinfo");
-    }
-    copy_memory((void *)(uintptr_t)boot_info_phys, &boot_info, sizeof(bootinfo_t));
     log_hex(L"Bootinfo at: ", boot_info_phys);
 
     log_line(L"Exiting boot services");

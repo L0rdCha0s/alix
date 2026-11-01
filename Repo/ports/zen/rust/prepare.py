@@ -92,6 +92,10 @@ def patch_selectors(publish):
         "io/error/mod.rs": "        mod alix;\n        pub use alix::*;",
         "random/mod.rs": "        mod alix;\n        pub use alix::fill_bytes;",
         "args/mod.rs": "        mod alix;\n        pub use alix::*;",
+        "fs/mod.rs": "        mod alix;\n        use alix as imp;",
+        "pipe/mod.rs": "        mod alix;\n        pub use alix::{Pipe, pipe};",
+        "env/mod.rs": "        mod alix;\n        pub use alix::*;",
+        "paths/mod.rs": "        mod alix;\n        use alix as imp;",
     }.items(): branch(base + path, body)
     # Reuse upstream concurrent algorithms, replacing only the OS wait boundary.
     for item, exports in {"mutex": "Mutex", "condvar": "Condvar", "once": "Once, OnceState",
@@ -104,6 +108,69 @@ def patch_selectors(publish):
     relative = "library/std/build.rs"
     original = (pristine / relative).read_text()
     patches[relative] = original, original.replace('if target_os == "linux"', 'if target_os == "alix"\n        || target_os == "linux"', 1)
+    relative = "library/std/src/os/mod.rs"
+    original = (pristine / relative).read_text()
+    anchor = "pub mod raw;\n"
+    if original.count(anchor) != 1: raise RuntimeError("native OS module selector changed")
+    patches[relative] = original, original.replace(anchor, anchor + '''
+#[cfg(target_os = "alix")]
+pub mod alix;
+''', 1)
+    original, changed = patches[relative]
+    anchor = '#[cfg(any(\n    unix,\n    target_os = "hermit",'
+    if changed.count(anchor) != 1: raise RuntimeError("native fd module selector changed")
+    patches[relative] = original, changed.replace(anchor, '#[cfg(any(\n    unix,\n    target_os = "alix",\n    target_os = "hermit",', 1)
+    relative = "library/std/src/os/fd/mod.rs"
+    original = (pristine / relative).read_text()
+    anchor = '#[cfg(not(target_os = "trusty"))]\nmod net;'
+    if original.count(anchor) != 1: raise RuntimeError("network fd selector changed")
+    patches[relative] = original, original.replace(anchor, '#[cfg(not(any(target_os = "trusty", target_os = "alix")))]\nmod net;', 1)
+    for name in ("owned", "raw"):
+        relative = f"library/std/src/os/fd/{name}.rs"
+        original = (pristine / relative).read_text()
+        changed = original.replace('use super::', '#[cfg(target_os = "alix")]\nuse crate::sys::ffi as libc;\n\nuse super::', 1) if name == "owned" else original.replace('use crate::io;', '#[cfg(target_os = "alix")]\nuse crate::sys::ffi as libc;\nuse crate::io;', 1)
+        if name == "raw":
+            anchor = '#[cfg(target_os = "motor")]\nuse super::owned::OwnedFd;'
+            if changed.count(anchor) != 1: raise RuntimeError("native OwnedFd import changed")
+            changed = changed.replace(anchor, '#[cfg(any(target_os = "motor", target_os = "alix"))]\nuse super::owned::OwnedFd;', 1)
+        else:
+            a = changed.index('impl AsFd for crate::net::TcpStream')
+            a = changed.rfind('#[stable(', 0, a)
+            b = changed.index('#[stable(feature = "asfd_ptrs"', a)
+            section = changed[a:b]
+            if section.count('#[cfg(not(target_os = "trusty"))]') != 9: raise RuntimeError("network fd conversions changed")
+            changed = changed[:a] + section.replace('#[cfg(not(target_os = "trusty"))]', '#[cfg(not(any(target_os = "trusty", target_os = "alix")))]') + changed[b:]
+        patches[relative] = original, changed
+    relative = "library/std/src/sys/process/unsupported.rs"
+    original = (pristine / relative).read_text()
+    changed = original.replace('        pipe.diverge()', '''        #[cfg(target_os = "alix")]
+        {
+            use crate::sys::{FromInner, IntoInner};
+            Stdio::InheritFile(FromInner::from_inner(FromInner::from_inner(pipe.into_inner())))
+        }
+        #[cfg(not(target_os = "alix"))]
+        pipe.diverge()''', 1)
+    changed = changed.replace('    match out.diverge() {}', '''    #[cfg(target_os = "alix")]
+    { drop(out); unsupported() }
+    #[cfg(not(target_os = "alix"))]
+    match out.diverge() {}''', 1)
+    changed = changed.replace('    panic!("no pids on this platform")', '''    #[cfg(target_os = "alix")]
+    { unsafe { crate::sys::ffi::getpid() as u32 } }
+    #[cfg(not(target_os = "alix"))]
+    panic!("no pids on this platform")''', 1)
+    if changed == original: raise RuntimeError("native stdio process bridge changed")
+    patches[relative] = original, changed
+    relative = base + "env/mod.rs"
+    original, changed = patches[relative]
+    anchor = '#[cfg(any(\n    target_family = "unix",'
+    if changed.count(anchor) != 1: raise RuntimeError("native environment common selector changed")
+    patches[relative] = original, changed.replace(anchor, '#[cfg(any(\n    target_os = "alix",\n    target_family = "unix",', 1)
+    relative = base + "path/unix.rs"
+    original = (pristine / relative).read_text()
+    anchor = 'cfg!(any(unix, target_os = "hermit", target_os = "wasi", target_os = "motor"))'
+    if original.count(anchor) != 1: raise RuntimeError("native absolute-path selector changed")
+    patches[relative] = original, original.replace(anchor,
+        'cfg!(any(unix, target_os = "alix", target_os = "hermit", target_os = "wasi", target_os = "motor"))', 1)
     relative = base + "exit.rs"
     original = (pristine / relative).read_text()
     changed = original.replace('pub fn exit(code: i32) -> ! {\n    cfg_select! {',

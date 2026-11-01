@@ -263,7 +263,7 @@ void atk_window_draw_all(const atk_state_t *state, const atk_rect_t *clip)
             ATK_WINDOW_LOG("[atk_window] window pointer corrupt node=%p (draw_all)", node);
         }
 
-        if (window && window->used && window_intersects_clip(window, clip))
+        if (atk_window_is_visible(window) && window_intersects_clip(window, clip))
         {
             window_draw_internal(state, window);
         }
@@ -290,7 +290,7 @@ void atk_window_draw_all_except(const atk_state_t *state, const atk_rect_t *clip
             ATK_WINDOW_LOG("[atk_window] window pointer corrupt node=%p (draw_all_except)", node);
         }
 
-        if (window && window->used && (!skip || window != skip) && window_intersects_clip(window, clip))
+        if (atk_window_is_visible(window) && (!skip || window != skip) && window_intersects_clip(window, clip))
         {
             window_draw_internal(state, window);
         }
@@ -332,7 +332,7 @@ atk_widget_t *atk_window_hit_test(const atk_state_t *state, int x, int y)
     ATK_LIST_FOR_EACH_REVERSE(node, &state->windows)
     {
         atk_widget_t *window = (atk_widget_t *)node->value;
-        if (!window || !window->used)
+        if (!atk_window_is_visible(window))
         {
             continue;
         }
@@ -356,7 +356,7 @@ atk_widget_t *atk_window_title_hit_test(const atk_state_t *state, int x, int y)
     ATK_LIST_FOR_EACH_REVERSE(node, &state->windows)
     {
         atk_widget_t *window = (atk_widget_t *)node->value;
-        if (!window || !window->used)
+        if (!atk_window_is_visible(window))
         {
             continue;
         }
@@ -626,6 +626,7 @@ atk_widget_t *atk_window_create_at(atk_state_t *state, int x, int y)
     priv->user_context = NULL;
     priv->on_destroy = NULL;
     priv->chrome_visible = true;
+    priv->hidden = false;
     priv->shaded = false;
     priv->shade_restore_height = 0;
     priv->surface = NULL;
@@ -779,10 +780,63 @@ void *atk_window_context(const atk_widget_t *window)
     return priv ? priv->user_context : NULL;
 }
 
+bool atk_window_is_visible(const atk_widget_t *window)
+{
+    const atk_window_priv_t *priv = window_priv(window);
+    return window && window->used && priv && !priv->hidden;
+}
+
+static bool window_owns_widget(const atk_widget_t *window, const atk_widget_t *widget)
+{
+    /* Parent ownership is acyclic; bound a corrupted chain defensively. */
+    for (unsigned depth = 0; widget && depth < 256; ++depth, widget = widget->parent)
+        if (widget == window) return true;
+    return false;
+}
+
+void atk_window_set_visible(atk_state_t *state, atk_widget_t *window, bool visible)
+{
+    atk_window_priv_t *priv = window_priv_mut(window);
+    if (!state || !priv || !window->used || priv->hidden == !visible) return;
+    atk_window_mark_dirty(window);
+    priv->hidden = !visible;
+    if (!visible)
+    {
+        if (state->dragging_window == window)
+        {
+            state->dragging_window = NULL; state->drag_window_surface = NULL;
+            state->drag_active = state->drag_scene_valid = false;
+        }
+        if (state->resizing_window == window)
+        {
+            state->resizing_window = NULL; state->resize_edges = 0; state->resize_band.active = false;
+        }
+        if (state->pressed_window_button_window == window)
+        {
+            state->pressed_window_button_window = NULL; state->pressed_window_button = NULL;
+        }
+        if (window_owns_widget(window, atk_state_focus_widget(state)))
+            atk_state_set_focus_widget(state, NULL);
+        if (window_owns_widget(window, state->mouse_capture_widget))
+            atk_state_set_mouse_capture(state, NULL);
+    }
+    atk_dirty_mark_all();
+}
+
 bool atk_window_is_chrome_visible(const atk_widget_t *window)
 {
     const atk_window_priv_t *priv = window_priv(window);
     return priv ? priv->chrome_visible : true;
+}
+
+void atk_window_set_chrome_style(atk_widget_t *window, bool visible)
+{
+    atk_window_priv_t *priv = window_priv_mut(window);
+    if (!priv) return;
+    priv->chrome_visible = visible;
+    priv->shaded = false; priv->shade_restore_height = 0;
+    priv->surface_valid = false;
+    atk_window_mark_dirty(window);
 }
 
 void atk_window_set_chrome_visible(atk_widget_t *window, bool visible)
@@ -1146,7 +1200,7 @@ static void window_after_size_change(atk_widget_t *window)
 
 static void window_draw_internal(const atk_state_t *state, const atk_widget_t *window)
 {
-    if (!state || !window || !window->used)
+    if (!state || !atk_window_is_visible(window))
     {
         return;
     }

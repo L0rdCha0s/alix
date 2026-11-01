@@ -68,12 +68,18 @@ C_SOURCES += $(KERNEL_DIR)/io/directory_service.c
 C_SOURCES += $(KERNEL_DIR)/io/event_service.c
 C_SOURCES += $(KERNEL_DIR)/io/tcp.c
 C_SOURCES += $(KERNEL_DIR)/io/pipe.c
+C_SOURCES += $(KERNEL_DIR)/io/audio.c
+C_SOURCES += $(KERNEL_DIR)/io/poll.c
 C_SOURCES += $(KERNEL_DIR)/io/stream.c
 C_SOURCES += $(KERNEL_DIR)/io/user_file.c
 C_SOURCES += $(KERNEL_DIR)/io/process.c
 
 C_OBJECTS := $(patsubst $(SRC_DIR)/%.c,$(OBJDIR)/%.o,$(C_SOURCES))
 C_OBJECTS += $(DL_SCRIPT_OBJ)
+HARDWARE_SELFTEST ?= 0
+ifeq ($(HARDWARE_SELFTEST),1)
+C_OBJECTS += $(OBJDIR)/tests/hardware_boot_test.o
+endif
 
 # Optional boot-only acceptance object; ordinary kernels retain only a weak hook.
 SHELL_CWD_SELFTEST ?= 0
@@ -123,8 +129,16 @@ USER_COMMON_SOURCES := \
 	$(USER_DIR)/lib/signal.c \
 	$(USER_DIR)/lib/mman.c \
 	$(USER_DIR)/lib/random.c \
+	$(USER_DIR)/lib/audio.c \
 	$(USER_DIR)/lib/pthread.c \
 	$(USER_DIR)/lib/pthread_rwlock.c \
+	$(USER_DIR)/lib/semaphore.c \
+	$(USER_DIR)/lib/socket.c \
+	$(USER_DIR)/lib/inet.c \
+	$(USER_DIR)/lib/dns.c \
+	$(USER_DIR)/lib/netdb.c \
+	$(USER_DIR)/lib/pwd.c \
+	$(USER_DIR)/lib/select.c \
 	$(USER_DIR)/lib/process_posix.c \
 	$(USER_DIR)/lib/process_spawn.c \
 	$(USER_DIR)/lib/spawn.c \
@@ -313,6 +327,11 @@ WEB_RENDER_HARNESS_HEADERS := $(wildcard \
 KERNEL_ELF := $(OBJDIR)/alix.elf
 EFI_DIR    := build/EFI/BOOT
 EFI_BIN    := $(EFI_DIR)/BOOTX64.EFI
+# Firmware reads only these two files. Never expose the whole build tree as
+# QEMU's FAT16 volume: debug objects, test output and ports can exceed its limit.
+BOOT_DIR   ?= $(OBJDIR)/boot
+BOOT_KERNEL := $(BOOT_DIR)/alix.elf
+BOOT_EFI    := $(BOOT_DIR)/EFI/BOOT/BOOTX64.EFI
 DATA_IMG   := data.img
 LOADER_SRC := $(LOADER_DIR)/uefi_loader.c
 LOADER_CC  ?= x86_64-w64-mingw32-gcc
@@ -329,7 +348,20 @@ TCG_CPU_TYPE ?= qemu64,+rdrand
 SMP_CORES ?= 8
 QEMU_SMP_OPTS := -smp $(SMP_CORES),sockets=1,cores=$(SMP_CORES),threads=1
 
-all: $(KERNEL_ELF) $(EFI_BIN) $(USER_ELFS) $(USER_BINS) $(HTML_VIEW_TEST_BIN)
+all: boot-volume $(USER_ELFS) $(USER_BINS) $(HTML_VIEW_TEST_BIN)
+
+.PHONY: boot-volume
+boot-volume: $(BOOT_KERNEL) $(BOOT_EFI)
+
+$(BOOT_KERNEL): $(KERNEL_ELF)
+	@mkdir -p $(dir $@)
+	cp $< $@.tmp
+	mv -f $@.tmp $@
+
+$(BOOT_EFI): $(EFI_BIN)
+	@mkdir -p $(dir $@)
+	cp $< $@.tmp
+	mv -f $@.tmp $@
 
 # Relink after dependency-list changes, including removal of a library.
 $(USER_ELFS): Makefile
@@ -360,6 +392,10 @@ $(OBJDIR)/tests/io_service_boot_test.o: tests/io_service_boot_test.c
 	$(CC) $(KERNEL_CFLAGS) -c -o $@ $<
 
 $(OBJDIR)/tests/vfs_io_boot_test.o: tests/vfs_io_boot_test.c
+	@mkdir -p $(dir $@)
+	$(CC) $(KERNEL_CFLAGS) -c -o $@ $<
+
+$(OBJDIR)/tests/hardware_boot_test.o: tests/hardware_boot_test.c
 	@mkdir -p $(dir $@)
 	$(CC) $(KERNEL_CFLAGS) -c -o $@ $<
 
@@ -985,6 +1021,19 @@ QEMU_MACHINE_OPTS := -machine q35,accel=$(QEMU_ACCEL)
 # their PS/2 input path, so leave no unserviced keyboard for the display backend
 # to select.  The dedicated run-ps2-hdd target intentionally keeps i8042.
 QEMU_USB_MACHINE_OPTS := -machine q35,accel=$(QEMU_ACCEL),i8042=off
+# Exercise the same controller used by current physical PCs. The UHCI path
+# remains available for regression testing with USB_HOST=uhci.
+USB_HOST ?= xhci
+ifeq ($(USB_HOST),uhci)
+QEMU_USB_HOST := -device ich9-usb-uhci1,id=usbhost
+else
+QEMU_USB_HOST := -device qemu-xhci,id=usbhost
+endif
+QEMU_USB_INPUT := -device usb-kbd,bus=usbhost.0 -device usb-mouse,bus=usbhost.0
+USB_STORAGE_IMG ?=
+ifneq ($(strip $(USB_STORAGE_IMG)),)
+QEMU_USB_STORAGE := -drive if=none,id=usbdisk,file=$(USB_STORAGE_IMG),format=raw -device usb-storage,bus=usbhost.0,drive=usbdisk
+endif
 
 # --- choose networking backend: user (slirp), vmnet-shared (NAT), vmnet-bridged (bridge en0)
 NET_BACKEND ?= vmnet-shared
@@ -1029,19 +1078,20 @@ HDA_CONTROLLER ?= intel-hda
 HDA_AUDIO_ID ?= snd0
 QEMU_AUDIO := -audiodev $(AUDIO_DEV),id=$(HDA_AUDIO_ID)
 
-run: $(EFI_BIN) $(DATA_IMG) $(USER_ELFS) $(USER_BINS)
+# ide-hd requires a writable block device. A temporary overlay accepts guest
+# writes while keeping the staged FAT boot files read-only on the host.
+QEMU_BOOT_DISK := -drive if=none,id=fsdisk,file=fat:ro:$(BOOT_DIR),format=raw,snapshot=on
+
+run: boot-volume $(DATA_IMG) $(USER_ELFS) $(USER_BINS)
 	$(QEMU_NET_PREFIX) \
 	$(QEMU) -nodefaults -m $(RAM) $(QEMU_USB_MACHINE_OPTS) $(QEMU_CPU_OPTS) $(QEMU_SMP_OPTS) $(QEMU_GDB_FLAGS) \
 		-drive if=pflash,unit=0,format=raw,readonly=on,file=$(OVMF_CODE) \
 		-drive if=pflash,unit=1,format=raw,file=$(OVMF_VARS) \
-		-drive if=none,id=fsdisk,file=fat:rw:build,format=raw \
-		-device ich9-usb-uhci1 \
-		-device ich9-usb-uhci2 \
-		-device ich9-usb-uhci3 \
+		$(QEMU_BOOT_DISK) \
+		$(QEMU_USB_HOST) $(QEMU_USB_STORAGE) \
 		-device $(HDA_CONTROLLER) \
 		-device $(HDA_MODEL),audiodev=$(HDA_AUDIO_ID) \
-		-device usb-kbd \
-		-device usb-mouse \
+		$(QEMU_USB_INPUT) \
 		-device ahci,id=ahci0 \
 		-device ide-hd,drive=fsdisk,bus=ahci0.0 \
 		-drive if=none,id=data,file=$(DATA_IMG),format=raw,media=disk \
@@ -1050,19 +1100,16 @@ run: $(EFI_BIN) $(DATA_IMG) $(USER_ELFS) $(USER_BINS)
 		$(QEMU_AUDIO) \
 		$(QEMU_DEBUG_FLAGS) $(NETDEV) $(NETDUMP) $(NIC)
 
-run-hdd: $(EFI_BIN) $(DATA_IMG) $(USER_ELFS) $(USER_BINS)
+run-hdd: boot-volume $(DATA_IMG) $(USER_ELFS) $(USER_BINS)
 	$(QEMU_NET_PREFIX) \
 	$(QEMU) -nodefaults -m $(RAM) $(QEMU_USB_MACHINE_OPTS) $(QEMU_CPU_OPTS) $(QEMU_SMP_OPTS) $(QEMU_GDB_FLAGS) \
 		-drive if=pflash,unit=0,format=raw,readonly=on,file=$(OVMF_CODE) \
 		-drive if=pflash,unit=1,format=raw,file=$(OVMF_VARS) \
-		-drive if=none,id=fsdisk,file=fat:rw:build,format=raw \
-		-device ich9-usb-uhci1 \
-		-device ich9-usb-uhci2 \
-		-device ich9-usb-uhci3 \
+		$(QEMU_BOOT_DISK) \
+		$(QEMU_USB_HOST) $(QEMU_USB_STORAGE) \
 		-device $(HDA_CONTROLLER) \
 		-device $(HDA_MODEL),audiodev=$(HDA_AUDIO_ID) \
-		-device usb-kbd \
-		-device usb-mouse \
+		$(QEMU_USB_INPUT) \
 		-device ahci,id=ahci0 \
 		-device ide-hd,drive=fsdisk,bus=ahci0.0 \
 		-drive if=none,id=data,file=$(DATA_IMG),format=raw,media=disk \
@@ -1071,19 +1118,16 @@ run-hdd: $(EFI_BIN) $(DATA_IMG) $(USER_ELFS) $(USER_BINS)
 		$(QEMU_AUDIO) \
 		$(QEMU_DEBUG_FLAGS) $(NETDEV) $(NETDUMP) $(NIC)
 
-run-hdd-rtl: $(EFI_BIN) $(DATA_IMG) $(USER_ELFS) $(USER_BINS)
+run-hdd-rtl: boot-volume $(DATA_IMG) $(USER_ELFS) $(USER_BINS)
 	$(QEMU_NET_PREFIX) \
 	$(QEMU) -nodefaults -m $(RAM) $(QEMU_USB_MACHINE_OPTS) $(QEMU_CPU_OPTS) $(QEMU_SMP_OPTS) $(QEMU_GDB_FLAGS) \
 		-drive if=pflash,unit=0,format=raw,readonly=on,file=$(OVMF_CODE) \
 		-drive if=pflash,unit=1,format=raw,file=$(OVMF_VARS) \
-		-drive if=none,id=fsdisk,file=fat:rw:build,format=raw \
-		-device ich9-usb-uhci1 \
-		-device ich9-usb-uhci2 \
-		-device ich9-usb-uhci3 \
+		$(QEMU_BOOT_DISK) \
+		$(QEMU_USB_HOST) $(QEMU_USB_STORAGE) \
 		-device $(HDA_CONTROLLER) \
 		-device $(HDA_MODEL),audiodev=$(HDA_AUDIO_ID) \
-		-device usb-kbd \
-		-device usb-mouse \
+		$(QEMU_USB_INPUT) \
 		-device ahci,id=ahci0 \
 		-device ide-hd,drive=fsdisk,bus=ahci0.0 \
 		-drive if=none,id=data,file=$(DATA_IMG),format=raw,media=disk \
@@ -1093,12 +1137,12 @@ run-hdd-rtl: $(EFI_BIN) $(DATA_IMG) $(USER_ELFS) $(USER_BINS)
 		$(QEMU_DEBUG_FLAGS) $(NETDEV) $(NETDUMP) $(NIC_RTL)
 
 run-ps2-hdd: USB=0
-run-ps2-hdd: $(EFI_BIN) $(DATA_IMG) $(USER_ELFS) $(USER_BINS)
+run-ps2-hdd: boot-volume $(DATA_IMG) $(USER_ELFS) $(USER_BINS)
 	$(QEMU_NET_PREFIX) \
 	$(QEMU) -nodefaults -m $(RAM) $(QEMU_MACHINE_OPTS) $(QEMU_CPU_OPTS) $(QEMU_SMP_OPTS) $(QEMU_GDB_FLAGS) \
 		-drive if=pflash,unit=0,format=raw,readonly=on,file=$(OVMF_CODE) \
 		-drive if=pflash,unit=1,format=raw,file=$(OVMF_VARS) \
-		-drive if=none,id=fsdisk,file=fat:rw:build,format=raw \
+		$(QEMU_BOOT_DISK) \
 		-device $(HDA_CONTROLLER) \
 		-device $(HDA_MODEL),audiodev=$(HDA_AUDIO_ID) \
 		-device ahci,id=ahci0 \

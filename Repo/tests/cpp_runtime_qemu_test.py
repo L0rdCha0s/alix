@@ -2,7 +2,9 @@
 """Execute the native C++ startup test in an isolated, bounded Alix QEMU boot."""
 
 from functools import partial
+import hashlib
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+import json
 from pathlib import Path
 import os
 import re
@@ -18,7 +20,7 @@ import time
 
 sys.dont_write_bytecode = True
 import process_lock_stress_test as harness
-from quake_gui_liveness_test import QmpClient
+from quake_gui_liveness_test import QmpClient, move_mouse_to_terminal, hmp_send_keys
 
 ROOT = Path(__file__).resolve().parents[1]
 LOG = ROOT / "build/test-out/cpp-runtime-qemu.log"
@@ -63,7 +65,8 @@ def native_elf_symbol(binary, name):
 
 def start_user_breakpoint(qmp, staging, log_path, binary, definition):
     """Capture the actual guest call stack at a native user symbol, then detach."""
-    symbol, symbols = definition
+    symbol, symbols = definition[:2]
+    extra_commands = "\n".join(definition[2]) if len(definition) > 2 else ""
     address = native_elf_symbol(binary, symbol)
     if native_elf_symbol(symbols, symbol) != address:
         raise RuntimeError("debug symbols do not match the native breakpoint address")
@@ -85,6 +88,7 @@ hbreak *{address}
 commands
  silent
  echo ALIX_USER_BREAKPOINT_HIT\\n
+{extra_commands}
  info registers rip rsp rbp rax rdi rsi rdx
  bt 32
  x/gx $rsp
@@ -165,12 +169,13 @@ def verify_signal_termination(phase, binary, expected):
             raise RuntimeError("expected invalid-opcode site is not UD2 in the actual ELF")
 
 
-def capture_guest_failure(qmp, staging, log_path, user_binary=None):
+def capture_guest_failure(qmp, staging, log_path, user_binary=None, kernel_binary=None):
     """Retain stopped-guest evidence before the disposable VM is destroyed."""
     if qmp is None:
         return
     try:
         qmp.execute("stop")
+        qmp.execute("screendump", {"filename": str(log_path.with_suffix(".failure.ppm").resolve())})
         details = []
         for command in ("info registers -a", "i /b 0x3fd"):
             details.append(command + "\n" + str(qmp.execute("human-monitor-command", {"command-line": command})))
@@ -196,7 +201,7 @@ def capture_guest_failure(qmp, staging, log_path, user_binary=None):
                     f"*(unsigned int *)(0xffff800000000000 + $alix_r->phys_base + {address} - $alix_r->user_base)\n"
                     "   end\n")
         failure_elf = log_path.with_suffix(".kernel.elf")
-        shutil.copyfile(ROOT / "build/alix.elf", failure_elf)
+        shutil.copyfile(kernel_binary or ROOT / "build/alix.elf", failure_elf)
         script.write_text(f"""set pagination off
 set print elements 16
 target remote 127.0.0.1:{port}
@@ -260,9 +265,15 @@ def run_native_elf(binary_name, markers, log_path, label, timeout_seconds=40,
                    forbidden_markers=(), download_timeout_seconds=10, boot_markers=(),
                    expected_exception=None, expected_signal_termination=None, pcap_path=None,
                    fail_on_missing_markers_at_exit=False, expected_wait_status=None,
-                   input_files=(), user_breakpoint=None):
+                   input_files=(), user_breakpoint=None, login_breakpoint=None, audio_capture_path=None,
+                   gui_launch=False, after_breakpoint_commands=(), setup_commands=(),
+                   disk_fixture=None, disk_snapshot=None):
     """Run a real target ELF, requiring its markers and successful shell return."""
     binary = ROOT / "build/user" / binary_name
+    if user_breakpoint is not None and login_breakpoint is not None:
+        raise RuntimeError("only one native debugger capture may be active")
+    if after_breakpoint_commands and user_breakpoint is None:
+        raise RuntimeError("post-breakpoint input requires a user breakpoint")
     if not binary.is_file():
         raise RuntimeError(f"build the native test first: {binary}")
     LOG = log_path
@@ -270,6 +281,7 @@ def run_native_elf(binary_name, markers, log_path, label, timeout_seconds=40,
     LOG.write_text("")
     harness.LOG_PATH = LOG
     runner = qmp = server = uart = uart_reader = debugger_process = None
+    audio_capturing = False
     stop_uart = threading.Event()
     with tempfile.TemporaryDirectory(prefix="alix-native-test-") as staging:
         staging = Path(staging)
@@ -283,6 +295,37 @@ def run_native_elf(binary_name, markers, log_path, label, timeout_seconds=40,
                 if name == "test.elf" or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", name) is None:
                     raise RuntimeError("invalid native fixture input name")
                 shutil.copyfile(source, served / name)
+            if gui_launch:
+                # The minimal boot disk deliberately omits installed apps.
+                # Supply the freshly built terminal needed to launch the GUI
+                # fixture, rather than depending on a stale disk installation.
+                shutil.copyfile(ROOT / "build/user/atk_shell.elf", served / "__gui-terminal.elf")
+            # Boot only the current main-tree kernel/loader. The complete build
+            # directory includes debug artifacts and may exceed QEMU FAT16's
+            # limit; copying also keeps the tested kernel and GDB symbols stable.
+            boot = staging / "boot"
+            (boot / "EFI/BOOT").mkdir(parents=True)
+            kernel_image = boot / "alix.elf"
+            shutil.copyfile(ROOT / "build/alix.elf", kernel_image)
+            shutil.copyfile(ROOT / "build/EFI/BOOT/BOOTX64.EFI", boot / "EFI/BOOT/BOOTX64.EFI")
+            def sha256(path):
+                with Path(path).open("rb") as source:
+                    return hashlib.file_digest(source, "sha256").hexdigest()
+            boot_hashes = {"kernel_sha256": sha256(kernel_image),
+                           "loader_sha256": sha256(boot / "EFI/BOOT/BOOTX64.EFI"),
+                           "user_sha256": sha256(served / "test.elf")}
+            if gui_launch:
+                boot_hashes["gui_terminal_sha256"] = sha256(served / "__gui-terminal.elf")
+            LOG.with_suffix(".boot-image.json").write_text(json.dumps(boot_hashes, indent=2) + "\n")
+            real_qemu = shutil.which("qemu-system-x86_64")
+            if real_qemu is None:
+                raise RuntimeError("native fixture requires qemu-system-x86_64")
+            wrapper = staging / "qemu-native-boot"
+            wrapper.write_text("#!/usr/bin/env python3\nimport os,sys\n"
+                "args=sys.argv[1:]\n"
+                f"args=[a.replace('file=fat:ro:build/boot,','file=fat:ro:{boot},') for a in args]\n"
+                f"os.execv({real_qemu!r},[{real_qemu!r}]+args)\n")
+            wrapper.chmod(0o755)
             # Serve only this target binary over loopback.
             server = ThreadingHTTPServer(("127.0.0.1", 0), partial(
                 QuietHandler, directory=str(served)))
@@ -290,15 +333,22 @@ def run_native_elf(binary_name, markers, log_path, label, timeout_seconds=40,
             port = server.server_address[1]
             variables = staging / "vars.fd"
             shutil.copyfile(ROOT / "vendor/OVMF_VARS-1024x768.fd", variables)
+            if disk_fixture is not None:
+                shutil.copyfile(disk_fixture, staging / "data.img")
             env = os.environ.copy()
             env.update({
                 "AUDIO_DEV": "none", "NETDUMP": "", "QEMU_DEBUG_FLAGS": "",
-                "QEMU_GDB_FLAGS": f"-S -qmp unix:{staging}/qmp.sock,server,nowait -pidfile {pidfile}",
+                "QEMU_GDB_FLAGS": f"-S -display none -qmp unix:{staging}/qmp.sock,server,nowait -pidfile {pidfile}",
                 "QEMU_SERIAL": f"unix:{staging}/serial.sock,server,nowait",
                 "QEMU_SERIAL_LOG": str(launch_log), "QEMU_TIMEOUT_SECONDS": str(timeout_seconds),
                 "QEMU_DATA_IMG": str(staging / "data.img"),
                 "OVMF_VARS": str(variables), "NET_BACKEND": "user",
             })
+            env["MAKEFLAGS"] = env.get("MAKEFLAGS", "") + f" QEMU={wrapper} OVMF_VARS={variables} SMP_CORES=8"
+            if audio_capture_path is not None:
+                audio_capture_path = Path(audio_capture_path).resolve()
+                audio_capture_path.parent.mkdir(parents=True, exist_ok=True)
+                env["MAKEFLAGS"] += " HDA_AUDIO_ID=snd0"
             if pcap_path is not None:
                 capture = Path(pcap_path).resolve()
                 capture.parent.mkdir(parents=True, exist_ok=True)
@@ -311,6 +361,10 @@ def run_native_elf(binary_name, markers, log_path, label, timeout_seconds=40,
                 env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 start_new_session=True)
             qmp = QmpClient(staging / "qmp.sock", timeout=25)
+            if (sha256(ROOT / "build/alix.elf") != boot_hashes["kernel_sha256"] or
+                sha256(ROOT / "build/EFI/BOOT/BOOTX64.EFI") != boot_hashes["loader_sha256"] or
+                sha256(binary) != boot_hashes["user_sha256"]):
+                raise RuntimeError("main-tree boot artifacts changed during launch; complete make before native acceptance")
             uart = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             uart.settimeout(0.5)
             uart.connect(str(staging / "serial.sock"))
@@ -347,6 +401,8 @@ def run_native_elf(binary_name, markers, log_path, label, timeout_seconds=40,
                 raise RuntimeError("kernel boot acceptance failed: " + " | ".join(failures[-3:]))
             if boot_markers and not all(marker in boot_log for marker in boot_markers):
                 raise RuntimeError("kernel boot acceptance did not complete successfully")
+            if login_breakpoint is not None:
+                debugger_process = start_user_breakpoint(qmp, staging, LOG, kernel_image, login_breakpoint)
             command("root")
             # Boot-time disk synchronization can occupy the shell's assigned
             # TCG CPU for several seconds while host compilers run in parallel.
@@ -356,6 +412,13 @@ def run_native_elf(binary_name, markers, log_path, label, timeout_seconds=40,
             harness.wait_for(runner, "network/startup completion",
                 lambda log: "dhcp: lease acquired." in log and
                             re.search(r"\[proc\] destroy[^\n]*name=startup", log), 15)
+            for preparation, expected in setup_commands:
+                offset = len(harness.read_log())
+                command(preparation)
+                prepared = harness.wait_for(runner, "disposable guest setup",
+                    lambda log: command_complete(log, offset), 15)
+                if expected not in prepared[offset:]:
+                    raise RuntimeError("disposable guest setup failed: " + preparation)
             offset = len(harness.read_log())
             command("mkdir /tmp")
             harness.wait_for(runner, "tmp directory", lambda log: command_complete(log, offset), 3)
@@ -368,25 +431,90 @@ def run_native_elf(binary_name, markers, log_path, label, timeout_seconds=40,
                 harness.wait_for(runner, "fixture input download",
                     lambda log: command_complete(log, offset), download_timeout_seconds)
             offset = len(harness.read_log())
-            launch = "runelf /tmp/test.elf"
+            launch = "/tmp/test.elf" if gui_launch else "runelf /tmp/test.elf"
             if arguments:
                 launch += " " + " ".join(arguments)
+            if gui_launch:
+                for directory in ("/usr", "/usr/bin"):
+                    preparation = len(harness.read_log())
+                    command("mkdir " + directory)
+                    harness.wait_for(runner, "GUI dependency directory",
+                        lambda log: command_complete(log, preparation), 3)
+                preparation = len(harness.read_log())
+                command(f"wget http://10.0.2.2:{port}/__gui-terminal.elf /usr/bin/atk_shell.elf")
+                harness.wait_for(runner, "fresh GUI terminal",
+                    lambda log: command_complete(log, preparation), download_timeout_seconds)
+                expected = f"Saved {(served / '__gui-terminal.elf').stat().st_size} bytes to /usr/bin/atk_shell.elf"
+                if expected not in harness.read_log()[preparation:]:
+                    raise RuntimeError("fresh GUI terminal was not installed in the disposable guest")
+                offset = len(harness.read_log())
+                command("start_video")
+                harness.wait_for(runner, "video event loop", lambda log: "video_run_loop start" in log[offset:], 15)
+                move_mouse_to_terminal(qmp)
+                # USB polling must observe both edges even under eight-core
+                # TCG scheduling; a short host tap can coalesce before polling.
+                qmp.human("mouse_button 1")
+                time.sleep(0.2)
+                qmp.human("mouse_button 0")
+                time.sleep(0.2)
+                harness.wait_for(runner, "desktop terminal", lambda log: "start name=atk_shell" in log[offset:], 15)
+                time.sleep(0.3)
+                offset = len(harness.read_log())
             if user_breakpoint is not None:
                 debugger_process = start_user_breakpoint(qmp, staging, LOG, binary, user_breakpoint)
-            command(launch)
-            log = harness.wait_for(runner, label,
-                lambda log: (all(marker in log[offset:] for marker in markers) or
-                             ": FAIL" in log[offset:] or fail_on_missing_markers_at_exit)
-                            and command_complete(log, offset),
-                max(10, timeout_seconds - 20))
+            if audio_capture_path is not None:
+                response = qmp.execute("human-monitor-command", {"command-line":
+                    f"wavcapture {audio_capture_path} snd0 48000 16 2"})
+                if not audio_capture_path.is_file():
+                    raise RuntimeError(f"native audio capture did not start: {response}")
+                audio_capturing = True
+            if gui_launch:
+                key_names = {" ": "spc", "/": "slash", ".": "dot", ":": "shift-semicolon",
+                             "_": "shift-minus", "-": "minus"}
+                hmp_send_keys(qmp, [key_names.get(char, char) for char in launch] + ["ret"])
+            else:
+                command(launch)
+
+            breakpoint_actions_done = False
+
+            def execution_complete(log):
+                nonlocal breakpoint_actions_done
+                if after_breakpoint_commands and not breakpoint_actions_done and debugger_process.poll() is not None:
+                    capture = LOG.with_suffix(".breakpoint.txt").read_text(errors="replace")
+                    if debugger_process.returncode != 0 or "ALIX_USER_BREAKPOINT_HIT" not in capture:
+                        raise RuntimeError("native breakpoint did not complete before input injection")
+                    # Input is sent after detach/resume. QEMU may ignore input
+                    # queued through the debug monitor while vCPUs are stopped.
+                    for action in after_breakpoint_commands:
+                        response = qmp.human(action)
+                        if response.strip():
+                            raise RuntimeError(f"post-breakpoint command failed: {response}")
+                    breakpoint_actions_done = True
+                if not gui_launch:
+                    return command_complete(log, offset)
+                phase = log[offset:]
+                initial = re.search(r"\[process\] alloc detail[^\n]* name=/tmp/test\.elf pid=0x([0-9a-fA-F]+)", phase)
+                return initial is not None and any(int(pid, 16) == int(initial.group(1), 16)
+                    for pid in re.findall(r"\[proc\] destroy pid=0x([0-9a-fA-F]+) name=/tmp/test\.elf [^\n]* wait_status=\d+", phase))
+            def fixture_complete(log):
+                complete = execution_complete(log)
+                return complete and (all(marker in log[offset:] for marker in markers) or
+                                     ": FAIL" in log[offset:] or fail_on_missing_markers_at_exit)
+
+            log = harness.wait_for(runner, label, fixture_complete, max(10, timeout_seconds - 20))
             phase = log[offset:]
             if not all(marker in phase for marker in markers) or ": FAIL" in phase:
                 raise RuntimeError(f"{label} reported failure")
             if any(marker in phase for marker in forbidden_markers):
                 raise RuntimeError(f"{label} continued past its expected termination point")
             if expected_wait_status is not None:
-                statuses = re.findall(
-                    r"\[proc\] destroy[^\n]* name=/tmp/test\.elf [^\n]* wait_status=(\d+)", phase)
+                launched = re.search(
+                    r"\[process\] alloc detail[^\n]* name=/tmp/test\.elf pid=0x([0-9a-fA-F]+)", phase)
+                if launched is None:
+                    raise RuntimeError(f"{label} has no launched-process PID evidence")
+                statuses = [status for pid, status in re.findall(
+                    r"\[proc\] destroy pid=0x([0-9a-fA-F]+) name=/tmp/test\.elf [^\n]* wait_status=(\d+)", phase)
+                    if int(pid, 16) == int(launched.group(1), 16)]
                 if statuses != [str(expected_wait_status)]:
                     raise RuntimeError(f"{label} did not exit with wait status {expected_wait_status}: {statuses}")
             positions = [phase.index(marker) for marker in markers]
@@ -439,6 +567,17 @@ def run_native_elf(binary_name, markers, log_path, label, timeout_seconds=40,
             aps = len(re.findall(r"\[smp\] cpu online apic=", log))
             if aps != 7:
                 raise RuntimeError(f"expected 8 CPUs; observed {aps} application processors")
+            if audio_capturing:
+                qmp.execute("human-monitor-command", {"command-line": "stopcapture 0"})
+                audio_capturing = False
+                if audio_capture_path.stat().st_size <= 44:
+                    raise RuntimeError("native audio capture has no PCM frames")
+            if disk_snapshot is not None:
+                # Stop vCPUs before copying the private disk. No guest shutdown
+                # or additional flush is issued: this preserves the state the
+                # fixture itself committed, for a separate remount boot.
+                qmp.execute("stop")
+                shutil.copyfile(staging / "data.img", disk_snapshot)
             qmp.quit()
             runner.wait(timeout=8)
             if runner.returncode != 0:
@@ -450,7 +589,9 @@ def run_native_elf(binary_name, markers, log_path, label, timeout_seconds=40,
             if debugger_process is not None and debugger_process.poll() is None:
                 debugger_process.terminate()
                 debugger_process.wait(timeout=3)
-            capture_guest_failure(qmp, staging, LOG, binary)
+            capture_guest_failure(qmp, staging, LOG,
+                                  served / "test.elf" if "served" in locals() else binary,
+                                  kernel_image if "kernel_image" in locals() else None)
             raise
         finally:
             if debugger_process is not None and debugger_process.poll() is None:
@@ -458,12 +599,21 @@ def run_native_elf(binary_name, markers, log_path, label, timeout_seconds=40,
                 debugger_process.wait(timeout=3)
             if qmp is not None:
                 try:
+                    if audio_capturing:
+                        qmp.execute("human-monitor-command", {"command-line": "stopcapture 0"})
                     qmp.quit()
                 except (RuntimeError, OSError):
                     pass
                 qmp.close()
-            if pidfile.exists():
-                harness.stop_process(int(pidfile.read_text().strip()))
+            # QMP quit can remove the pidfile between exists() and read().
+            # A vanished file is normal after that owned VM exits; the runner
+            # process group still has its independent cleanup below.
+            try:
+                qemu_pid = int(pidfile.read_text().strip())
+            except FileNotFoundError:
+                qemu_pid = None
+            if qemu_pid is not None:
+                harness.stop_process(qemu_pid)
             if runner is not None and runner.poll() is None:
                 os.killpg(runner.pid, signal.SIGTERM)
                 runner.wait(timeout=8)

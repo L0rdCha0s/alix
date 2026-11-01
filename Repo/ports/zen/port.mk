@@ -5,13 +5,24 @@ ZEN_OWNED_SYSCALL := $(USER_OBJDIR)/lib/syscall-owned.o
 ZEN_UPSTREAM_LIBC := $(USER_OBJDIR)/lib/libc-upstream.o
 ZEN_FCNTL_OBJECT := $(USER_OBJDIR)/lib/fcntl.o
 ZEN_TERMIOS_OBJECT := $(USER_OBJDIR)/lib/termios.o
-ZEN_USER_RUNTIME_OBJECTS := $(filter-out $(USER_OBJDIR)/lib/syscall.o $(USER_OBJDIR)/lib/libc.o,$(USER_COMMON_OBJECTS)) $(ZEN_UPSTREAM_LIBC) $(ZEN_OWNED_SYSCALL) $(ZEN_FCNTL_OBJECT) $(ZEN_TERMIOS_OBJECT)
+ZEN_POLL_OBJECT := $(USER_OBJDIR)/lib/poll.o
+ZEN_SOCKET_OBJECT := $(USER_OBJDIR)/lib/socket-owned.o
+ZEN_SELECT_OBJECT := $(USER_OBJDIR)/lib/select-owned.o
+ZEN_USER_RUNTIME_OBJECTS := $(filter-out $(USER_OBJDIR)/lib/syscall.o $(USER_OBJDIR)/lib/libc.o $(USER_OBJDIR)/lib/socket.o $(USER_OBJDIR)/lib/select.o,$(USER_COMMON_OBJECTS)) $(ZEN_UPSTREAM_LIBC) $(ZEN_OWNED_SYSCALL) $(ZEN_FCNTL_OBJECT) $(ZEN_TERMIOS_OBJECT) $(ZEN_POLL_OBJECT) $(ZEN_SOCKET_OBJECT) $(ZEN_SELECT_OBJECT)
 
 $(ZEN_UPSTREAM_LIBC): user/lib/libc.c
 	@mkdir -p $(@D)
-	$(CC) $(USER_CFLAGS) -DALIX_UPSTREAM_ABORT_HOOK=1 -c -o $@ $<
+	$(CC) $(USER_CFLAGS) -DALIX_UPSTREAM_ABORT_HOOK=1 -DALIX_OWNED_FDS=1 -c -o $@ $<
 
 $(ZEN_OWNED_SYSCALL): user/lib/syscall.c
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -DALIX_OWNED_FDS=1 -c -o $@ $<
+
+$(ZEN_SOCKET_OBJECT): user/lib/socket.c
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -DALIX_OWNED_FDS=1 -c -o $@ $<
+
+$(ZEN_SELECT_OBJECT): user/lib/select.c
 	@mkdir -p $(@D)
 	$(CC) $(USER_CFLAGS) -DALIX_OWNED_FDS=1 -c -o $@ $<
 
@@ -19,7 +30,7 @@ $(ZEN_FCNTL_OBJECT): user/lib/fcntl.c
 	@mkdir -p $(@D)
 	$(CC) $(USER_CFLAGS) -c -o $@ $<
 
--include $(ZEN_UPSTREAM_LIBC:.o=.d) $(ZEN_OWNED_SYSCALL:.o=.d) $(ZEN_FCNTL_OBJECT:.o=.d) $(ZEN_TERMIOS_OBJECT:.o=.d)
+-include $(ZEN_UPSTREAM_LIBC:.o=.d) $(ZEN_OWNED_SYSCALL:.o=.d) $(ZEN_FCNTL_OBJECT:.o=.d) $(ZEN_TERMIOS_OBJECT:.o=.d) $(ZEN_POLL_OBJECT:.o=.d) $(ZEN_SOCKET_OBJECT:.o=.d) $(ZEN_SELECT_OBJECT:.o=.d)
 
 $(USER_OBJDIR)/tests/terminal_test.o: tests/terminal_test.c
 	@mkdir -p $(@D)
@@ -84,12 +95,151 @@ $(USER_OBJDIR)/posix_spawn_test.elf: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/
 .PHONY: zen-posix-spawn-qemu-test
 zen-posix-spawn-qemu-test:
 	python3 tests/posix_spawn_qemu_test.py
-# QEMU exposes build/ as a FAT disk; never put Mozilla/Zen source trees there.
+
+$(USER_OBJDIR)/tests/audio_owned_test.o: tests/audio_owned_test.c
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+
+$(USER_OBJDIR)/audio_owned_test.elf: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/audio_owned_test.o $(USER_LD_SCRIPT)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/audio_owned_test.o
+
+$(USER_OBJDIR)/tests/poll_test.o: tests/poll_test.c
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+
+$(USER_OBJDIR)/poll_test.elf: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/poll_test.o $(USER_LD_SCRIPT)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/poll_test.o
+
+.PHONY: zen-poll-qemu-test
+zen-poll-qemu-test: all $(USER_OBJDIR)/poll_test.elf
+	python3 tests/poll_qemu_test.py
+
+$(USER_OBJDIR)/tests/window_control_test.o: tests/window_control_test.c
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+
+$(USER_OBJDIR)/window_control_test.elf: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/window_control_test.o $(USER_LD_SCRIPT)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/window_control_test.o
+
+.PHONY: zen-window-control-qemu-test
+zen-window-control-qemu-test: $(USER_OBJDIR)/window_control_test.elf $(USER_OBJDIR)/atk_shell.elf
+	python3 tests/window_control_qemu_test.py
+
+$(USER_OBJDIR)/tests/posix_runtime_test.o: tests/posix_runtime_test.c
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+
+$(USER_OBJDIR)/posix_runtime_test.elf: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/posix_runtime_test.o $(USER_LD_SCRIPT)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/posix_runtime_test.o
+
+.PHONY: zen-posix-runtime-qemu-test
+zen-posix-runtime-qemu-test: all $(USER_OBJDIR)/posix_runtime_test.elf
+	python3 tests/posix_runtime_qemu_test.py
+
+$(USER_OBJDIR)/tests/fd_stream_test.o: tests/fd_stream_test.c
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+
+$(USER_OBJDIR)/fd_stream_test.elf: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/fd_stream_test.o $(USER_LD_SCRIPT)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/fd_stream_test.o
+
+.PHONY: zen-fd-stream-qemu-test
+zen-fd-stream-qemu-test: all $(USER_OBJDIR)/fd_stream_test.elf
+	python3 tests/fd_stream_qemu_test.py
+
+ZEN_RUST_LIBC_SOURCE := ports/zen/upstream/firefox-159.0/third_party/rust/libc/src
+ZEN_RUST_LIBC_FFI_DIR := build/ports/zen/rust-libc-ffi
+$(ZEN_RUST_LIBC_FFI_DIR)/liblibc.rlib: $(ZEN_RUST_LIBC_SOURCE)/lib.rs $(ZEN_RUST_LIBC_SOURCE)/alix/mod.rs ports/zen/patches/series.json ports/zen/rust/rustc.py ports/zen/rust/x86_64-unknown-alix.json
+	@mkdir -p $(@D)
+	python3 ports/zen/rust/rustc.py --crate-name libc --crate-type rlib --edition 2021 --target x86_64-unknown-alix -C panic=abort -C opt-level=2 $(ZEN_RUST_LIBC_SOURCE)/lib.rs -o $@
+
+$(ZEN_RUST_LIBC_FFI_DIR)/libffi.a: tests/rust_libc_ffi_test.rs $(ZEN_RUST_LIBC_FFI_DIR)/liblibc.rlib
+	python3 ports/zen/rust/rustc.py --crate-name alix_rust_libc_ffi --crate-type staticlib --edition 2021 --target x86_64-unknown-alix -C panic=abort -C opt-level=2 --extern libc=$(ZEN_RUST_LIBC_FFI_DIR)/liblibc.rlib $< -o $@
+
+$(USER_OBJDIR)/tests/rust_libc_ffi_test.o: tests/rust_libc_ffi_test.c
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+
+$(USER_OBJDIR)/rust_libc_ffi_test.elf: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/rust_libc_ffi_test.o $(ZEN_RUST_LIBC_FFI_DIR)/libffi.a $(USER_LD_SCRIPT)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/rust_libc_ffi_test.o $(ZEN_RUST_LIBC_FFI_DIR)/libffi.a
+
+.PHONY: zen-rust-libc-ffi-qemu-test
+zen-rust-libc-ffi-qemu-test: all $(USER_OBJDIR)/rust_libc_ffi_test.elf
+	python3 tests/rust_libc_ffi_qemu_test.py
+
+$(USER_OBJDIR)/tests/executable_path_test.o: tests/executable_path_test.c
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+
+$(USER_OBJDIR)/executable_path_test.elf: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/executable_path_test.o $(USER_LD_SCRIPT)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/executable_path_test.o
+
+.PHONY: zen-executable-path-qemu-test
+zen-executable-path-qemu-test: all $(USER_OBJDIR)/executable_path_test.elf
+	python3 tests/executable_path_qemu_test.py
+
+$(USER_OBJDIR)/tests/socket_test.o: tests/socket_test.c
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+
+$(USER_OBJDIR)/socket_test.elf: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/socket_test.o $(USER_LD_SCRIPT)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/socket_test.o
+
+.PHONY: zen-socket-qemu-test
+zen-socket-qemu-test: all $(USER_OBJDIR)/socket_test.elf
+	python3 tests/socket_qemu_test.py
+
+$(USER_OBJDIR)/tests/netdb_test.o: tests/netdb_test.c
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+
+$(USER_OBJDIR)/netdb_test.elf: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/netdb_test.o $(USER_LD_SCRIPT)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/netdb_test.o
+
+.PHONY: zen-netdb-qemu-test
+zen-netdb-qemu-test: all $(USER_OBJDIR)/netdb_test.elf
+	python3 tests/netdb_qemu_test.py
+
+$(USER_OBJDIR)/tests/gecko_os_interfaces_test.o: tests/gecko_os_interfaces_test.c
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+
+$(USER_OBJDIR)/gecko_os_interfaces_test.elf: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/gecko_os_interfaces_test.o $(USER_LD_SCRIPT)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/gecko_os_interfaces_test.o
+
+.PHONY: zen-gecko-os-interfaces-qemu-test
+zen-gecko-os-interfaces-qemu-test: all $(USER_OBJDIR)/gecko_os_interfaces_test.elf
+	python3 tests/gecko_os_interfaces_qemu_test.py
+
+$(USER_OBJDIR)/tests/select_test.o: tests/select_test.c
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+
+$(USER_OBJDIR)/select_test.elf: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/select_test.o $(USER_LD_SCRIPT)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/select_test.o
+
+.PHONY: zen-select-qemu-test
+zen-select-qemu-test: all $(USER_OBJDIR)/select_test.elf
+	python3 tests/select_qemu_test.py
+
+$(USER_OBJDIR)/tests/filesystem_primitives_test.o: tests/filesystem_primitives_test.c
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+
+$(USER_OBJDIR)/filesystem_primitives_test.elf: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/filesystem_primitives_test.o $(USER_LD_SCRIPT)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/filesystem_primitives_test.o
+
+.PHONY: zen-filesystem-primitives-qemu-test
+zen-filesystem-primitives-qemu-test: all $(USER_OBJDIR)/filesystem_primitives_test.elf
+	python3 tests/filesystem_primitives_qemu_test.py
+# Keep upstream source trees separate from generated build artifacts. QEMU's
+# boot volume now exposes only the staged loader and kernel in build/boot/.
 ZEN_SOURCE_DIR ?= $(abspath ports/zen/upstream/desktop)
 ZEN_ENGINE_DIR ?= $(abspath ports/zen/upstream/firefox-159.0)
 ZEN_ENGINE_ARCHIVE ?= $(abspath ports/zen/upstream/firefox-159.0.source.tar.xz)
 ZEN_JS_KEEP_GOING ?= 0
 ZEN_GECKO_KEEP_GOING ?= 0
+ZEN_GECKO_JOBS ?= 2
 
 .PHONY: zen-fetch zen-fetch-engine zen-preflight zen-source-test
 zen-fetch:
@@ -121,6 +271,12 @@ zen-ssp-test: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_LD_SCRIPT) $(ZEN_SSP_ARCHIVE)
 
 zen-cxx-stream-test: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_LD_SCRIPT) $(ZEN_SSP_ARCHIVE)
 	ALIX_RUNTIME_OBJECTS="$(ZEN_USER_RUNTIME_OBJECTS)" python3 tests/cxx_stream_toolchain_test.py
+
+.PHONY: zen-cxx-random-test zen-cxx-random-qemu-test
+zen-cxx-random-test: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_LD_SCRIPT) $(ZEN_SSP_ARCHIVE)
+	ALIX_RUNTIME_OBJECTS="$(ZEN_USER_RUNTIME_OBJECTS)" python3 tests/cxx_stream_toolchain_test.py --random-device
+zen-cxx-random-qemu-test: all zen-cxx-random-test
+	python3 tests/random_device_qemu_test.py
 
 zen-cxx-wide-test: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_LD_SCRIPT) $(ZEN_SSP_ARCHIVE)
 	ALIX_RUNTIME_OBJECTS="$(ZEN_USER_RUNTIME_OBJECTS)" python3 tests/cxx_stream_toolchain_test.py --wide
@@ -326,13 +482,24 @@ zen-gecko-configure: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_LD_SCRIPT) $(ZEN_SSP_ARC
 	ALIX_RUNTIME_OBJECTS="$(ZEN_USER_RUNTIME_OBJECTS)" python3 ports/zen/configure_engine.py --engine-dir "$(ZEN_ENGINE_DIR)" --project browser
 
 zen-gecko-build: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_LD_SCRIPT) $(ZEN_SSP_ARCHIVE)
-	ALIX_RUNTIME_OBJECTS="$(ZEN_USER_RUNTIME_OBJECTS)" python3 ports/zen/configure_engine.py --engine-dir "$(ZEN_ENGINE_DIR)" --project browser --build $(if $(filter 1,$(ZEN_GECKO_KEEP_GOING)),--keep-going,)
+	ALIX_RUNTIME_OBJECTS="$(ZEN_USER_RUNTIME_OBJECTS)" python3 ports/zen/configure_engine.py --engine-dir "$(ZEN_ENGINE_DIR)" --project browser --build --jobs "$(ZEN_GECKO_JOBS)" $(if $(filter 1,$(ZEN_GECKO_KEEP_GOING)),--keep-going,)
 
 zen-patch-test:
 	python3 tests/zen_patch_test.py
 
 zen-toolchain-test: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_LD_SCRIPT) $(ZEN_SSP_ARCHIVE)
 	ALIX_RUNTIME_OBJECTS="$(ZEN_USER_RUNTIME_OBJECTS)" python3 tests/zen_toolchain_test.py
+
+.PHONY: zen-cubeb-test zen-cubeb-profiler-test
+zen-cubeb-test: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_LD_SCRIPT) $(ZEN_SSP_ARCHIVE)
+	ALIX_RUNTIME_OBJECTS="$(ZEN_USER_RUNTIME_OBJECTS)" python3 ports/zen/cubeb/build_test.py
+
+zen-cubeb-profiler-test: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_LD_SCRIPT) $(ZEN_SSP_ARCHIVE)
+	ALIX_RUNTIME_OBJECTS="$(ZEN_USER_RUNTIME_OBJECTS)" python3 ports/zen/cubeb/build_test.py --profiler-provider
+
+.PHONY: zen-wasi-sdk
+zen-wasi-sdk:
+	python3 ports/zen/wasi_sdk.py
 
 .PHONY: zen-toolchain-qemu-test
 zen-toolchain-qemu-test:

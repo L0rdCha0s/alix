@@ -27,6 +27,18 @@ attributes are supported; ignored dispositions otherwise survive launch and
 caught handlers reset. RESETIDS uses Alix's existing single identity policy.
 Process groups and scheduling attributes return `ENOTSUP` during spawn.
 
+The protected loader snapshots the resolved file's absolute VFS path before
+publishing the child. `alix_get_executable_path` in `unistd.h` returns that
+immutable process-owned snapshot, including NUL, with a byte count excluding
+NUL. Insufficient capacity reports ERANGE without truncated success; invalid
+or read-only destinations report EFAULT. PATH lookup, argv edits and cwd
+changes cannot substitute another path. The kernel `runelf` command supplies
+the same metadata through the file-backed constructor. Anonymous in-memory ELF
+constructors have no file identity and report ENOENT. This is a launch-path
+snapshot; subsequent rename does not rewrite it. Run
+`make zen-executable-path-qemu-test` for constructor, long-name, relative/PATH,
+rename and reply-validation evidence in an eight-CPU guest.
+
 Each user process has a separate 256-entry child registry. It consumes no public
 file descriptor. Launch reserves a registry slot before loading/starting a
 child, so admission failure cannot start an untrackable process. Its deferred

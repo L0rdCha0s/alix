@@ -5,6 +5,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+#[path = "../../../../../tests/rust_native_handles.rs"]
+mod native_handles;
+#[path = "../../../../../tests/rust_filesystem.rs"]
+mod native_filesystem;
+#[path = "../../../../../tests/rust_environment.rs"]
+mod native_environment;
+
 unsafe extern "C" {
     fn sys_thread_set_affinity(cpu: u32) -> i32;
     fn sys_thread_cpu() -> u32;
@@ -79,6 +86,12 @@ fn main() {
     assert_eq!(state.count, 1024);
     assert_eq!(state.cpu_mask, 0xFF);
     assert_eq!(DTORS.load(Ordering::SeqCst), 8);
+    let count = state.count;
+    let cpu_mask = state.cpu_mask;
+    drop(state);
+    native_handles::run();
+    native_filesystem::run();
+    native_environment::run();
     println!("RUST_STD_TEST: PASS workers=8 cpu_mask=0x{:X} count={} tls_dtors={} hashmap={}",
-             state.cpu_mask, state.count, DTORS.load(Ordering::SeqCst), map.len());
+             cpu_mask, count, DTORS.load(Ordering::SeqCst), map.len());
 }

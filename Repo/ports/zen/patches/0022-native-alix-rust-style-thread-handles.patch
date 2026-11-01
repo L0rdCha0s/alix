@@ -1,0 +1,41 @@
+--- a/servo/components/style/global_style_data.rs
++++ b/servo/components/style/global_style_data.rs
+@@ -11,15 +11,17 @@
+ use crate::shared_lock::SharedRwLock;
+ use crate::thread_state;
+ use parking_lot::{Mutex, RwLock, RwLockReadGuard};
+-#[cfg(all(unix, not(target_arch = "wasm32")))]
++#[cfg(all(unix, not(target_os = "alix"), not(target_arch = "wasm32")))]
+ use std::os::unix::thread::{JoinHandleExt, RawPthread};
++#[cfg(target_os = "alix")]
++use std::os::alix::thread::{JoinHandleExt, RawPthread};
+ #[cfg(windows)]
+ use std::os::windows::{io::AsRawHandle, prelude::RawHandle};
+ use std::{io, sync::LazyLock, thread};
+ use thin_vec::ThinVec;
+ 
+ /// Platform-specific handle to a thread.
+-#[cfg(all(unix, not(target_arch = "wasm32")))]
++#[cfg(all(any(unix, target_os = "alix"), not(target_arch = "wasm32")))]
+ pub type PlatformThreadHandle = RawPthread;
+ /// Platform-specific handle to a thread.
+ #[cfg(windows)]
+@@ -139,7 +141,7 @@
+         LazyLock::force(&STYLE_THREAD_POOL);
+ 
+         for join_handle in STYLE_THREAD_JOIN_HANDLES.lock().iter() {
+-            #[cfg(all(unix, not(target_arch = "wasm32")))]
++            #[cfg(all(any(unix, target_os = "alix"), not(target_arch = "wasm32")))]
+             let handle = join_handle.as_pthread_t();
+             #[cfg(windows)]
+             let handle = join_handle.as_raw_handle();
+--- a/servo/ports/geckolib/cbindgen.toml
++++ b/servo/ports/geckolib/cbindgen.toml
+@@ -66,6 +66,7 @@
+ "target_pointer_width = 32" = "SERVO_32_BITS"
+ "target_pointer_width = 64" = "HAVE_64BIT_BUILD"
+ "unix" = "XP_UNIX"
++"target_os = alix" = "__ALIX__"
+ "windows" = "XP_WIN"
+ 
+ [macro_expansion]

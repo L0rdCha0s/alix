@@ -7,12 +7,14 @@
 #include "io_stream.h"
 #include "io_tcp.h"
 #include "io_pipe.h"
+#include "io_audio.h"
 
 typedef struct
 {
     vfs_node_t *node;
     uint64_t offset;
-    bool readable, writable, append;
+    bool readable, writable;
+    fd_description_t *description; /* self, used only during a pinned callback */
     bool offset_owned;
     wait_queue_t offset_waiters;
 } io_vfs_file_t;
@@ -56,13 +58,14 @@ static ssize_t io_vfs_file_write(void *context, const void *buffer, size_t count
     if (!file || !file->writable) return -EBADF;
     if (!buffer && count) return -EINVAL;
     io_vfs_offset_lock(file);
-    ssize_t result = file->append ? vfs_write_append(file->node, buffer, count, false, &file->offset) :
+    bool append = (fd_description_status_flags(file->description) & FD_STATUS_APPEND) != 0;
+    ssize_t result = append ? vfs_write_append(file->node, buffer, count, false, &file->offset) :
         count > 0x7fffffffffffffffULL - file->offset ? -EFBIG :
         vfs_write_data_at(file->node, (size_t)file->offset, buffer, count);
     if (result > 0)
     {
         if ((size_t)result > count) result = -EIO;
-        else if (!file->append) file->offset += (uint64_t)result;
+        else if (!append) file->offset += (uint64_t)result;
     }
     io_vfs_offset_unlock(file);
     return result == -1 ? -EIO : result;
@@ -136,6 +139,13 @@ static int io_vfs_file_close(void *context)
     return 0;
 }
 
+static uint32_t io_vfs_poll(void *context)
+{
+    (void)context;
+    /* Owned data nodes exclude device callbacks. Regular files and directories
+     * have no readiness wait; EOF and an invalid direction return immediately. */
+    return SYSCALL_POLL_IN | SYSCALL_POLL_OUT;
+}
 static const fd_ops_t io_vfs_ops = {
     .read = io_vfs_file_read,
     .write = io_vfs_file_write,
@@ -143,6 +153,7 @@ static const fd_ops_t io_vfs_ops = {
     .lseek = io_vfs_file_seek,
     .fstat = io_vfs_file_stat,
     .close = io_vfs_file_close,
+    .poll = io_vfs_poll,
 };
 
 bool io_vfs_description_valid(const fd_description_t *description)
@@ -157,7 +168,7 @@ int io_vfs_open_owned(vfs_node_t *cwd, const char *path, uint32_t flags,
     if (!output) return -EINVAL;
     *output = NULL;
     uint32_t known = SYSCALL_OPEN_READ | SYSCALL_OPEN_WRITE | SYSCALL_OPEN_CREATE |
-                     SYSCALL_OPEN_TRUNCATE | SYSCALL_OPEN_EXCLUSIVE | SYSCALL_OPEN_APPEND;
+                     SYSCALL_OPEN_TRUNCATE | SYSCALL_OPEN_EXCLUSIVE | SYSCALL_OPEN_APPEND | SYSCALL_OPEN_NONBLOCK;
     if (!retirement || !cwd || !path || (flags & ~known) || !(flags & (SYSCALL_OPEN_READ | SYSCALL_OPEN_WRITE)) ||
         ((flags & SYSCALL_OPEN_TRUNCATE) && !(flags & SYSCALL_OPEN_WRITE))) return -EINVAL;
     io_vfs_file_t *file = calloc(1, sizeof(*file));
@@ -165,9 +176,11 @@ int io_vfs_open_owned(vfs_node_t *cwd, const char *path, uint32_t flags,
     wait_queue_init(&file->offset_waiters);
     file->readable = (flags & SYSCALL_OPEN_READ) != 0;
     file->writable = (flags & SYSCALL_OPEN_WRITE) != 0;
-    file->append = (flags & SYSCALL_OPEN_APPEND) != 0;
     fd_description_t *description = fd_description_create_deferred(&io_vfs_ops, file, retirement);
     if (!description) { free(file); return -ENOMEM; }
+    file->description = description;
+    (void)fd_description_initialize_status(description, flags &
+        (SYSCALL_OPEN_READ | SYSCALL_OPEN_WRITE | SYSCALL_OPEN_APPEND | SYSCALL_OPEN_NONBLOCK));
     int result = vfs_open_data_flags_owned(cwd, path, (flags & SYSCALL_OPEN_CREATE) != 0,
                                            (flags & SYSCALL_OPEN_TRUNCATE) != 0,
                                            (flags & SYSCALL_OPEN_EXCLUSIVE) != 0, uid, gid, &file->node);
@@ -205,7 +218,7 @@ static int io_vfs_directory_close(void *context)
     return 0;
 }
 
-static const fd_ops_t io_vfs_directory_ops = { .close = io_vfs_directory_close };
+static const fd_ops_t io_vfs_directory_ops = { .close = io_vfs_directory_close, .poll = io_vfs_poll };
 
 static int io_vfs_directory_next(io_vfs_directory_t *directory, void *output, bool rewind)
 {
@@ -283,6 +296,7 @@ void io_vfs_execute(io_request_t *request, io_service_result_t *result,
         wait_queue_init(&directory->cursor_waiters);
         description = fd_description_create_deferred(&io_vfs_directory_ops, directory, retirement);
         if (!description) { free(directory); result->result = -ENOMEM; return; }
+        (void)fd_description_initialize_status(description, FD_STATUS_READ);
         result->result = vfs_resolve_owned(io_request_cwd(request), (const char *)operation->data, &directory->node);
         if (!result->result) result->result = vfs_directory_snapshot(directory->node, &directory->snapshot);
         if (result->result) fd_description_put(description);
@@ -331,14 +345,24 @@ void io_vfs_execute(io_request_t *request, io_service_result_t *result,
         result->result = vfs_path_snapshot(io_request_cwd(request), (char *)operation->data, (size_t)operation->count);
         return;
     }
+    if (operation->opcode == IO_VFS_MKDIR)
+    {
+        if (description || !io_request_cwd(request) || operation->flags || available < VFS_PATH_MAX) return;
+        if (strnlen((const char *)operation->data, VFS_PATH_MAX) == VFS_PATH_MAX) { result->result = -ENAMETOOLONG; return; }
+        result->result = vfs_mkdir_exclusive(io_request_cwd(request), (const char *)operation->data,
+                                             io_request_uid(request), io_request_gid(request));
+        return;
+    }
     if (operation->opcode == IO_VFS_REMOVE || operation->opcode == IO_VFS_RENAME)
     {
-        if (description || !io_request_cwd(request) || available < VFS_PATH_MAX || operation->flags > 1 ||
+        if (description || !io_request_cwd(request) || available < VFS_PATH_MAX || operation->flags > SYSCALL_REMOVE_DIRECTORY_ONLY ||
             (operation->opcode == IO_VFS_RENAME && operation->flags)) return;
         const char *path = (const char *)operation->data;
         if (strnlen(path, VFS_PATH_MAX) == VFS_PATH_MAX) { result->result = -ENAMETOOLONG; return; }
         if (operation->opcode == IO_VFS_REMOVE)
-            result->result = vfs_remove_path(io_request_cwd(request), path, operation->flags != 0);
+            result->result = operation->flags == SYSCALL_REMOVE_DIRECTORY_ONLY ?
+                vfs_remove_directory_path(io_request_cwd(request), path) :
+                vfs_remove_path(io_request_cwd(request), path, operation->flags != 0);
         else
         {
             if (available < 2 * VFS_PATH_MAX) return;
@@ -346,6 +370,15 @@ void io_vfs_execute(io_request_t *request, io_service_result_t *result,
             if (strnlen(new_path, VFS_PATH_MAX) == VFS_PATH_MAX) { result->result = -ENAMETOOLONG; return; }
             result->result = vfs_rename_path(io_request_cwd(request), path, new_path);
         }
+        return;
+    }
+    if (operation->opcode == IO_VFS_REALPATH)
+    {
+        if (description || !io_request_cwd(request) || operation->flags || !operation->count ||
+            operation->count > available) return;
+        if (strnlen((const char *)operation->data, available) == available) { result->result = -ENAMETOOLONG; return; }
+        result->result = vfs_realpath_snapshot(io_request_cwd(request), (const char *)operation->data,
+                                               (char *)operation->data, (size_t)operation->count);
         return;
     }
     if (operation->opcode == IO_VFS_STAT_PATH)
@@ -402,12 +435,19 @@ void io_vfs_execute(io_request_t *request, io_service_result_t *result,
             operation->stat = (syscall_stat_t){ .type = SYSCALL_NODE_TYPE_SOCKET };
             result->result = 0;
         }
-        else result->result = -ESPIPE;
+        else result->result = operation->opcode == IO_VFS_SYNC || operation->opcode == IO_VFS_TRUNCATE ? -EINVAL : -ESPIPE;
         return;
     }
     if (io_pipe_description_valid(description))
     {
-        result->result = operation->opcode == IO_VFS_STAT ? io_pipe_stat(description, &operation->stat) : -ESPIPE;
+        result->result = operation->opcode == IO_VFS_STAT ? io_pipe_stat(description, &operation->stat) :
+                            operation->opcode == IO_VFS_SYNC || operation->opcode == IO_VFS_TRUNCATE ? -EINVAL : -ESPIPE;
+        return;
+    }
+    if (io_audio_description_valid(description))
+    {
+        result->result = operation->opcode == IO_VFS_STAT ? io_audio_stat(description, &operation->stat) :
+                            operation->opcode == IO_VFS_SYNC || operation->opcode == IO_VFS_TRUNCATE ? -EINVAL : -ESPIPE;
         return;
     }
     if (!io_vfs_description_valid(description))
@@ -438,6 +478,13 @@ void io_vfs_execute(io_request_t *request, io_service_result_t *result,
         case IO_VFS_SYNC:
             io_vfs_offset_lock(file);
             result->result = vfs_flush_node(file->node) ? 0 : -EIO;
+            io_vfs_offset_unlock(file);
+            break;
+        case IO_VFS_TRUNCATE:
+            if (!file->writable) { result->result = -EBADF; break; }
+            if (operation->offset < 0) break;
+            io_vfs_offset_lock(file);
+            result->result = vfs_resize_data(file->node, (uint64_t)operation->offset);
             io_vfs_offset_unlock(file);
             break;
         default:

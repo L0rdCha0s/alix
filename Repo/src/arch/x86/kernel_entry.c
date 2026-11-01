@@ -345,6 +345,19 @@ static void configure_heap_from_e820(void)
         }
 
         uint64_t available = entry_end - candidate_base;
+        /* GOP framebuffers can be allocations in otherwise reusable firmware
+         * RAM. Never include their aperture in the identity-mapped heap. */
+        if (chunk_overlaps_framebuffer(candidate_base, entry_end))
+        {
+            uint64_t fb_base = boot_info.framebuffer_base;
+            uint64_t fb_end = fb_base + boot_info.framebuffer_size;
+            uint64_t prefix = fb_base > candidate_base ? fb_base - candidate_base : 0;
+            uint64_t suffix_base = (fb_end + align - 1) & ~(align - 1);
+            if (suffix_base < candidate_base) suffix_base = candidate_base;
+            uint64_t suffix = suffix_base < entry_end ? entry_end - suffix_base : 0;
+            if (suffix > prefix) { candidate_base = suffix_base; available = suffix; }
+            else available = prefix;
+        }
         if (available >= desired_size)
         {
             /* Prefer a region that can fit the full desired size. Pick the largest. */
@@ -362,6 +375,8 @@ static void configure_heap_from_e820(void)
         }
     }
 
+    if (best_size < 16 * 1024 * 1024)
+    { serial_printf("No contiguous kernel heap of at least 16 MiB below 4 GiB"); for (;;) __asm__ volatile ("cli; hlt"); }
     if (best_size > 0)
     {
         kernel_heap_base = (uintptr_t)best_base;
@@ -369,13 +384,9 @@ static void configure_heap_from_e820(void)
         kernel_heap_size = (uintptr_t)best_size;
     }
 
-    serial_printf("%s", "[alix] heap range ");
-    serial_printf("%016llX", (unsigned long long)(kernel_heap_base));
-    serial_printf("%s", " - ");
-    serial_printf("%016llX", (unsigned long long)(kernel_heap_end));
-    serial_printf("%s", " (");
-    serial_printf("%016llX", (unsigned long long)(kernel_heap_size));
-    serial_printf("%s", " bytes)\r\n");
+    serial_printf("[alix] heap range 0x%016llX - 0x%016llX (%llu bytes)",
+                  (unsigned long long)kernel_heap_base, (unsigned long long)kernel_heap_end,
+                  (unsigned long long)kernel_heap_size);
 }
 
 static void zero_bytes(uint8_t *ptr, size_t size)
@@ -396,12 +407,12 @@ static void copy_bytes(uint8_t *dst, const uint8_t *src, size_t size)
 
 static void build_page_tables(void)
 {
-    uint64_t *pml4 = (uint64_t *)(uintptr_t)PML4_PHYS;
-    uint64_t *pdp = (uint64_t *)(uintptr_t)PDP_PHYS;
-    uint64_t *pd0 = (uint64_t *)(uintptr_t)PD0_PHYS;
-    uint64_t *pd1 = (uint64_t *)(uintptr_t)PD1_PHYS;
-    uint64_t *pd2 = (uint64_t *)(uintptr_t)PD2_PHYS;
-    uint64_t *pd3 = (uint64_t *)(uintptr_t)PD3_PHYS;
+    uint64_t *pml4 = (uint64_t *)(uintptr_t)(boot_info.page_table_base + 0x0ULL);
+    uint64_t *pdp = (uint64_t *)(uintptr_t)(boot_info.page_table_base + 0x1000ULL);
+    uint64_t *pd0 = (uint64_t *)(uintptr_t)(boot_info.page_table_base + 0x2000ULL);
+    uint64_t *pd1 = (uint64_t *)(uintptr_t)(boot_info.page_table_base + 0x3000ULL);
+    uint64_t *pd2 = (uint64_t *)(uintptr_t)(boot_info.page_table_base + 0x4000ULL);
+    uint64_t *pd3 = (uint64_t *)(uintptr_t)(boot_info.page_table_base + 0x5000ULL);
 
     zero_bytes((uint8_t *)pml4, 4096);
     zero_bytes((uint8_t *)pdp, 4096);
@@ -413,11 +424,11 @@ static void build_page_tables(void)
     const uint64_t present_rw = 0x3ULL;
     const uint64_t large_page = 1ULL << 7;
 
-    pml4[0] = (uint64_t)PDP_PHYS | present_rw;
-    pdp[0] = (uint64_t)PD0_PHYS | present_rw;
-    pdp[1] = (uint64_t)PD1_PHYS | present_rw;
-    pdp[2] = (uint64_t)PD2_PHYS | present_rw;
-    pdp[3] = (uint64_t)PD3_PHYS | present_rw;
+    pml4[0] = (uint64_t)(boot_info.page_table_base + 0x1000ULL) | present_rw;
+    pdp[0] = (uint64_t)(boot_info.page_table_base + 0x2000ULL) | present_rw;
+    pdp[1] = (uint64_t)(boot_info.page_table_base + 0x3000ULL) | present_rw;
+    pdp[2] = (uint64_t)(boot_info.page_table_base + 0x4000ULL) | present_rw;
+    pdp[3] = (uint64_t)(boot_info.page_table_base + 0x5000ULL) | present_rw;
 
     const uint64_t chunk_size = 0x200000ULL;
 
@@ -450,7 +461,7 @@ static void build_page_tables(void)
     cr4 |= (1ULL << 5) | (1ULL << 9) | (1ULL << 10);
     write_cr4(cr4);
 
-    write_cr3((uint64_t)(uintptr_t)PML4_PHYS);
+    write_cr3((uint64_t)(uintptr_t)(boot_info.page_table_base + 0x0ULL));
 
     uint64_t efer = rdmsr(0xC0000080U);
     efer |= (1ULL << 8);
@@ -471,12 +482,11 @@ __attribute__((noinline, used))
  */
 static void kernel_entry_main(bootinfo_t *loader_info)
 {
-    serial_init();
-    serial_printf("%s", "[alix] kernel_entry_main\n");
-
     size_t bss_size = (size_t)(__bss_end - __bss_start);
 
     zero_bytes(__bss_start, bss_size);
+    serial_init();
+    serial_printf("%s", "[alix] kernel_entry_main\n");
     boot_info_phys_addr = (uintptr_t)loader_info;
     if (loader_info)
     {
@@ -484,12 +494,16 @@ static void kernel_entry_main(bootinfo_t *loader_info)
                    (const uint8_t *)loader_info,
                    sizeof(bootinfo_t));
     }
+    if (boot_info.magic != BOOTINFO_MAGIC || boot_info.version != BOOTINFO_VERSION ||
+        !boot_info.page_table_base || !boot_info.stack_top || !boot_info.e820_entry_count ||
+        boot_info.e820_entry_count > BOOTINFO_MAX_E820_ENTRIES)
+    { serial_printf("Invalid loader handoff"); for (;;) __asm__ volatile ("cli; hlt"); }
     configure_heap_from_e820();
     configure_memory_layout_from_e820();
 
     build_page_tables();
     serial_printf("%s", "[alix] page tables built\n");
-    arch_cpu_init_bsp(STACK_TOP);
+    arch_cpu_init_bsp(boot_info.stack_top);
     serial_printf("%s", "[alix] cpu segments ready\n");
 
     serial_printf("%s", "[alix] entering kernel_main\n");
@@ -506,13 +520,13 @@ void __attribute__((naked)) kernel_entry(bootinfo_t *loader_info __attribute__((
     __asm__ volatile (
         "cli\n\t"
         "mov %%rdi, %%rsi\n\t"
-        "mov %[stack_top], %%rax\n\t"
+        "mov %c[stack_offset](%%rdi), %%rax\n\t"
         "mov %%rax, %%rsp\n\t"
         "mov %%rsi, %%rdi\n\t"
         "call kernel_entry_main\n\t"
         "hlt\n\t"
         "jmp .-2\n\t"
         :
-        : [stack_top] "r"(STACK_TOP)
+        : [stack_offset] "i"(offsetof(bootinfo_t, stack_top))
         : "rax", "rsi", "memory");
 }

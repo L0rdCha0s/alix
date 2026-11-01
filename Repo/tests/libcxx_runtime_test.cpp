@@ -10,11 +10,14 @@
 #include <thread>
 #include <vector>
 #include <cmath>
+#include <fstream>
 
 #include "userlib.h"
 #include "serial.h"
 #include "stdlib.h"
 #include "errno.h"
+#include "unistd.h"
+#include "sched.h"
 
 static std::atomic<unsigned> main_tls_destroyed{0};
 static bool main_passed;
@@ -61,11 +64,47 @@ struct ThreadLifetime {
 static thread_local ThreadLifetime lifetime;
 static thread_local unsigned initialized_tls = 17;
 
+static bool file_stream_roundtrip(unsigned index)
+{
+    const std::string path = "/tmp/cxx-file-" + std::to_string(getpid()) + "-" + std::to_string(index);
+    std::string bytes(1024, '\0');
+    for (unsigned i = 0; i < bytes.size(); ++i) bytes[i] = static_cast<char>((i + index) % 251);
+    auto output = std::make_unique<std::ofstream>(path, std::ios::binary | std::ios::trunc);
+    output->write(bytes.data(), bytes.size());
+    output->close();
+    bool okay = !output->fail();
+    output->open(path, std::ios::binary | std::ios::app);
+    output->write("tail", 4);
+    output->close();
+    okay = okay && !output->fail();
+    bytes += "tail";
+    auto stream = std::make_unique<std::fstream>(path, std::ios::in | std::ios::out | std::ios::binary);
+    std::string result(bytes.size(), '\0');
+    stream->read(result.data(), result.size());
+    okay = okay && stream->gcount() == static_cast<std::streamsize>(bytes.size()) && result == bytes;
+    const std::streamoff far = (std::streamoff(1) << 33) + 7;
+    stream->seekg(far);
+    okay = okay && !stream->fail() && stream->tellg() == std::streampos(far);
+    stream->seekg(0);
+    stream->seekp(1);
+    stream->put('!');
+    stream->flush();
+    stream->seekg(0);
+    stream->read(result.data(), result.size());
+    bytes[1] = '!';
+    okay = okay && !stream->fail() && result == bytes;
+    stream->close();
+    okay = okay && !stream->fail() && unlink(path.c_str()) == 0;
+    auto missing = std::make_unique<std::ifstream>(path);
+    return okay && !missing->is_open() && missing->fail();
+}
+
 static void worker(Shared *shared, unsigned index)
 {
-    if (sys_thread_set_affinity(index) != 0 || sys_thread_cpu() != index)
+    if (sys_thread_set_affinity(index) != 0 || sched_yield() != 0 || sched_getcpu() != static_cast<int>(index))
         shared->failures.fetch_add(1);
     lifetime.shared = shared;
+    if (!file_stream_roundtrip(index)) shared->failures.fetch_add(1);
     if (initialized_tls != 17) shared->failures.fetch_add(1);
     initialized_tls += index + 1;
     std::unique_lock<std::mutex> lock(shared->mutex);
@@ -148,6 +187,8 @@ int main()
     for (auto &thread : threads) thread.join();
     okay = okay && shared->completed == 8 && shared->count == 1024 && shared->cpu_mask == 0xFF;
     okay = okay && shared->failures.load() == 0 && shared->destructors.load() == 8;
+    serial_printf("CPP_STDLIB_TEST: files %s threads=8 binary=1 append=1 seek64=1 missing=1\n",
+                  shared->failures.load() == 0 ? "PASS" : "FAIL");
     main_passed = okay;
     serial_printf("CPP_STDLIB_TEST: main %s workers=8 cpu_mask=0x%X counter=%u tls_dtors=%u\n",
                   okay ? "PASS" : "FAIL", shared->cpu_mask, shared->count, shared->destructors.load());

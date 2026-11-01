@@ -10,6 +10,7 @@
 #include "types.h"
 #endif
 #include "syscall_defs.h"
+#include "sys/types.h"
 #include "sys/stat.h"
 #include "alix_mutex.h"
 
@@ -44,6 +45,7 @@ int abs(int value);
 int atoi(const char *str);
 int setenv(const char *name, const char *value, int overwrite);
 int unsetenv(const char *name);
+int putenv(char *assignment);
 char *getenv(const char *name);
 uint32_t getuid(void);
 #ifdef TTF_HOST_BUILD
@@ -64,7 +66,7 @@ ssize_t socket_available(int fd);
 int printf(const char *format, ...);
 int64_t lseek(int fd, int64_t offset, int whence);
 int fstat(int fd, struct stat *st);
-ssize_t pread(int fd, void *buffer, size_t count, size_t offset);
+ssize_t pread(int fd, void *buffer, size_t count, off_t offset);
 void exit(int status);
 
 typedef uint64_t alix_thread_t;

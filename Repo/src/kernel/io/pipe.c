@@ -32,7 +32,26 @@ static int io_pipe_close(void *context)
     return 0;
 }
 
-static const fd_ops_t io_pipe_ops = { .close = io_pipe_close };
+static uint32_t io_pipe_poll(void *context)
+{
+    io_pipe_endpoint_t *endpoint = context;
+    io_pipe_t *pipe = endpoint->pipe;
+    uint32_t flags = 0;
+    spinlock_lock(&pipe->lock);
+    if (endpoint->writing)
+    {
+        if (!pipe->reader) flags |= SYSCALL_POLL_ERR;
+        if (IO_PIPE_CAPACITY - pipe->used >= IO_PIPE_ATOMIC) flags |= SYSCALL_POLL_OUT;
+    }
+    else
+    {
+        if (pipe->used) flags |= SYSCALL_POLL_IN;
+        if (!pipe->writer) flags |= SYSCALL_POLL_HUP;
+    }
+    spinlock_unlock(&pipe->lock);
+    return flags;
+}
+static const fd_ops_t io_pipe_ops = { .close = io_pipe_close, .poll = io_pipe_poll };
 
 bool io_pipe_description_valid(const fd_description_t *description)
 {
@@ -64,6 +83,8 @@ int io_pipe_create_pair(fd_retirement_queue_t *retirement,
         return -ENOMEM;
     }
     *reader = read_description; *writer = write_description;
+    (void)fd_description_initialize_status(read_description, FD_STATUS_READ);
+    (void)fd_description_initialize_status(write_description, FD_STATUS_WRITE);
     return 0;
 }
 
@@ -125,5 +146,7 @@ bool io_pipe_execute(io_request_t *request, io_service_result_t *result)
         result->result = (int64_t)bytes;
     }
     spinlock_unlock(&pipe->lock);
+    if (!complete && (fd_description_status_flags(description) & FD_STATUS_NONBLOCK))
+    { result->result = -EAGAIN; complete = true; }
     return complete;
 }

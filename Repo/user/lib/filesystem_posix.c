@@ -17,6 +17,27 @@ static int path_stat(const char *path, struct stat *output, uint32_t flags)
 int stat(const char *path, struct stat *output) { return path_stat(path, output, 0); }
 int lstat(const char *path, struct stat *output) { return path_stat(path, output, SYSCALL_STAT_NOFOLLOW); }
 
+int rmdir(const char *path)
+{
+    int64_t result = sys_file_io(SYSCALL_FILE_REMOVE, (uintptr_t)path, 0, SYSCALL_REMOVE_DIRECTORY_ONLY, 0);
+    if (result < 0) { errno = (int)-result; return -1; }
+    return 0;
+}
+
+char *realpath(const char *path, char *resolved)
+{
+    bool allocated = !resolved;
+    if (allocated && !(resolved = malloc(PATH_MAX))) { errno = ENOMEM; return NULL; }
+    int64_t result = sys_file_io(SYSCALL_FILE_REALPATH, (uintptr_t)path, (uintptr_t)resolved, PATH_MAX, 0);
+    if (result < 0)
+    {
+        if (allocated) free(resolved);
+        errno = (int)-result;
+        return NULL;
+    }
+    return resolved;
+}
+
 int chdir(const char *path)
 {
     int64_t result = sys_file_io(SYSCALL_FILE_CHDIR, (uintptr_t)path, 0, 0, 0);

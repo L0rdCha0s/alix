@@ -1,0 +1,97 @@
+--- a/gfx/cairo/cairo/src/cairo-surface-observer-private.h
++++ b/gfx/cairo/cairo/src/cairo-surface-observer-private.h
+@@ -45,7 +45,7 @@
+ #include "cairo-surface-backend-private.h"
+ #include "cairo-time-private.h"
+ 
+-struct stat {
++struct cairo_observer_stat {
+     double min, max, sum, sum_sq;
+     unsigned count;
+ };
+@@ -57,7 +57,7 @@
+ #define NUM_FILL_RULE (CAIRO_FILL_RULE_EVEN_ODD+1)
+ 
+ struct extents {
+-    struct stat area;
++    struct cairo_observer_stat area;
+     unsigned int bounded, unbounded;
+ };
+ 
+@@ -152,7 +152,7 @@
+ 	unsigned int antialias[NUM_ANTIALIAS];
+ 	struct pattern source;
+ 	struct path path;
+-	struct stat line_width;
++	struct cairo_observer_stat line_width;
+ 	struct clip clip;
+ 	unsigned int noop;
+ 
+--- a/gfx/cairo/cairo/src/cairo-surface-observer.c
++++ b/gfx/cairo/cairo/src/cairo-surface-observer.c
+@@ -76,7 +76,7 @@
+ 
+ /* observation/stats */
+ 
+-static void init_stats (struct stat *s)
++static void init_stats (struct cairo_observer_stat *s)
+ {
+     s->min = HUGE_VAL;
+     s->max = -HUGE_VAL;
+@@ -279,7 +279,7 @@
+ }
+ 
+ static void
+-stats_add (struct stat *s, double v)
++stats_add (struct cairo_observer_stat *s, double v)
+ {
+     if (v < s->min)
+ 	s->min = v;
+--- a/security/nss/lib/freebl/verified/karamel/include/krml/internal/target.h
++++ b/security/nss/lib/freebl/verified/karamel/include/krml/internal/target.h
+@@ -11,6 +11,10 @@
+ #include <stddef.h>
+ #include <stdio.h>
+ #include <stdlib.h>
++
++#if defined(__ALIX__)
++#  include <alloca.h>
++#endif
+ 
+ typedef float float32_t;
+ typedef double float64_t;
+--- a/security/nss/lib/freebl/verified/karamel/include/krml/lowstar_endianness.h
++++ b/security/nss/lib/freebl/verified/karamel/include/krml/lowstar_endianness.h
+@@ -12,7 +12,7 @@
+ /******************************************************************************/
+ 
+ /* ... for Linux */
+-#if defined(__linux__) || defined(__CYGWIN__) || defined (__USE_SYSTEM_ENDIAN_H__) || defined(__GLIBC__)
++#if defined(__linux__) || defined(__CYGWIN__) || defined (__USE_SYSTEM_ENDIAN_H__) || defined(__GLIBC__) || defined(__ALIX__)
+ #  include <endian.h>
+ 
+ /* ... for OSX */
+--- a/security/nss/lib/freebl/libcrux/karamel/krml/internal/target.h
++++ b/security/nss/lib/freebl/libcrux/karamel/krml/internal/target.h
+@@ -11,6 +11,10 @@
+ #include <stddef.h>
+ #include <stdio.h>
+ #include <stdlib.h>
++
++#if defined(__ALIX__)
++#include <alloca.h>
++#endif
+ 
+ typedef float float32_t;
+ typedef double float64_t;
+--- a/security/nss/lib/freebl/libcrux/karamel/krml/lowstar_endianness.h
++++ b/security/nss/lib/freebl/libcrux/karamel/krml/lowstar_endianness.h
+@@ -14,7 +14,7 @@
+ /* ... for Linux */
+ #if defined(__linux__) || defined(__CYGWIN__) ||              \
+     defined(__USE_SYSTEM_ENDIAN_H__) || defined(__GLIBC__) || \
+-    defined(ESP_PLATFORM)
++    defined(ESP_PLATFORM) || defined(__ALIX__)
+ #include <endian.h>
+ 
+ /* ... for OSX */

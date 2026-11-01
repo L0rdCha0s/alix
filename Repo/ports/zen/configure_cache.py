@@ -1,9 +1,28 @@
 """Refresh compiler probes when the native Alix SDK changes at fixed paths."""
 import hashlib
+import json
 import os
 from pathlib import Path
 import stat
 import tempfile
+
+
+def rust_port_revision(series_path):
+    """Invalidate Cargo's immutable vendor cache when native bindings change.
+
+    apply_patches verifies these digests against actual files before this is
+    used. Non-Rust changes do not discard otherwise reusable Rust compilation.
+    """
+    series = json.loads(Path(series_path).read_text())
+    inputs = {}
+    for entry in series["patches"]:
+        for item in entry["files"]:
+            if item["path"].startswith("third_party/rust/") or item["path"].endswith(".rs"):
+                inputs[item["path"]] = item["after"]
+    fingerprint = hashlib.sha256()
+    for name, digest in sorted(inputs.items()):
+        fingerprint.update(name.encode() + b"\0" + digest.encode() + b"\0")
+    return fingerprint.hexdigest()[:16]
 
 
 def refresh_compiler_cache(object_dir, state_dir, inputs):

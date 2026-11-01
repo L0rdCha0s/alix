@@ -1,4 +1,5 @@
 #include "video.h"
+#include "framebuffer.h"
 #include "io.h"
 #include "serial.h"
 #include "mouse.h"
@@ -7,7 +8,6 @@
 #include "user_atk_host.h"
 #include "atk/atk_list.h"
 #include "atk_menu_bar.h"
-#include "video_backbuffer.h"
 #include "pci.h"
 #include "keyboard.h"
 #include "process.h"
@@ -66,7 +66,10 @@ static inline void video_irq_restore(uint64_t flags)
 #define VIDEO_FONT_CHAR_COUNT 256
 #define VIDEO_FONT_BYTES      (VIDEO_FONT_CHAR_COUNT * FONT_HEIGHT)
 
-static uint32_t *backbuffer = (uint32_t *)(uintptr_t)VIDEO_BACKBUFFER_BASE;
+enum { BGA_WIDTH = VIDEO_WIDTH, BGA_HEIGHT = VIDEO_HEIGHT };
+static uint32_t *backbuffer;
+static bool g_gop_backend;
+static uint32_t g_framebuffer_pitch;
 
 static volatile uint32_t *framebuffer = 0;
 static volatile uint32_t *framebuffer_base = 0;
@@ -74,8 +77,8 @@ static uint32_t framebuffer_page = 0;
 static bool framebuffer_pageflip = false;
 static uint64_t framebuffer_phys = 0;
 static bool framebuffer_detected = false;
-static int g_video_width = VIDEO_WIDTH;
-static int g_video_height = VIDEO_HEIGHT;
+static int g_video_width = BGA_WIDTH;
+static int g_video_height = BGA_HEIGHT;
 
 static bool vga_state_saved = false;
 static uint8_t saved_regs[1 + 5 + 25 + 9 + 21];
@@ -325,7 +328,7 @@ static bool bga_available(void)
 
 static inline size_t framebuffer_page_pixels(void)
 {
-    return (size_t)VIDEO_WIDTH * (size_t)VIDEO_HEIGHT;
+    return (size_t)g_video_width * (size_t)g_video_height;
 }
 
 static inline volatile uint32_t *framebuffer_page_ptr(uint32_t page)
@@ -346,7 +349,7 @@ static void framebuffer_set_page(uint32_t page)
 {
     framebuffer_page = page & 1u;
     framebuffer = framebuffer_page_ptr(framebuffer_page);
-    bga_write(BGA_REG_Y_OFFSET, (uint16_t)(framebuffer_page ? VIDEO_HEIGHT : 0));
+    bga_write(BGA_REG_Y_OFFSET, (uint16_t)(framebuffer_page ? g_video_height : 0));
 }
 
 /* --------- Public API --------- */
@@ -354,14 +357,31 @@ void video_init(void)
 {
     spinlock_init(&g_video_lock);
     spinlock_init(&g_video_render_lock);
-    vga_capture_state();
-    vga_capture_font();
+    g_gop_backend = !bga_available() && framebuffer_valid(&boot_info);
+    g_video_width = g_gop_backend ? (int)boot_info.framebuffer_width : BGA_WIDTH;
+    g_video_height = g_gop_backend ? (int)boot_info.framebuffer_height : BGA_HEIGHT;
+    if (!backbuffer) backbuffer = calloc((size_t)g_video_width * g_video_height, sizeof(*backbuffer));
+    if (!g_gop_backend) { vga_capture_state(); vga_capture_font(); }
     video_prepare_font();
     atk_init();
 }
 
 static bool video_hw_enable(void)
 {
+    if (!backbuffer) return false;
+    if (g_gop_backend)
+    {
+        framebuffer_base = framebuffer_map();
+        framebuffer = framebuffer_base;
+        framebuffer_page = 0;
+        framebuffer_pageflip = false;
+        g_framebuffer_pitch = boot_info.framebuffer_pitch;
+        serial_printf("[video] GOP framebuffer %ux%u pitch=%u physical=0x%llX",
+            g_video_width, g_video_height, g_framebuffer_pitch,
+            (unsigned long long)boot_info.framebuffer_base);
+        return framebuffer != NULL;
+    }
+    g_framebuffer_pitch = g_video_width;
     detect_framebuffer();
     if (framebuffer_phys == 0)
     {
@@ -387,11 +407,11 @@ static bool video_hw_enable(void)
     video_log("BGA detected, configuring mode");
 
     bga_write(BGA_REG_ENABLE, 0x00);
-    bga_write(BGA_REG_XRES, VIDEO_WIDTH);
-    bga_write(BGA_REG_YRES, VIDEO_HEIGHT);
+    bga_write(BGA_REG_XRES, g_video_width);
+    bga_write(BGA_REG_YRES, g_video_height);
     bga_write(BGA_REG_BPP, VIDEO_BPP);
-    bga_write(BGA_REG_VIRT_WIDTH, VIDEO_WIDTH);
-    uint16_t desired_vh = (uint16_t)(VIDEO_HEIGHT * 2);
+    bga_write(BGA_REG_VIRT_WIDTH, g_video_width);
+    uint16_t desired_vh = (uint16_t)(g_video_height * 2);
     bga_write(BGA_REG_VIRT_HEIGHT, desired_vh);
     bga_write(BGA_REG_X_OFFSET, 0);
     bga_write(BGA_REG_Y_OFFSET, 0);
@@ -401,12 +421,12 @@ static bool video_hw_enable(void)
     framebuffer_pageflip = bga_read(BGA_REG_VIRT_HEIGHT) >= desired_vh;
     if (!framebuffer_pageflip)
     {
-        bga_write(BGA_REG_VIRT_HEIGHT, VIDEO_HEIGHT);
+        bga_write(BGA_REG_VIRT_HEIGHT, g_video_height);
     }
 
     /* Capture the active resolution for higher layers. */
-    g_video_width = VIDEO_WIDTH;
-    g_video_height = VIDEO_HEIGHT;
+    g_video_width = g_video_width;
+    g_video_height = g_video_height;
 
     video_log_hex("BGA XRES readback: 0x", bga_read(BGA_REG_XRES));
     video_log_hex("BGA YRES readback: 0x", bga_read(BGA_REG_YRES));
@@ -416,17 +436,28 @@ static bool video_hw_enable(void)
 
 static void video_hw_disable(void)
 {
-    bga_write(BGA_REG_ENABLE, 0x00);
+    if (g_gop_backend) return;
+    if (boot_info.framebuffer_enabled)
+    {
+        bga_write(BGA_REG_ENABLE, 0);
+        bga_write(BGA_REG_XRES, boot_info.framebuffer_width);
+        bga_write(BGA_REG_YRES, boot_info.framebuffer_height);
+        bga_write(BGA_REG_VIRT_WIDTH, boot_info.framebuffer_pitch);
+        bga_write(BGA_REG_VIRT_HEIGHT, boot_info.framebuffer_height);
+        bga_write(BGA_REG_Y_OFFSET, 0);
+        bga_write(BGA_REG_ENABLE, 0x41);
+    }
+    else bga_write(BGA_REG_ENABLE, 0x00);
 }
 
 void video_fill(video_color_t color)
 {
     //video_log_hex("fill color=", color);
     //video_log_hex("fill backbuffer=", (uint64_t)(uintptr_t)backbuffer);
-    for (int y = 0; y < VIDEO_HEIGHT; ++y)
+    for (int y = 0; y < g_video_height; ++y)
     {
-        video_color_t *row = &backbuffer[y * VIDEO_WIDTH];
-        for (int x = 0; x < VIDEO_WIDTH; ++x)
+        video_color_t *row = &backbuffer[y * g_video_width];
+        for (int x = 0; x < g_video_width; ++x)
         {
             row[x] = color;
         }
@@ -444,14 +475,14 @@ static void cursor_draw_overlay_to(volatile uint32_t *dst_fb, uint32_t page_inde
     for (int row = 0; row < CURSOR_H; ++row)
     {
         int dst_y = cursor_y + row;
-        if ((unsigned)dst_y >= VIDEO_HEIGHT) continue;
+        if ((unsigned)dst_y >= (unsigned)g_video_height) continue;
 
         for (int col = 0; col < CURSOR_W; ++col)
         {
             int dst_x = cursor_x + col;
-            if ((unsigned)dst_x >= VIDEO_WIDTH) continue;
+            if ((unsigned)dst_x >= (unsigned)g_video_width) continue;
 
-            size_t index = (size_t)dst_y * VIDEO_WIDTH + dst_x;
+            size_t index = (size_t)dst_y * g_framebuffer_pitch + dst_x;
             cursor_under[page_index][row * CURSOR_W + col] = dst_fb[index];
         }
     }
@@ -459,19 +490,20 @@ static void cursor_draw_overlay_to(volatile uint32_t *dst_fb, uint32_t page_inde
     for (int row = 0; row < CURSOR_H; ++row)
     {
         int dst_y = cursor_y + row;
-        if ((unsigned)dst_y >= VIDEO_HEIGHT) continue;
+        if ((unsigned)dst_y >= (unsigned)g_video_height) continue;
 
         for (int col = 0; col < CURSOR_W; ++col)
         {
             int dst_x = cursor_x + col;
-            if ((unsigned)dst_x >= VIDEO_WIDTH) continue;
+            if ((unsigned)dst_x >= (unsigned)g_video_width) continue;
 
             const char *shape_row = cursor_shape_active ? cursor_shape_active[row] : cursor_shape_arrow[row];
             char pixel = shape_row[col];
             if (pixel == '.') continue; /* leave background as last flushed */
 
-            volatile uint32_t *p = &dst_fb[dst_y * VIDEO_WIDTH + dst_x];
-            *p = (pixel == 'X') ? cursor_color_primary() : cursor_color_shadow();
+            volatile uint32_t *p = &dst_fb[dst_y * g_framebuffer_pitch + dst_x];
+            uint32_t rgb = (pixel == 'X') ? cursor_color_primary() : cursor_color_shadow();
+            *p = g_gop_backend ? framebuffer_pack(rgb) : rgb;
         }
     }
 }
@@ -493,7 +525,7 @@ static void cursor_restore_background_to(volatile uint32_t *dst_fb, uint32_t pag
     for (int row = 0; row < CURSOR_H; ++row)
     {
         int dst_y = y0 + row;
-        if ((unsigned)dst_y >= VIDEO_HEIGHT)
+        if ((unsigned)dst_y >= (unsigned)g_video_height)
         {
             continue;
         }
@@ -501,12 +533,12 @@ static void cursor_restore_background_to(volatile uint32_t *dst_fb, uint32_t pag
         for (int col = 0; col < CURSOR_W; ++col)
         {
             int dst_x = x0 + col;
-            if ((unsigned)dst_x >= VIDEO_WIDTH)
+            if ((unsigned)dst_x >= (unsigned)g_video_width)
             {
                 continue;
             }
 
-            size_t index = (size_t)dst_y * VIDEO_WIDTH + dst_x;
+            size_t index = (size_t)dst_y * g_framebuffer_pitch + dst_x;
             dst_fb[index] = cursor_under[page_index][row * CURSOR_W + col];
         }
     }
@@ -523,8 +555,8 @@ static void cursor_draw_overlay(void)
     /* clamp */
     if (cursor_x < 0) cursor_x = 0;
     if (cursor_y < 0) cursor_y = 0;
-    if (cursor_x > VIDEO_WIDTH  - CURSOR_W)  cursor_x = VIDEO_WIDTH  - CURSOR_W;
-    if (cursor_y > VIDEO_HEIGHT - CURSOR_H)  cursor_y = VIDEO_HEIGHT - CURSOR_H;
+    if (cursor_x > g_video_width  - CURSOR_W)  cursor_x = g_video_width  - CURSOR_W;
+    if (cursor_y > g_video_height - CURSOR_H)  cursor_y = g_video_height - CURSOR_H;
 
     cursor_draw_overlay_to(framebuffer, framebuffer_page);
     if (framebuffer_pageflip)
@@ -571,15 +603,15 @@ static void video_draw_char(int x, int y, char c, video_color_t fg, video_color_
     for (int row = 0; row < FONT_HEIGHT; ++row)
     {
         int dst_y = y + row;
-        if ((unsigned)dst_y >= VIDEO_HEIGHT) continue;
+        if ((unsigned)dst_y >= (unsigned)g_video_height) continue;
 
         uint8_t bits = glyph[row];
         int dst_x = x;
         for (int col = 0; col < FONT_WIDTH; ++col, ++dst_x)
         {
-            if ((unsigned)dst_x >= VIDEO_WIDTH) continue;
+            if ((unsigned)dst_x >= (unsigned)g_video_width) continue;
             video_color_t color = (bits & (0x80 >> col)) ? fg : bg;
-            backbuffer[dst_y * VIDEO_WIDTH + dst_x] = color;
+            backbuffer[dst_y * g_video_width + dst_x] = color;
         }
     }
 }
@@ -646,7 +678,7 @@ static void video_blit_clipped(int dst_x0, int dst_y0, int copy_w, int copy_h,
                              (size_t)src_x0 * sizeof(video_color_t);
     for (int row = 0; row < copy_h; ++row)
     {
-        video_color_t *dst = &backbuffer[(dst_y0 + row) * VIDEO_WIDTH + dst_x0];
+        video_color_t *dst = &backbuffer[(dst_y0 + row) * g_video_width + dst_x0];
         memcpy(dst, row_ptr, (size_t)copy_w * sizeof(video_color_t));
         row_ptr += stride_bytes;
     }
@@ -669,8 +701,8 @@ void video_blit_rgba32(int x,
 
     if (x0 < 0) { src_x = -x0; x0 = 0; }
     if (y0 < 0) { src_y = -y0; y0 = 0; }
-    if (x1 > VIDEO_WIDTH)  x1 = VIDEO_WIDTH;
-    if (y1 > VIDEO_HEIGHT) y1 = VIDEO_HEIGHT;
+    if (x1 > g_video_width)  x1 = g_video_width;
+    if (y1 > g_video_height) y1 = g_video_height;
 
     int copy_w = x1 - x0;
     int copy_h = y1 - y0;
@@ -695,7 +727,7 @@ void video_blit_rgba32(int x,
     for (int row = 0; row < copy_h; ++row)
     {
         const video_color_t *src_row = (const video_color_t *)row_ptr;
-        video_color_t *dst_row = &backbuffer[(y0 + row) * VIDEO_WIDTH + x0];
+        video_color_t *dst_row = &backbuffer[(y0 + row) * g_video_width + x0];
         for (int col = 0; col < copy_w; ++col)
         {
             video_color_t src_px = src_row[col];
@@ -750,8 +782,8 @@ void video_blit_rgba32_untracked(int x,
 
     if (x0 < 0) { src_x = -x0; x0 = 0; }
     if (y0 < 0) { src_y = -y0; y0 = 0; }
-    if (x1 > VIDEO_WIDTH)  x1 = VIDEO_WIDTH;
-    if (y1 > VIDEO_HEIGHT) y1 = VIDEO_HEIGHT;
+    if (x1 > g_video_width)  x1 = g_video_width;
+    if (y1 > g_video_height) y1 = g_video_height;
 
     int copy_w = x1 - x0;
     int copy_h = y1 - y0;
@@ -775,7 +807,7 @@ void video_blit_rgba32_untracked(int x,
     for (int row = 0; row < copy_h; ++row)
     {
         const video_color_t *src_row = (const video_color_t *)row_ptr;
-        video_color_t *dst_row = &backbuffer[(y0 + row) * VIDEO_WIDTH + x0];
+        video_color_t *dst_row = &backbuffer[(y0 + row) * g_video_width + x0];
         for (int col = 0; col < copy_w; ++col)
         {
             video_color_t src_px = src_row[col];
@@ -836,15 +868,15 @@ void video_copy_backbuffer(int x,
 
     if (x0 < 0) x0 = 0;
     if (y0 < 0) y0 = 0;
-    if (x1 > VIDEO_WIDTH) x1 = VIDEO_WIDTH;
-    if (y1 > VIDEO_HEIGHT) y1 = VIDEO_HEIGHT;
+    if (x1 > g_video_width) x1 = g_video_width;
+    if (y1 > g_video_height) y1 = g_video_height;
     if (x0 >= x1 || y0 >= y1) return;
 
     size_t stride = (size_t)dst_stride_bytes;
     for (int row = y0; row < y1; ++row)
     {
         video_color_t *dst_row = (video_color_t *)((uint8_t *)dst + (size_t)(row - y0) * stride);
-        const video_color_t *src_row = &backbuffer[row * VIDEO_WIDTH + x0];
+        const video_color_t *src_row = &backbuffer[row * g_video_width + x0];
         memcpy(dst_row, src_row, (size_t)(x1 - x0) * sizeof(video_color_t));
     }
 }
@@ -859,8 +891,8 @@ static void video_overlay_restore_to(volatile uint32_t *dst_fb, int x0, int y0, 
     size_t row_bytes = (size_t)(x1 - x0) * sizeof(video_color_t);
     for (int row = y0; row < y1; ++row)
     {
-        volatile uint32_t *dst = &dst_fb[row * VIDEO_WIDTH + x0];
-        uint32_t *src = &backbuffer[row * VIDEO_WIDTH + x0];
+        volatile uint32_t *dst = &dst_fb[row * g_framebuffer_pitch + x0];
+        uint32_t *src = &backbuffer[row * g_video_width + x0];
         fb_memcpy_wc((void *)dst, src, row_bytes);
     }
 }
@@ -879,8 +911,8 @@ void video_overlay_restore(int x, int y, int width, int height)
 
     if (x0 < 0) x0 = 0;
     if (y0 < 0) y0 = 0;
-    if (x1 > VIDEO_WIDTH) x1 = VIDEO_WIDTH;
-    if (y1 > VIDEO_HEIGHT) y1 = VIDEO_HEIGHT;
+    if (x1 > g_video_width) x1 = g_video_width;
+    if (y1 > g_video_height) y1 = g_video_height;
     if (x0 >= x1 || y0 >= y1) return;
 
     video_overlay_restore_to(framebuffer, x0, y0, x1, y1);
@@ -897,26 +929,27 @@ static void video_overlay_rect_outline_to(volatile uint32_t *dst_fb, int x0, int
         return;
     }
 
+    if (g_gop_backend) color = framebuffer_pack(color);
     /* top */
     for (int cx = x0; cx < x1; ++cx)
     {
-        dst_fb[y0 * VIDEO_WIDTH + cx] = color;
+        dst_fb[y0 * g_framebuffer_pitch + cx] = color;
     }
     /* bottom */
     if (y1 - 1 != y0)
     {
         for (int cx = x0; cx < x1; ++cx)
         {
-            dst_fb[(y1 - 1) * VIDEO_WIDTH + cx] = color;
+            dst_fb[(y1 - 1) * g_framebuffer_pitch + cx] = color;
         }
     }
     /* left/right */
     for (int cy = y0; cy < y1; ++cy)
     {
-        dst_fb[cy * VIDEO_WIDTH + x0] = color;
+        dst_fb[cy * g_framebuffer_pitch + x0] = color;
         if (x1 - 1 != x0)
         {
-            dst_fb[cy * VIDEO_WIDTH + (x1 - 1)] = color;
+            dst_fb[cy * g_framebuffer_pitch + (x1 - 1)] = color;
         }
     }
 }
@@ -935,8 +968,8 @@ void video_overlay_rect_outline(int x, int y, int width, int height, video_color
 
     if (x0 < 0) x0 = 0;
     if (y0 < 0) y0 = 0;
-    if (x1 > VIDEO_WIDTH) x1 = VIDEO_WIDTH;
-    if (y1 > VIDEO_HEIGHT) y1 = VIDEO_HEIGHT;
+    if (x1 > g_video_width) x1 = g_video_width;
+    if (y1 > g_video_height) y1 = g_video_height;
     if (x0 >= x1 || y0 >= y1) return;
 
     video_overlay_rect_outline_to(framebuffer, x0, y0, x1, y1, color);
@@ -962,7 +995,7 @@ static void video_overlay_blit_rgba32_to(volatile uint32_t *dst_fb,
     const uint8_t *src_row_ptr = row_ptr;
     for (int row = 0; row < copy_h; ++row)
     {
-        volatile uint32_t *dst = &dst_fb[(dst_y0 + row) * VIDEO_WIDTH + dst_x0];
+        volatile uint32_t *dst = &dst_fb[(dst_y0 + row) * g_framebuffer_pitch + dst_x0];
         const video_color_t *src_row = (const video_color_t *)src_row_ptr;
         fb_memcpy_wc((void *)dst, src_row, (size_t)copy_w * sizeof(video_color_t));
         src_row_ptr += stride_bytes;
@@ -994,8 +1027,8 @@ void video_overlay_blit_rgba32(int x,
 
     if (x0 < 0) { src_x = -x0; x0 = 0; }
     if (y0 < 0) { src_y = -y0; y0 = 0; }
-    if (x1 > VIDEO_WIDTH) x1 = VIDEO_WIDTH;
-    if (y1 > VIDEO_HEIGHT) y1 = VIDEO_HEIGHT;
+    if (x1 > g_video_width) x1 = g_video_width;
+    if (y1 > g_video_height) y1 = g_video_height;
 
     int copy_w = x1 - x0;
     int copy_h = y1 - y0;
@@ -1053,8 +1086,8 @@ void video_invalidate_rect(int x, int y, int width, int height)
 
     if (x0 < 0) x0 = 0;
     if (y0 < 0) y0 = 0;
-    if (x1 > VIDEO_WIDTH)  x1 = VIDEO_WIDTH;
-    if (y1 > VIDEO_HEIGHT) y1 = VIDEO_HEIGHT;
+    if (x1 > g_video_width)  x1 = g_video_width;
+    if (y1 > g_video_height) y1 = g_video_height;
 
     if (x0 >= x1 || y0 >= y1) return;
 
@@ -1097,8 +1130,8 @@ void video_invalidate_all(void)
     dirty_count = 1;
     dirty_rects[0].x0 = 0;
     dirty_rects[0].y0 = 0;
-    dirty_rects[0].x1 = VIDEO_WIDTH;
-    dirty_rects[0].y1 = VIDEO_HEIGHT;
+    dirty_rects[0].x1 = g_video_width;
+    dirty_rects[0].y1 = g_video_height;
     spinlock_unlock(&g_video_lock);
 }
 
@@ -1128,6 +1161,14 @@ static int video_dirty_snapshot(video_dirty_rect_t *out, int max_rects)
 /* Copy with wide stores; helps WC coalesce */
 static inline void fb_memcpy_wc(volatile void *dst_mmio, const void *src, size_t bytes)
 {
+    if (g_gop_backend && (boot_info.framebuffer_red_mask != 0xff0000 ||
+        boot_info.framebuffer_green_mask != 0xff00 || boot_info.framebuffer_blue_mask != 0xff))
+    {
+        volatile uint32_t *dst = dst_mmio;
+        const uint32_t *pixels = src;
+        for (size_t i = 0; i < bytes / 4; ++i) dst[i] = framebuffer_pack(pixels[i]);
+        return;
+    }
     const uint8_t *s = (const uint8_t *)src;
     volatile uint8_t *d = (volatile uint8_t *)dst_mmio;
 
@@ -1136,7 +1177,9 @@ static inline void fb_memcpy_wc(volatile void *dst_mmio, const void *src, size_t
     for (; ((uintptr_t)(d + i) & 7) && i < bytes; ++i) d[i] = s[i];
     for (; i + 8 <= bytes; i += 8)
     {
-        *(volatile uint64_t *)(d + i) = *(const uint64_t *)(s + i);
+        uint64_t word;
+        memcpy(&word, s + i, sizeof(word));
+        *(volatile uint64_t *)(d + i) = word;
     }
     for (; i < bytes; ++i) d[i] = s[i];
 }
@@ -1157,8 +1200,8 @@ static void video_flush_rects_to_fb(const video_dirty_rect_t *rects, int count, 
 
         for (int y = r->y0; y < r->y1; ++y)
         {
-            volatile uint32_t *dst = &dst_fb[y * VIDEO_WIDTH + r->x0];
-            uint32_t *src = &backbuffer[y * VIDEO_WIDTH + r->x0];
+            volatile uint32_t *dst = &dst_fb[y * g_framebuffer_pitch + r->x0];
+            uint32_t *src = &backbuffer[y * g_video_width + r->x0];
             fb_memcpy_wc((void *)dst, src, row_bytes);
         }
     }
@@ -1345,11 +1388,11 @@ bool video_enter_mode(void)
     atk_render();
     video_flush_dirty();
 
-    video_color_t sample = backbuffer[(VIDEO_WIDTH * VIDEO_HEIGHT) / 2];
+    video_color_t sample = backbuffer[(g_video_width * g_video_height) / 2];
     video_log_hex("Sample pixel mid-screen: 0x", sample);
 
-    cursor_x = VIDEO_WIDTH / 2;
-    cursor_y = VIDEO_HEIGHT / 2;
+    cursor_x = g_video_width / 2;
+    cursor_y = g_video_height / 2;
     prev_cursor_x = cursor_x;
     prev_cursor_y = cursor_y;
     cursor_under_valid = false;
@@ -1454,7 +1497,7 @@ void video_exit_mode(void)
 {
     video_hw_disable();
     console_set_vga_enabled(true);
-    vga_enter_text_mode();
+    if (!boot_info.framebuffer_enabled) vga_enter_text_mode();
     video_active = false;
     exit_requested = false;
     video_dirty_reset();
@@ -1528,8 +1571,8 @@ void video_on_mouse_event(int dx, int dy, bool left_pressed, bool right_pressed)
         cursor_y += dy;
         if (cursor_x < 0) cursor_x = 0;
         if (cursor_y < 0) cursor_y = 0;
-        if (cursor_x > VIDEO_WIDTH - 1) cursor_x = VIDEO_WIDTH - 1;
-        if (cursor_y > VIDEO_HEIGHT - 1) cursor_y = VIDEO_HEIGHT - 1;
+        if (cursor_x > g_video_width - 1) cursor_x = g_video_width - 1;
+        if (cursor_y > g_video_height - 1) cursor_y = g_video_height - 1;
     }
 
     bool pressed_edge  = (left_pressed && !last_left_down);
@@ -1881,17 +1924,17 @@ void video_draw_rect(int x, int y, int width, int height, video_color_t color)
     int x1 = x + width, y1 = y + height;
 
     // trivial reject
-    if (x1 <= 0 || y1 <= 0 || x0 >= VIDEO_WIDTH || y0 >= VIDEO_HEIGHT) return;
+    if (x1 <= 0 || y1 <= 0 || x0 >= g_video_width || y0 >= g_video_height) return;
 
     // clip to screen
     if (x0 < 0) x0 = 0;
     if (y0 < 0) y0 = 0;
-    if (x1 > VIDEO_WIDTH)  x1 = VIDEO_WIDTH;
-    if (y1 > VIDEO_HEIGHT) y1 = VIDEO_HEIGHT;
+    if (x1 > g_video_width)  x1 = g_video_width;
+    if (y1 > g_video_height) y1 = g_video_height;
 
     for (int row = y0; row < y1; ++row)
     {
-        video_color_t *dst = &backbuffer[row * VIDEO_WIDTH + x0];
+        video_color_t *dst = &backbuffer[row * g_video_width + x0];
         for (int col = x0; col < x1; ++col)
         {
             *dst++ = color;

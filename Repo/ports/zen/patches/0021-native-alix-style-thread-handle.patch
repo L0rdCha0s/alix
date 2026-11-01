@@ -1,0 +1,15 @@
+--- a/layout/style/ServoStyleConstsForwards.h
++++ b/layout/style/ServoStyleConstsForwards.h
+@@ -16,6 +16,12 @@
+ #endif
+ 
+ #include <atomic>
++
++#ifdef __ALIX__
++// cbindgen maps the native style worker handle to pthread_t. Include its
++// defining header directly instead of relying on another platform's includes.
++#  include <pthread.h>
++#endif
+ 
+ #include "NonCustomCSSPropertyId.h"
+ #include "Units.h"

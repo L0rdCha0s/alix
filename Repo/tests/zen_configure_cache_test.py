@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Verify native SDK changes invalidate real probes while preserving history."""
 import importlib.util
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -75,6 +76,21 @@ class CacheTests(unittest.TestCase):
             self.refresh()
         self.assertTrue(self.cache.is_dir())
         self.assertFalse(self.state.exists())
+
+    def test_rust_port_changes_invalidate_immutable_vendor_artifacts(self):
+        series_path = self.state.with_name("series.json")
+        rust = {"path": "third_party/rust/libc/src/alix/mod.rs", "after": "a" * 64}
+        native = {"path": "widget/alix/nsWindow.cpp", "after": "b" * 64}
+        series = {"patches": [{"files": [rust, native]}]}
+        series_path.write_text(json.dumps(series))
+        original = module.rust_port_revision(series_path)
+        native["after"] = "c" * 64
+        series["patches"][0]["files"].reverse()
+        series_path.write_text(json.dumps(series))
+        self.assertEqual(module.rust_port_revision(series_path), original)
+        rust["after"] = "d" * 64
+        series_path.write_text(json.dumps(series))
+        self.assertNotEqual(module.rust_port_revision(series_path), original)
 
 
 if __name__ == "__main__":

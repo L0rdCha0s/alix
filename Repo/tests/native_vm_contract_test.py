@@ -420,6 +420,8 @@ int main(void) {
 #define SYSCALL_VM_ADVICE_POSIX 0x100u
 #define POSIX_MADV_NORMAL 0
 #define POSIX_MADV_DONTNEED 4
+#define MADV_NORMAL 0
+#define MADV_WILLNEED 3
 #define MADV_DONTNEED 4
 static int result;
 static unsigned calls;
@@ -443,6 +445,13 @@ int main(void) {
     unsigned before=calls;
     assert(posix_madvise((void *)0x1234000,8192,99)==EINVAL && errno==EDOM && calls==before);
     assert(madvise((void *)0x1234000,8192,0x104)==-1 && errno==EINVAL && calls==before);
+    for(int advice=0;advice<=3;advice+=3) {
+        result=0;errno=EDOM;
+        assert(madvise((void *)0x1234000,8192,advice)==0 && errno==EDOM);
+        assert(seen_address==0x1234000 && seen_length==8192 && seen_advice==(0x100u|(uint32_t)advice));
+        result=-ENOMEM;
+        assert(madvise((void *)0x1234000,8192,advice)==-1 && errno==ENOMEM);
+    }
     result=-EINVAL;
     assert(madvise((void *)0x1234000,8192,4)==-1 && errno==EINVAL && seen_advice==4);
     result=0;errno=EDOM;

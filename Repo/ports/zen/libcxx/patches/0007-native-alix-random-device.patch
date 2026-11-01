@@ -1,0 +1,22 @@
+--- a/libcxx/include/__config
++++ b/libcxx/include/__config
+@@ -141,7 +141,7 @@
+ #  if defined(__APPLE__) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__) ||                     \
+       defined(__DragonFly__)
+ #    define _LIBCPP_USING_ARC4_RANDOM
+-#  elif defined(__wasi__) || defined(__EMSCRIPTEN__)
++#  elif defined(__wasi__) || defined(__EMSCRIPTEN__) || defined(__ALIX__)
+ #    define _LIBCPP_USING_GETENTROPY
+ #  elif defined(__Fuchsia__)
+ #    define _LIBCPP_USING_FUCHSIA_CPRNG
+--- a/libcxx/include/__cxx03/__config
++++ b/libcxx/include/__cxx03/__config
+@@ -286,7 +286,7 @@
+ #  if defined(__APPLE__) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__) ||                     \
+       defined(__DragonFly__)
+ #    define _LIBCPP_USING_ARC4_RANDOM
+-#  elif defined(__wasi__) || defined(__EMSCRIPTEN__)
++#  elif defined(__wasi__) || defined(__EMSCRIPTEN__) || defined(__ALIX__)
+ #    define _LIBCPP_USING_GETENTROPY
+ #  elif defined(__Fuchsia__)
+ #    define _LIBCPP_USING_FUCHSIA_CPRNG

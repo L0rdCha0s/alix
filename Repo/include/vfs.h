@@ -76,6 +76,11 @@ int vfs_open_data_flags_owned(vfs_node_t *cwd, const char *path, bool create, bo
 int vfs_open_legacy_handle(vfs_node_t *cwd, const char *path, bool create, bool truncate,
                             bool exclusive, vfs_node_t **out);
 int vfs_remove_path(vfs_node_t *cwd, const char *path, bool allow_directory);
+int vfs_remove_directory_path(vfs_node_t *cwd, const char *path);
+int vfs_mkdir_exclusive(vfs_node_t *cwd, const char *path, uint32_t uid, uint32_t gid);
+/* Resize an owned regular node under its data lock; no callback execution. */
+int vfs_resize_data(vfs_node_t *file, uint64_t length);
+ssize_t vfs_realpath_snapshot(vfs_node_t *cwd, const char *path, char *buffer, size_t capacity);
 int vfs_rename_path(vfs_node_t *cwd, const char *old_path, const char *new_path);
 /* Resolve intermediate links, snapshot the final symlink without following it,
  * and copy at most capacity raw bytes (no appended NUL). No target pointer
@@ -154,6 +159,8 @@ int vfs_path_stat_snapshot(vfs_node_t *cwd, const char *path, bool follow_final,
  * the tree lock, or return negative errno without reporting truncated success.
  * Success excludes NUL, which is also written into the supplied storage. */
 ssize_t vfs_path_snapshot(vfs_node_t *directory, char *buffer, size_t capacity);
+/* Same coherent path snapshot for an owned node of any type. */
+ssize_t vfs_node_path_snapshot(vfs_node_t *node, char *buffer, size_t capacity);
 void vfs_node_release(vfs_node_t *node);
 /* Protected worker, without caller locks/preemption guard. Serializes final
  * orphan-directory subtree teardown with tree readers, and consumes one owner.

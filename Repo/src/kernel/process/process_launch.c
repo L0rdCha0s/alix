@@ -13,6 +13,12 @@ process_t *process_create_user_elf_prepared(const char *name, const uint8_t *ima
     __atomic_store_n(&watch->pid, process->pid, __ATOMIC_RELEASE);
     __atomic_store_n(&watch->owner, process, __ATOMIC_RELEASE);
     process->uid = context->uid; process->gid = context->gid;
+    if (context->executable_path)
+    {
+        size_t length = strnlen(context->executable_path, sizeof(process->executable_path));
+        if (!length || length == sizeof(process->executable_path) || context->executable_path[0] != '/') goto failed;
+        memcpy(process->executable_path, context->executable_path, length + 1);
+    }
     for (unsigned number = 1; number < ALIX_SIGNAL_COUNT; ++number)
         if (context->ignored_signals & (1ULL << (number - 1))) process->signal_actions[number].handler = 1;
     process->cwd_owner = context->cwd;

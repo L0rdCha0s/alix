@@ -238,10 +238,15 @@ static void child_launch_handler(io_request_t *request, io_service_result_t *res
     unsigned char *image = NULL;
     const char **arguments = NULL;
     const char **environment = NULL;
+    char *executable_path = NULL;
     result->result = child_apply_actions(record, work);
     if (result->result) return;
     result->result = child_open_program(record, work, &file);
     if (result->result) return;
+    executable_path = malloc(VFS_PATH_MAX);
+    if (!executable_path) { result->result = -ENOMEM; goto finished; }
+    result->result = vfs_node_path_snapshot(file, executable_path, VFS_PATH_MAX);
+    if (result->result < 0) goto finished;
     size_t bytes = 0;
     vfs_node_type_t type;
     if (!vfs_stat(file, &bytes, &type, NULL, NULL, NULL) || type != VFS_NODE_FILE || !bytes)
@@ -265,8 +270,10 @@ static void child_launch_handler(io_request_t *request, io_service_result_t *res
     bool initialized = process_creation_watch_init(&record->watch);
     spinlock_preempt_enable();
     if (!initialized) { result->result = -EIO; goto finished; }
+    record->launch.executable_path = executable_path;
     process_t *child = process_create_user_elf_prepared(work->data, image, bytes, &record->launch,
                                                         arguments, work->argc, &record->watch);
+    record->launch.executable_path = NULL;
     record->launch.environment = NULL; record->launch.environment_count = 0;
     process_creation_watch_complete(&record->watch);
     if (!child) result->result = -ENOMEM;
@@ -278,8 +285,9 @@ static void child_launch_handler(io_request_t *request, io_service_result_t *res
         else { result->result = (int64_t)record->watch.pid; result->description_owned = description; }
     }
 finished:
+    record->launch.executable_path = NULL;
     record->launch.environment = NULL; record->launch.environment_count = 0;
-    free(environment); free(arguments); free(image); vfs_node_release_owned(file);
+    free(executable_path); free(environment); free(arguments); free(image); vfs_node_release_owned(file);
 }
 
 static bool child_wait_handler(io_request_t *request, io_service_result_t *result)
@@ -581,6 +589,19 @@ static int64_t child_wait(int64_t pid, void *output, uint64_t flags)
 int64_t io_process_dispatch(uint32_t operation, uint64_t first, uint64_t second, uint64_t third)
 {
     if (__atomic_load_n(&g_start, __ATOMIC_ACQUIRE) != 2) return -ENOSYS;
+    if (operation == SYSCALL_PROCESS_EXECUTABLE_PATH)
+    {
+        if (third) return -EINVAL;
+        process_t *process = current_process_local();
+        if (!process || !process->is_user) return -EINVAL;
+        size_t length = strnlen(process->executable_path, sizeof(process->executable_path));
+        if (!length) return -ENOENT;
+        if (length == sizeof(process->executable_path)) return -EIO;
+        if (second <= length) return -ERANGE;
+        /* Immutable process-owned bytes remain live until this thread is off
+         * CPU. No allocation or temporary ownership can escape cancellation. */
+        return user_copy_to_user((void *)(uintptr_t)first, process->executable_path, length + 1) ? (int64_t)length : -EFAULT;
+    }
     if (operation == SYSCALL_PROCESS_SPAWN) return child_spawn((const char *)first, second, NULL);
     if (operation == SYSCALL_PROCESS_SPAWN_EX)
     {

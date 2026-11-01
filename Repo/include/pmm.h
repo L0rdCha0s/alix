@@ -23,5 +23,7 @@ void pmm_free_page(paddr_t base);
 
 void pmm_reserve_range(paddr_t base, size_t bytes);
 size_t pmm_available_bytes(void);
+/* Immutable boot usable-RAM total, including later kernel reservations. */
+size_t pmm_total_bytes(void);
 
 #endif /* PMM_H */

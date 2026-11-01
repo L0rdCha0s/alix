@@ -31,6 +31,7 @@ static uint32_t g_serial_output_depth = 0;
 static uint64_t g_serial_output_saved_flags[SMP_MAX_CPUS];
 static bool g_serial_async_enabled = false;
 static bool g_serial_worker_started = false;
+static bool g_serial_present;
 
 static void serial_hw_write_char(char c);
 static void serial_worker_entry(void *arg);
@@ -61,7 +62,7 @@ static int serial_transmit_ready(void)
 
 static int serial_receive_ready(void)
 {
-    return (inb(COM1 + 5) & 0x01) != 0;
+    return g_serial_present && (inb(COM1 + 5) & 0x01) != 0;
 }
 
 void serial_init(void)
@@ -73,6 +74,10 @@ void serial_init(void)
     outb(COM1 + 3, 0x03);
     outb(COM1 + 2, 0xC7);
     outb(COM1 + 4, 0x0B);
+    uint8_t saved = inb(COM1 + 7);
+    outb(COM1 + 7, 0x5a);
+    g_serial_present = inb(COM1 + 7) == 0x5a;
+    outb(COM1 + 7, saved);
     spinlock_init(&g_serial_queue_lock);
     spinlock_init(&g_serial_hw_lock);
     spinlock_init(&g_serial_output_lock);
@@ -83,9 +88,13 @@ void serial_init(void)
 static void serial_hw_write_char(char c)
 {
     uint64_t flags = spinlock_lock_irqsave(&g_serial_hw_lock);
-    while (!serial_transmit_ready())
+    if (!g_serial_present) { spinlock_unlock_irqrestore(&g_serial_hw_lock, flags); return; }
+    unsigned polls = 100000;
+    while (!serial_transmit_ready() && --polls)
     {
+        __asm__ volatile ("pause");
     }
+    if (!polls) { g_serial_present = false; spinlock_unlock_irqrestore(&g_serial_hw_lock, flags); return; }
     outb(COM1, (uint8_t)c);
     spinlock_unlock_irqrestore(&g_serial_hw_lock, flags);
 }
@@ -333,6 +342,7 @@ void serial_output_bytes(const char *data, size_t length)
 
 char serial_read_char(void)
 {
+    if (!g_serial_present) return 0;
     while (!serial_receive_ready())
     {
     }
@@ -346,7 +356,7 @@ bool serial_has_char(void)
 
 bool serial_is_ready(void)
 {
-    return serial_transmit_ready() != 0;
+    return g_serial_present && serial_transmit_ready() != 0;
 }
 
 static void serial_early_hw_write_char(char c)

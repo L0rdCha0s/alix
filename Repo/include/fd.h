@@ -15,6 +15,9 @@ typedef struct fd_ops
     ssize_t (*pread)(void *ctx, void *buffer, size_t count, size_t offset);
     int64_t (*lseek)(void *ctx, int64_t offset, int whence);
     int (*fstat)(void *ctx, syscall_stat_t *out);
+    /* Bounded readiness snapshot, never waits or performs storage I/O. Returns
+     * SYSCALL_POLL_* flags; error/hangup are independent of requested events. */
+    uint32_t (*poll)(void *ctx);
 } fd_ops_t;
 
 int fd_allocate(const fd_ops_t *ops, void *context);

@@ -15,7 +15,7 @@ void *sbrk(int64_t increment);
 void exit(int status) __attribute__((__noreturn__));
 int64_t lseek(int fd, int64_t offset, int whence);
 int fstat(int fd, struct stat *st);
-ssize_t pread(int fd, void *buffer, size_t count, size_t offset);
+ssize_t pread(int fd, void *buffer, size_t count, off_t offset);
 
 #ifdef __cplusplus
 }

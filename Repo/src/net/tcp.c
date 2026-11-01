@@ -112,6 +112,7 @@ struct net_tcp_socket
 {
     tcp_state_t state;
     net_interface_t *iface;
+    uint32_t local_ip; /* Connection source address, captured when routing. */
     uint32_t remote_ip;
     uint32_t next_hop_ip;
     uint16_t remote_port;
@@ -151,6 +152,8 @@ struct net_tcp_socket
     uint64_t reass_last_ack_tick;
     bool remote_closed;
     bool error;
+    int32_t pending_error;
+    uint64_t error_generation, error_claim_generation;
     uint16_t mss;
 
     uint64_t last_send_tick;
@@ -233,7 +236,7 @@ static void tcp_process_payload(net_tcp_socket_t *socket, uint32_t seq_num,
 static void tcp_send_ack(net_tcp_socket_t *socket);
 static void tcp_schedule_ack(net_tcp_socket_t *socket, bool immediate);
 static void tcp_retransmit(net_tcp_socket_t *socket);
-static void tcp_mark_error(net_tcp_socket_t *socket, const char *reason);
+static void tcp_mark_error(net_tcp_socket_t *socket, int error, const char *reason);
 static bool tcp_rx_reserve_space(net_tcp_socket_t *socket, size_t additional);
 static void tcp_rx_consume(net_tcp_socket_t *socket, size_t consumed);
 static void tcp_reassembly_clear(net_tcp_socket_t *socket);
@@ -674,7 +677,7 @@ static void tcp_reassembly_drain(net_tcp_socket_t *socket)
         {
             if (!socket->rx_buffer || socket->rx_capacity == 0)
             {
-                tcp_mark_error(socket, "rx alloc failed");
+                tcp_mark_error(socket, ENOMEM, "rx alloc failed");
             }
             else
             {
@@ -1163,9 +1166,57 @@ int net_tcp_socket_owned_snapshot(net_tcp_socket_t *socket, net_tcp_owned_status
     out->available = socket->rx_size;
     out->event_sequence = __atomic_load_n(&socket->read_event_seq, __ATOMIC_ACQUIRE);
     out->mss = socket->mss;
-    out->reserved = 0;
+    out->error_code = socket->pending_error;
     tcp_unlock(flags);
     return 0;
+}
+
+int net_tcp_socket_info_owned(net_tcp_socket_t *socket, net_tcp_owned_info_t *out)
+{
+    if (!out || !tcp_socket_in_pool(socket)) return -EINVAL;
+    uint64_t flags = tcp_lock();
+    if (!socket->owned_references || socket->state == TCP_STATE_UNUSED)
+    { tcp_unlock(flags); return -EBADF; }
+    *out = (net_tcp_owned_info_t){ .local_ip = socket->local_ip, .remote_ip = socket->remote_ip,
+        .local_port = socket->local_ip ? socket->local_port : 0, .remote_port = socket->remote_port,
+        .mss = socket->mss,
+        .flags = socket->state == TCP_STATE_ESTABLISHED || socket->state == TCP_STATE_CLOSE_WAIT ? NET_TCP_OWNED_CONNECTED : 0,
+        .receive_buffer = socket->rx_capacity, .send_buffer = sizeof(socket->pending_payload) };
+    tcp_unlock(flags);
+    return 0;
+}
+
+int net_tcp_socket_error_claim_owned(net_tcp_socket_t *socket, int32_t *error, uint64_t *generation)
+{
+    if (!error || !generation || !tcp_socket_in_pool(socket)) return -EINVAL;
+    uint64_t flags = tcp_lock();
+    int result = 0;
+    if (!socket->owned_references || socket->state == TCP_STATE_UNUSED) result = -EBADF;
+    else if (socket->error_claim_generation) result = -EAGAIN;
+    else
+    {
+        *error = socket->pending_error;
+        *generation = *error ? socket->error_generation : 0;
+        socket->error_claim_generation = *generation;
+    }
+    tcp_unlock(flags);
+    return result;
+}
+
+int net_tcp_socket_error_finish_owned(net_tcp_socket_t *socket, uint64_t generation, bool commit)
+{
+    if (!generation || !tcp_socket_in_pool(socket)) return -EINVAL;
+    uint64_t flags = tcp_lock();
+    int result = 0;
+    if (!socket->owned_references || socket->state == TCP_STATE_UNUSED) result = -EBADF;
+    else if (socket->error_claim_generation != generation) result = -EINVAL;
+    else
+    {
+        if (commit && socket->error_generation == generation) socket->pending_error = 0;
+        socket->error_claim_generation = 0;
+    }
+    tcp_unlock(flags);
+    return result;
 }
 
 bool net_tcp_socket_connect(net_tcp_socket_t *socket, uint32_t remote_ip, uint16_t remote_port)
@@ -1185,21 +1236,17 @@ bool net_tcp_socket_connect(net_tcp_socket_t *socket, uint32_t remote_ip, uint16
 
     if (!socket->rx_buffer && !tcp_init_rx_buffer(socket))
     {
-        tcp_mark_error(socket, "rx alloc failed");
+        tcp_mark_error(socket, ENOMEM, "rx alloc failed");
         goto done;
-    }
-
-    /* Announce our IP->MAC so the gateway learns/refreshes its neighbor entry. */
-    if (socket->iface && socket->iface->ipv4_addr)
-    {
-        net_arp_announce(socket->iface, socket->iface->ipv4_addr);
     }
 
     if (!tcp_prepare_route(socket, remote_ip, remote_port))
     {
-        tcp_mark_error(socket, "route failure");
+        tcp_mark_error(socket, ENETUNREACH, "route failure");
         goto done;
     }
+    /* Announce the selected connection address, after route selection. */
+    net_arp_announce(socket->iface, socket->local_ip);
 
     socket->seq_next = tcp_initial_seq();
     socket->unacked_seq = socket->seq_next;
@@ -1231,7 +1278,7 @@ bool net_tcp_socket_connect(net_tcp_socket_t *socket, uint32_t remote_ip, uint16
     {
         if (!tcp_send_syn(socket))
         {
-            tcp_mark_error(socket, "syn send failed");
+            tcp_mark_error(socket, ENETDOWN, "syn send failed");
             goto done;
         }
         socket->state = TCP_STATE_SYN_SENT;
@@ -1240,7 +1287,7 @@ bool net_tcp_socket_connect(net_tcp_socket_t *socket, uint32_t remote_ip, uint16
     {
         if (!net_arp_send_request(socket->iface, socket->next_hop_ip))
         {
-            tcp_mark_error(socket, "arp request failed");
+            tcp_mark_error(socket, ENETDOWN, "arp request failed");
             goto done;
         }
         socket->state = TCP_STATE_ARP;
@@ -1345,6 +1392,19 @@ size_t net_tcp_socket_available(const net_tcp_socket_t *socket)
     size_t available = socket->rx_size;
     tcp_unlock(flags);
     return available;
+}
+
+ssize_t net_tcp_socket_peek_owned(net_tcp_socket_t *socket, uint8_t *buffer, size_t capacity)
+{
+    if (!tcp_socket_in_pool(socket) || (capacity && !buffer)) return -EINVAL;
+    uint64_t flags = tcp_lock();
+    if (!socket->owned_references || socket->state == TCP_STATE_UNUSED)
+    { tcp_unlock(flags); return -EBADF; }
+    size_t count = socket->rx_size < capacity ? socket->rx_size : capacity;
+    if (count && !socket->rx_buffer) { tcp_unlock(flags); return -EIO; }
+    if (count) memcpy(buffer, socket->rx_buffer + socket->rx_head, count);
+    tcp_unlock(flags);
+    return (ssize_t)count;
 }
 
 size_t net_tcp_socket_read(net_tcp_socket_t *socket, uint8_t *buffer, size_t capacity)
@@ -1633,7 +1693,7 @@ void net_tcp_socket_close(net_tcp_socket_t *socket)
             tcp_unlock(lock_flags);
             return;
         }
-        tcp_mark_error(socket, "fin send failed");
+        tcp_mark_error(socket, ENETDOWN, "fin send failed");
     }
 
     if (socket->state == TCP_STATE_CLOSE_WAIT && !socket->awaiting_ack)
@@ -1646,7 +1706,7 @@ void net_tcp_socket_close(net_tcp_socket_t *socket)
             tcp_unlock(lock_flags);
             return;
         }
-        tcp_mark_error(socket, "fin send failed");
+        tcp_mark_error(socket, ENETDOWN, "fin send failed");
     }
 
     if (socket->state == TCP_STATE_CLOSED || socket->state == TCP_STATE_ERROR)
@@ -1890,7 +1950,7 @@ void net_tcp_poll(void)
                     }
                     else
                     {
-                        tcp_mark_error(socket, "syn send failed");
+                        tcp_mark_error(socket, ENETDOWN, "syn send failed");
                     }
                     continue;
                 }
@@ -1903,7 +1963,7 @@ void net_tcp_poll(void)
             }
             if (now > socket->connect_deadline)
             {
-                tcp_mark_error(socket, "arp timeout");
+                tcp_mark_error(socket, EHOSTUNREACH, "arp timeout");
             }
             continue;
         }
@@ -1933,7 +1993,7 @@ void net_tcp_poll(void)
             {
                 if (now > socket->connect_deadline)
                 {
-                    tcp_mark_error(socket, "handshake timeout");
+                    tcp_mark_error(socket, ETIMEDOUT, "handshake timeout");
                 }
             }
         }
@@ -1978,7 +2038,8 @@ static bool tcp_prepare_route(net_tcp_socket_t *socket, uint32_t remote_ip, uint
     socket->next_hop_ip = next_hop;
     socket->remote_port = remote_port;
 
-    if (!socket->iface || socket->iface->ipv4_addr == 0)
+    socket->local_ip = socket->iface ? __atomic_load_n(&socket->iface->ipv4_addr, __ATOMIC_ACQUIRE) : 0;
+    if (!socket->local_ip)
     {
         return false;
     }
@@ -2036,7 +2097,7 @@ static void tcp_retransmit(net_tcp_socket_t *socket)
 
     if (socket->retry_count >= socket->max_retries)
     {
-        tcp_mark_error(socket, "retry limit");
+        tcp_mark_error(socket, ETIMEDOUT, "retry limit");
         return;
     }
 
@@ -2053,7 +2114,7 @@ static void tcp_retransmit(net_tcp_socket_t *socket)
 
     if (!tcp_send_segment(socket, seq, flags, payload, payload_len, false, false))
     {
-        tcp_mark_error(socket, "retransmit failed");
+        tcp_mark_error(socket, ENETDOWN, "retransmit failed");
         return;
     }
 
@@ -2137,7 +2198,7 @@ void net_tcp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
         goto out;
     }
 
-    if (socket->iface && socket->iface->ipv4_addr != 0 && dst_ip != socket->iface->ipv4_addr)
+    if (socket->local_ip != 0 && dst_ip != socket->local_ip)
     {
         goto out;
     }
@@ -2214,7 +2275,7 @@ void net_tcp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
     if (flags & TCP_FLAG_RST)
     {
         wake_waiters = true;
-        tcp_mark_error(socket, "peer reset");
+        tcp_mark_error(socket, socket->state == TCP_STATE_SYN_SENT ? ECONNREFUSED : ECONNRESET, "peer reset");
         goto out;
     }
 
@@ -2251,7 +2312,7 @@ void net_tcp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
 
         if (!tcp_send_syn(socket))
         {
-            tcp_mark_error(socket, "syn retry failed");
+            tcp_mark_error(socket, ENETDOWN, "syn retry failed");
         }
         else
         {
@@ -2449,7 +2510,7 @@ static void tcp_process_payload(net_tcp_socket_t *socket, uint32_t seq_num,
     {
         if (!socket->rx_buffer || socket->rx_capacity == 0)
         {
-            tcp_mark_error(socket, "rx overflow");
+            tcp_mark_error(socket, ENOBUFS, "rx overflow");
         }
         else
         {
@@ -2605,9 +2666,9 @@ static net_tcp_socket_t *tcp_find_socket(net_interface_t *iface, uint16_t local_
     return NULL;
 }
 
-static void tcp_mark_error(net_tcp_socket_t *socket, const char *reason)
+static void tcp_mark_error(net_tcp_socket_t *socket, int error, const char *reason)
 {
-    if (!socket)
+    if (!socket || socket->error)
     {
         return;
     }
@@ -2617,6 +2678,8 @@ static void tcp_mark_error(net_tcp_socket_t *socket, const char *reason)
         TCP_LOG("%s", reason);
         TCP_LOG("%s", "\r\n");
     }
+    socket->pending_error = error > 0 ? error : EIO;
+    if (++socket->error_generation == 0) ++socket->error_generation;
     socket->error = true;
     socket->state = TCP_STATE_ERROR;
     socket->awaiting_ack = false;
@@ -2647,7 +2710,7 @@ static bool tcp_send_segment(net_tcp_socket_t *socket, uint32_t seq, uint8_t fla
     }
     if (track_retransmit && payload_len > sizeof(socket->pending_payload))
     {
-        tcp_mark_error(socket, "payload too large");
+        tcp_mark_error(socket, EMSGSIZE, "payload too large");
         return false;
     }
 
@@ -2691,7 +2754,7 @@ static bool tcp_send_segment(net_tcp_socket_t *socket, uint32_t seq, uint8_t fla
     write_be16(ip + 6, 0x4000);
     ip[8] = 64;
     ip[9] = 6;
-    write_be32(ip + 12, socket->iface->ipv4_addr);
+    write_be32(ip + 12, socket->local_ip);
     write_be32(ip + 16, socket->remote_ip);
     write_be16(ip + 10, 0);
     write_be16(ip + 10, checksum16(ip, 20));
@@ -2933,7 +2996,7 @@ static uint16_t checksum16(const uint8_t *data, size_t len)
 static uint16_t tcp_checksum(const net_tcp_socket_t *socket, const uint8_t *tcp, size_t tcp_len)
 {
     uint32_t sum = 0;
-    uint32_t src_ip = socket->iface ? socket->iface->ipv4_addr : 0;
+    uint32_t src_ip = socket ? socket->local_ip : 0;
     uint32_t dst_ip = socket ? socket->remote_ip : 0;
 
     sum += (src_ip >> 16) & 0xFFFFU;

@@ -24,6 +24,9 @@ It must execute inside Alix, with both `CPP_STDLIB_TEST: main PASS` and
 The test uses eight CPU-bound standard C++ threads, mutexes/condition variables,
 thread-local initialization and destructors, global exit order, vectors,
 strings, over-aligned allocation, integer/floating conversion and clocks.
+Each worker also performs a real binary file roundtrip, append and update,
+64-bit positioning without a large file allocation, and missing-file failure.
+Require `CPP_STDLIB_TEST: files PASS threads=8 binary=1 append=1 seek64=1 missing=1`.
 
 The native C fixture `tests/thread_libc_support_test.c` additionally checks
 aligned allocation/reallocation/coalescing and overflow preservation, integer
@@ -94,12 +97,36 @@ The native wide, inttypes and wide-float fixtures now pass; see
 duplicates each small wcout write in serial output; the fixture does not issue
 those writes twice.
 
-Threads, RTTI, localization and wide-character facilities are enabled.
-Exceptions, filesystem, Unicode formatting facilities, random-device and terminal integration remain disabled in this
-profile; implement and enable required facilities as the real Gecko build
+Threads, RTTI, localization, wide-character facilities and file streams are enabled.
+Patch `0006-native-alix-file-streams.patch` selects LLVM's existing file-stream
+implementation independently of optional filesystem operations, and gates the
+`filesystem::path` overloads with their real feature flag. C string and
+`std::string` paths use native `fopen`/`fdopen`, `fseeko` and `ftello`.
+Exceptions, filesystem, Unicode formatting facilities and terminal integration
+remain disabled in this profile; implement and enable required facilities as the real Gecko build
 demands them. The native C runtime now supports removal, rename, exclusive
 creation, temporary files and all C11 floating-point environment operations;
 see [the libc notes](../../../docs/kernel/libc.md).
+
+Patch `0007-native-alix-random-device.patch` selects upstream libc++'s existing
+getentropy implementation in both frontend configuration headers, and
+`LIBCXX_ENABLE_RANDOM_DEVICE` is enabled. No random generator implementation is
+replaced. Its default /dev/urandom constructor token selects the entropy API;
+it does not open that path. `entropy()` retains LLVM's unknown-estimate result
+for this backend. The existing no-exceptions profile aborts on unavailable
+entropy or an invalid token rather than returning substitute samples.
+
+Run `make zen-cxx-runtime`, then `make zen-cxx-random-qemu-test`. The actual
+native executable passes 4,096 samples across eight pinned CPUs, a diversity
+check and descriptor-table exhaustion. Separate guests verify native ENOSYS
+without RDRAND and ENOENT for an unsupported token. The QA-only SIGABRT handler
+exits after the real upstream diagnostics; neither failure returns random data.
+`build/test-out/cxx-random-native-qemu.acceptance.json` matches all three boot
+receipts to the exact target ELF. The general native libc++/libc++abi regression
+also passes threads, TLS destructors, binary files, append, 64-bit seeks and
+finalization after this feature is enabled. Gecko's actual llama-sampler.cpp
+now compiles; this is not a complete Gecko or Zen build.
+
 
 The toolchain defaults to Homebrew LLVM at `/opt/homebrew/opt/llvm`. It uses
 Clang's target resource headers plus Alix headers, with host include searches

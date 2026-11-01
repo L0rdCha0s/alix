@@ -72,6 +72,8 @@ static void owned_free(void *p) {
 #define calloc owned_calloc
 #define free owned_free
 '''
+    code += "\n".join(line for line in (ROOT / "include/syscall_defs.h").read_text().splitlines()
+                       if line.startswith("#define SYSCALL_POLL_")) + "\n"
     code += source("include/fd.h") + "\n" + source("include/fd_table.h") + "\n"
     code += "#define __atomic_fetch_sub(value,amount,order) model_reference_sub(value,amount,order)\n"
     code += source("src/kernel/fd/table.c") + r'''

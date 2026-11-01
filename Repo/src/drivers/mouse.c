@@ -442,6 +442,12 @@ void mouse_disable_ps2(void)
     mouse_queue_reset();
 }
 
+void mouse_enable_ps2(void)
+{
+    __atomic_store_n(&g_mouse_ps2_enabled, true, __ATOMIC_RELEASE);
+    mouse_init();
+}
+
 bool mouse_ps2_active(void)
 {
     return __atomic_load_n(&g_mouse_ps2_enabled, __ATOMIC_ACQUIRE);
