@@ -58,6 +58,71 @@ FD integration:
 - `net_tcp_socket_open` allocates an FD via `fd_allocate(&g_tcp_fd_ops, socket)`.
 - Reads/writes on that FD call into `tcp_fd_read/tcp_fd_write`, which block or return available bytes depending on the API.
 
+The native descriptor backend also has an owned socket mode. `net_tcp_socket_open_owned`
+allocates a socket without a legacy global FD or a borrowed creator thread.
+Explicit get/put references prevent pool-slot, buffer and wait-queue reuse until
+the final protected put. Connected transports then remain timer-owned through
+FIN/ACK or a bounded close timeout; they cannot be resurrected by get. Queue
+wake/debug continuations hold a transport lease and bounded preemption guard
+across temporary TCP-lock release, preventing cancellation or reset from
+stranding their ownership or reinitializing a queue they are using.
+Reference overflow fails instead of wrapping. Legacy
+reset/release cannot recycle an owned slot; transport close preserves its owners.
+Callers must register each acquired owner before allowing cancellation. Deferred
+descriptor finalizers will provide the protected final-put context.
+
+`net_tcp_socket_owned_snapshot` reads reference count, buffered bytes, event
+sequence and connection/read/EOF/error/write readiness under the TCP lock. These
+are internal value snapshots; public `dup`, `fcntl`, poll and cancellation-safe
+socket syscall routing still need integration with the private FD table and an
+event-driven network executor's syscall entry points. Indefinite reads must not
+occupy the storage worker pool.
+
+The protected event executor and its TCP adapter are now implemented.
+`io_event_service` gives every admitted request one bounded nonblocking step per
+scan, retaining pending requests in a heap array. A separate protected worker
+drains cleanup, including canceled/abandoned callers. Idle workers sleep on the
+service's availability queue; pending readiness is polled at the native clock's
+sleep granularity. Shutdown cancels, completes and joins both workers, then
+waits for callers to release their waiter ownership before allowing destruction.
+
+`io_tcp_execute` opens deferred owned descriptions and handles numeric IPv4
+connect, read, partial write and available-byte snapshots. Its continuation
+state, data and retained inputs live in registered request storage. It does not
+perform DNS or storage waits on the event worker. An atomic description read
+gate serializes shared readers without blocking another executor. Fine-grained
+socket errors, POSIX address/options APIs, DNS integration and the public
+per-process FD transition remain unfinished.
+
+`make io-event-service-test` executes active production sources with eight host
+callers, 1,024 jobs, pending/canceled requests, independent/reentrant cleanup,
+bounded admission, shutdown ownership and allocation/factory failure rollback.
+Plain, ASan/UBSan and TSan passed. `make event-tcp-qemu-test` also passed the
+real kernel: three socket readers blocked while another socket transferred
+16 KiB; killing the three callers left their output untouched, released the
+registered requests and allowed clean executor shutdown. Packet checks verified
+all five TCP connections' handshakes and bidirectional FIN/ACK, plus both HTTP
+streams. The ordinary download and eight-CPU TLS fixture passed afterward, and
+the runner restored the ordinary kernel.
+
+`make tcp-owned-contract-test` executes the production ownership code with
+80,000 concurrent get/put cycles, allocation-failure rollback, overflow, legacy
+mode and live-slot reuse checks; ASan/UBSan and TSan also passed. The separate
+`make tcp-owned-qemu-test` uses disposable disks through `run-via-agent.sh`,
+checks 8,192 reference cycles on all eight CPUs, and verifies a real 16 KiB HTTP
+body through an owned connection after dropping its original reference. It also
+runs the event-executor cancellation fixture, then downloads and runs the existing eight-CPU TLS fixture, restores the ordinary
+kernel, and verifies that its optional boot hook is absent. Evidence is in
+`build/test-out/tcp-owned-qemu.log`; `tcpdump` on `tcp-owned-network.pcap`
+confirmed handshake, contiguous response sequence ranges and FIN exchange.
+
+One captured run passed TCP acceptance and the legacy download but stalled in
+the subsequent TLS fixture. The expanded-diagnostic rerun passed all phases;
+the earlier scheduler/register/packet evidence remains in
+`build/test-out/tcp-owned-tls-capture-timeout.*`. That SMP stall has not been
+explained and remains a runtime stability concern. Unexpected native failures
+now retain their exact kernel ELF plus scheduler/run-queue and context data.
+
 Polling:
 
 - `net_tcp_poll()` advances timers (retransmit, connect timeout, etc).

@@ -6,6 +6,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import os
 import re
+import shlex
 import shutil
 import signal
 import socket
@@ -133,6 +134,8 @@ def capture_guest_failure(qmp, staging, log_path):
             port = reservation.getsockname()[1]
         qmp.execute("human-monitor-command", {"command-line": f"gdbserver tcp:127.0.0.1:{port}"})
         script = staging / "failure.gdb"
+        failure_elf = log_path.with_suffix(".kernel.elf")
+        shutil.copyfile(ROOT / "build/alix.elf", failure_elf)
         script.write_text(f"""set pagination off
 set print elements 16
 target remote 127.0.0.1:{port}
@@ -140,19 +143,26 @@ thread apply all info registers rip rsp rbp eflags
 thread apply all bt 8
 p g_ticks
 p g_current_threads
+p g_switch_out_threads
+p g_run_queues
 p g_scheduler_lock
 p g_sleep_queue_lock
 set $alix_t = g_thread_registry_head
 set $alix_count = 0
 while $alix_t != 0 && $alix_count < 256
  printf "THREAD %s state=%d cpu=%u queue=%d rqcpu=%u sleep=%d until=%llu depth=%u wake=%d transition=%d exited=%d\\n", $alix_t->name, $alix_t->state, $alix_t->running_cpu, $alix_t->in_run_queue, $alix_t->run_queue_cpu, $alix_t->sleeping, $alix_t->sleep_until_tick, $alix_t->preempt_disable_depth, $alix_t->wake_pending, $alix_t->in_transition, $alix_t->exited
+ printf "  context=%p preempt=%d affinity=%d:%u lastcpu=%u pending_destroy=%d\\n", $alix_t->context, $alix_t->preempt_pending, $alix_t->affinity_enabled, $alix_t->affinity_cpu, $alix_t->last_cpu_index, $alix_t->pending_destroy
+ if $alix_t->state == 1 && $alix_t->running_cpu == 4294967295 && !$alix_t->is_idle && !$alix_t->in_transition && $alix_t->context != 0
+  printf "UNASSIGNED_RUNNING_CONTEXT\\n"
+  x/20gx $alix_t->context
+ end
  set $alix_t = $alix_t->registry_next
  set $alix_count = $alix_count + 1
 end
 detach
 quit
 """)
-        result = subprocess.run([debugger, "-q", "-batch", "-x", str(script), str(ROOT / "build/alix.elf")],
+        result = subprocess.run([debugger, "-q", "-batch", "-x", str(script), str(failure_elf)],
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=12)
         log_path.with_suffix(".gdb.txt").write_bytes(result.stdout)
     except Exception as error:
@@ -162,7 +172,7 @@ quit
 def run_native_elf(binary_name, markers, log_path, label, timeout_seconds=40,
                    arguments=(), expected_fault=None, tcg_cpu=None,
                    forbidden_markers=(), download_timeout_seconds=10, boot_markers=(),
-                   expected_exception=None, expected_signal_termination=None):
+                   expected_exception=None, expected_signal_termination=None, pcap_path=None):
     """Run a real target ELF, requiring its markers and successful shell return."""
     binary = ROOT / "build/user" / binary_name
     if not binary.is_file():
@@ -197,6 +207,11 @@ def run_native_elf(binary_name, markers, log_path, label, timeout_seconds=40,
                 "QEMU_DATA_IMG": str(staging / "data.img"),
                 "OVMF_VARS": str(variables), "NET_BACKEND": "user",
             })
+            if pcap_path is not None:
+                capture = Path(pcap_path).resolve()
+                capture.parent.mkdir(parents=True, exist_ok=True)
+                env["NETDUMP"] = "-object " + shlex.quote(
+                    f"filter-dump,id=native_test_capture,netdev=n0,queue=all,file={capture}")
             if tcg_cpu is not None:
                 env["QEMU_ACCEL"] = "tcg"
                 env["TCG_CPU_TYPE"] = tcg_cpu

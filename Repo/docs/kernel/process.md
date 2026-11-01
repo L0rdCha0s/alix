@@ -18,6 +18,21 @@ space; the counter remains saturated. Allocation failures may leave gaps.
 `getpid()` returns the owning process ID, which is the same for all its threads.
 The scheduler's idle process retains its special internal ID zero.
 
+`getrusage(RUSAGE_SELF)` uses native syscall 69 to snapshot CPU and fault
+accounting. Timer samples classify the interrupted context as user/system and
+sum across every thread of the process. The current 100Hz clock gives 10ms
+accounting granularity; sleeping/off-CPU time is excluded. Successful user
+demand-zero, heap and stack faults increment the minor-fault counter. Fatal
+protection faults do not. Safe-copy backing resolution which does not generate
+a hardware user fault is not counted. There is currently no disk-backed page
+fault/swap path, so the major-fault counter remains zero.
+
+An IRQ-safe per-process lock protects the four saturating counters and coherent
+snapshots. No usage lock spans allocation or safe user copying. The user wrapper
+converts ticks to normalized timevals and clamps unrepresentable signed fields.
+The native resource fixture passed eight CPUs, observed 128 induced faults and
+increasing CPU time; the register/FP fault-preservation fixture passed afterward.
+
 Per-CPU current pointers (arrays indexed by CPU):
 
 - `g_current_threads[SMP_MAX_CPUS]`
@@ -100,6 +115,24 @@ them; normal return and `process_exit` still work. Their persistent controller
 uses `process_join_kernel_service` to consume the owner only after quiescence.
 This supports storage continuations that must release locks and DMA resources
 even after the original syscall caller has died.
+
+ShellService runners and foreground commands now register heap actor records
+before construction. The observed kernel factory publishes a retained process
+owner before thread publication. A separate shutdown descriptor makes close
+unpublish immediately and queues protected actor stop/join; capture storage and
+its global FD remain owned until all actors and their creators are quiescent.
+Zombie state alone is insufficient: joins also check CPU, transition, switch-out
+and queue hazards. A kill-tree traversal detaches each joined child before
+dropping its traversal reference, so another retained owner cannot make it
+revisit the same child indefinitely. Existing unpublished thread/task allocation
+rollback is still separate work; the creation watch owns the process record.
+
+Each shell state owns its cwd independently. Command runners install that base
+before execution, and protected cwd requests capture it explicitly. Native
+two-session relative-path/owner-change/close acceptance and a subsequent
+eight-CPU TLS fixture pass (`build/test-out/shell-cwd-qemu.log`). Host actor tests
+cover zombie/on-CPU and switch-out teardown hazards, abandoned constructors,
+retained-child traversal and capture-close ordering under ASan/UBSan and TSan.
 
 ## Preemption Path (Timer IRQ + IPI)
 

@@ -33,6 +33,7 @@ static _Thread_local bool protected_worker,tree_owned;
 static void spinlock_init(spinlock_t *l) { l->value=0; }
 static void spinlock_preempt_disable(void) { ++preempt; }
 static void spinlock_preempt_enable(void) { CHECK(preempt); --preempt; }
+static bool __attribute__((unused)) spinlock_preempt_disabled(void) { return preempt!=0; }
 static void spinlock_lock(spinlock_t *l) { while(__atomic_exchange_n(&l->value,1,__ATOMIC_ACQUIRE)) sched_yield(); ++locks; }
 static void spinlock_unlock(spinlock_t *l) { CHECK(locks); --locks; __atomic_store_n(&l->value,0,__ATOMIC_RELEASE); }
 typedef struct { unsigned unused; } wait_queue_t;

@@ -41,6 +41,7 @@ static spinlock_t *watched_table_lock;
 static unsigned protected_transfers;
 static void spinlock_preempt_disable(void) { ++preempt_depth; }
 static void spinlock_preempt_enable(void) { CHECK(preempt_depth); --preempt_depth; }
+static bool __attribute__((unused)) spinlock_preempt_disabled(void) { return preempt_depth!=0; }
 static void interruption_point(void) {
     if (inject_abandonment) { CHECK(preempt_depth || caller_guard); ++protected_transfers; }
 }

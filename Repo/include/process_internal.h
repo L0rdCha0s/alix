@@ -371,6 +371,8 @@ struct process
     uint32_t gid;
     uint64_t runtime_ticks;
     bool is_user;
+    spinlock_t usage_lock;
+    uint64_t usage_user_ticks, usage_system_ticks, usage_minor_faults, usage_major_faults;
     bool kernel_service; /* Immutable after publication; public kill is refused. */
     process_t *parent;
     process_t *first_child;
@@ -378,6 +380,7 @@ struct process
     process_t *sibling_next;
     vfs_node_t *cwd; /* Borrowed compatibility view, protected by cwd_owner. */
     fd_description_t *cwd_owner;
+    fd_table_t *directory_streams; /* Private opaque handles, separate from legacy FDs. */
     process_user_region_t *user_regions;
     struct process_vm_area *vm_areas;
     struct process_vm_transaction *vm_pending;
@@ -824,7 +827,10 @@ void process_trigger_fatal_fault(thread_t *thread,
                                  uintptr_t address);
 thread_priority_t thread_effective_priority(const thread_t *thread);
 bool scheduler_thread_in_any_queue(thread_t *thread);
-void cpu_account_tick(thread_t *thread);
+void cpu_account_tick(thread_t *thread, bool user_mode);
+/* Caller owns the process through a running thread or independent reference. */
+void process_usage_add_cpu(process_t *process, uint64_t ticks, bool user_mode);
+void process_usage_add_fault(process_t *process, bool major);
 void thread_trigger_stack_guard(thread_t *thread, interrupt_frame_t *frame, const char *reason);
 extern void process_preempt_trampoline(void);
 void thread_set_base_priority(thread_t *thread, thread_priority_t priority);
@@ -857,6 +863,7 @@ void procfs_register_process_priority(process_t *process);
 void procfs_unregister_process(process_t *process);
 void process_destroy_marked(process_t *process);
 bool process_prepare_inherited_context(process_t *process, process_t *parent, bool parentless);
+bool process_prepare_user_fds(process_t *process, process_t *parent, int stdout_fd);
 void process_release_context(process_t *process);
 void thread_debug_check_ownership(const thread_t *thread, const char *where);
 void scheduler_trace(const char *prefix, thread_t *thread);

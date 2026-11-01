@@ -10,6 +10,32 @@ void net_tcp_poll(void);
 void net_tcp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t length);
 
 net_tcp_socket_t *net_tcp_socket_open(net_interface_t *iface);
+/* Native descriptor backend. OPEN returns one owned reference without creating
+ * a legacy global FD. Only an existing owner (or its publishing lock) may get
+ * another reference. A successful get requires a protected caller or bounded
+ * preparation guard until the new reference is registered. An owner must
+ * remain registered through every operation.
+ * Construct/final-put on protected workers: allocation and TCP cleanup must not
+ * be abandoned with a syscall caller. No thread/process pointer is captured. */
+net_tcp_socket_t *net_tcp_socket_open_owned(net_interface_t *iface);
+bool net_tcp_socket_get_owned(net_tcp_socket_t *socket);
+int net_tcp_socket_put_owned(net_tcp_socket_t *socket);
+/* Final put consumes the last external owner immediately. An established
+ * transport stays pool-owned through FIN/ACK or its bounded close deadline;
+ * no external get/snapshot may resurrect that retiring incarnation. */
+#define NET_TCP_OWNED_CONNECTED 1u
+#define NET_TCP_OWNED_READABLE 2u
+#define NET_TCP_OWNED_EOF 4u
+#define NET_TCP_OWNED_ERROR 8u
+#define NET_TCP_OWNED_CONNECTING 16u
+#define NET_TCP_OWNED_WRITABLE 32u
+typedef struct
+{
+    uint32_t references, flags;
+    uint64_t available, event_sequence;
+    uint32_t mss, reserved;
+} net_tcp_owned_status_t;
+int net_tcp_socket_owned_snapshot(net_tcp_socket_t *socket, net_tcp_owned_status_t *out);
 bool net_tcp_socket_connect(net_tcp_socket_t *socket, uint32_t remote_ip, uint16_t remote_port);
 bool net_tcp_socket_send(net_tcp_socket_t *socket, const uint8_t *data, size_t len);
 size_t net_tcp_socket_available(const net_tcp_socket_t *socket);

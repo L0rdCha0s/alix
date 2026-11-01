@@ -33,6 +33,7 @@ typedef struct
 {
     fd_description_t *description;
     uint32_t flags;
+    uint64_t reservation;
 } fd_table_entry_t;
 
 struct fd_table
@@ -42,6 +43,7 @@ struct fd_table
     uint32_t references;
     spinlock_t lock;
     size_t capacity;
+    uint64_t next_ticket;
     bool closed;
     fd_table_entry_t entries[];
 };
@@ -262,6 +264,7 @@ static fd_table_t *fd_table_create_internal(size_t capacity, fd_retirement_queue
     table->retirement_queue = queue;
     table->references = 1;
     table->capacity = capacity;
+    table->next_ticket = 1;
     spinlock_init(&table->lock);
     return table;
 }
@@ -312,6 +315,7 @@ void fd_table_shutdown(fd_table_t *table)
         fd_description_t *description = table->entries[index].description;
         table->entries[index].description = NULL;
         table->entries[index].flags = 0;
+        table->entries[index].reservation = 0;
         fd_description_put(description);
     }
     if (deferred) spinlock_preempt_enable();
@@ -369,7 +373,7 @@ int fd_table_install(fd_table_t *table, fd_description_t *description,
     {
         for (size_t index = (size_t)minimum; index < table->capacity; ++index)
         {
-            if (!table->entries[index].description)
+            if (!table->entries[index].description && !table->entries[index].reservation)
             {
                 if (!fd_description_get(description))
                 {
@@ -408,7 +412,7 @@ int fd_table_install_at(fd_table_t *table, int fd,
     {
         result = -EBADF;
     }
-    else if (table->entries[fd].description)
+    else if (table->entries[fd].description || table->entries[fd].reservation)
     {
         result = -EEXIST;
     }
@@ -522,7 +526,7 @@ int fd_table_dup(fd_table_t *table, int source, int minimum, uint32_t flags)
         result = -EMFILE;
         for (size_t index = (size_t)minimum; index < table->capacity; ++index)
         {
-            if (!table->entries[index].description)
+            if (!table->entries[index].description && !table->entries[index].reservation)
             {
                 fd_description_t *description = table->entries[source].description;
                 if (!fd_description_get(description))
@@ -563,6 +567,10 @@ static int fd_table_duplicate_to(fd_table_t *table, int source, int destination,
         if (source == destination)
         {
             result = destination;
+        }
+        else if (table->entries[destination].reservation)
+        {
+            result = -EBUSY;
         }
         else if (!fd_description_get(description))
         {
@@ -634,6 +642,136 @@ int fd_table_set_flags(fd_table_t *table, int fd, uint32_t flags)
         result = 0;
     }
     spinlock_unlock(&table->lock);
+    return result;
+}
+
+typedef struct
+{
+    fd_table_t *table;
+    int slot;
+    uint64_t ticket;
+} fd_reservation_t;
+
+static int fd_reservation_close(void *context)
+{
+    fd_reservation_t *reservation = context;
+    fd_table_t *table = reservation->table;
+    if (table)
+    {
+        spinlock_lock(&table->lock);
+        if (!table->closed && reservation->slot >= 0 &&
+            table->entries[reservation->slot].reservation == reservation->ticket)
+            table->entries[reservation->slot].reservation = 0;
+        spinlock_unlock(&table->lock);
+        fd_table_put(table);
+    }
+    free(reservation);
+    return 0;
+}
+
+static const fd_ops_t fd_reservation_ops = { .close = fd_reservation_close };
+
+bool fd_table_reservation_valid(const fd_description_t *description)
+{
+    return description && fd_description_ops(description)->close == fd_reservation_close;
+}
+
+int fd_table_reservation_cancel(fd_description_t *owner)
+{
+    if (!fd_table_reservation_valid(owner)) return -EINVAL;
+    fd_reservation_t *reservation = fd_description_context(owner);
+    fd_table_t *table = reservation->table;
+    if (!table || reservation->slot < 0) return -EINVAL;
+    int result = -EAGAIN;
+    spinlock_lock(&table->lock);
+    if (table->closed) result = -EBADF;
+    else if (table->entries[reservation->slot].reservation == reservation->ticket)
+    {
+        table->entries[reservation->slot].reservation = 0;
+        result = 0;
+    }
+    spinlock_unlock(&table->lock);
+    return result;
+}
+
+int fd_table_reserve_deferred(fd_table_t *table, fd_description_t **out)
+{
+    if (!out) return -EINVAL;
+    *out = NULL;
+    if (!table || !table->retirement_queue || !spinlock_preempt_disabled()) return -EINVAL;
+    fd_reservation_t *reservation = calloc(1, sizeof(*reservation));
+    if (!reservation) return -ENOMEM;
+    reservation->slot = -1;
+    fd_description_t *owner = fd_description_create_deferred(&fd_reservation_ops, reservation, table->retirement_queue);
+    if (!owner) { free(reservation); return -ENOMEM; }
+    if (!fd_table_get(table)) { fd_description_put(owner); return -EOVERFLOW; }
+    reservation->table = table;
+    int result = -EMFILE;
+    spinlock_lock(&table->lock);
+    if (table->closed) result = -EBADF;
+    else if (!table->next_ticket || table->next_ticket == (uint64_t)-1) result = -EOVERFLOW;
+    else for (size_t index = 0; index < table->capacity; ++index)
+    {
+        fd_table_entry_t *entry = &table->entries[index];
+        if (entry->description || entry->reservation) continue;
+        reservation->slot = (int)index;
+        reservation->ticket = table->next_ticket++;
+        entry->reservation = reservation->ticket;
+        result = 0;
+        break;
+    }
+    spinlock_unlock(&table->lock);
+    if (result) fd_description_put(owner);
+    else *out = owner;
+    return result;
+}
+
+int fd_table_reservation_commit(fd_description_t *owner, fd_description_t *target, uint32_t flags)
+{
+    if (!spinlock_preempt_disabled() || !fd_table_reservation_valid(owner) || !target ||
+        fd_table_reservation_valid(target) || !fd_table_flags_valid(flags)) return -EINVAL;
+    fd_reservation_t *reservation = fd_description_context(owner);
+    fd_table_t *table = reservation->table;
+    if (!table || reservation->slot < 0 || table->retirement_queue != target->retirement_queue) return -EINVAL;
+    int result = -EAGAIN;
+    spinlock_lock(&table->lock);
+    if (table->closed) result = -EBADF;
+    else if (table->entries[reservation->slot].reservation == reservation->ticket)
+    {
+        if (!fd_description_get(target)) result = -EOVERFLOW;
+        else
+        {
+            fd_table_entry_t *entry = &table->entries[reservation->slot];
+            entry->description = target;
+            entry->flags = flags;
+            entry->reservation = 0;
+            result = reservation->slot;
+        }
+    }
+    spinlock_unlock(&table->lock);
+    return result;
+}
+
+int fd_table_clone_deferred(fd_table_t *source, bool close_on_exec, fd_table_t **out)
+{
+    if (!out) return -EINVAL;
+    *out = NULL;
+    if (!source || !source->retirement_queue || !spinlock_preempt_disabled()) return -EINVAL;
+    fd_table_t *copy = fd_table_create_deferred(source->capacity, source->retirement_queue);
+    if (!copy) return -ENOMEM;
+    int result = 0;
+    spinlock_lock(&source->lock);
+    if (source->closed) result = -ECANCELED;
+    else for (size_t index = 0; index < source->capacity; ++index)
+    {
+        fd_table_entry_t *entry = &source->entries[index];
+        if (!entry->description || (close_on_exec && (entry->flags & FD_TABLE_CLOEXEC))) continue;
+        if (!fd_description_get(entry->description)) { result = -EOVERFLOW; break; }
+        copy->entries[index] = *entry;
+    }
+    spinlock_unlock(&source->lock);
+    if (result) fd_table_put(copy);
+    else *out = copy;
     return result;
 }
 

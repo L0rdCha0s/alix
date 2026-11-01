@@ -4,6 +4,9 @@
 #include "types.h"
 #include "syscall_defs.h"
 
+typedef struct fd_description fd_description_t;
+typedef fd_description_t *(*fd_importer_t)(void *context);
+
 typedef struct fd_ops
 {
     ssize_t (*read)(void *ctx, void *buffer, size_t count);
@@ -16,6 +19,12 @@ typedef struct fd_ops
 
 int fd_allocate(const fd_ops_t *ops, void *context);
 int fd_install(int fd, const fd_ops_t *ops, void *context);
+/* Kernel sources only. Importers run under the global slot lock and must only
+ * acquire/create deferred ownership in a bounded preparation guard. A slot is
+ * never imported by integer fallback after private lookup failure. */
+int fd_allocate_importable(const fd_ops_t *ops, void *context, fd_importer_t importer);
+int fd_install_importable(int fd, const fd_ops_t *ops, void *context, fd_importer_t importer);
+fd_description_t *fd_import_owned(int fd);
 void fd_release(int fd);
 ssize_t fd_read(int fd, void *buffer, size_t count);
 ssize_t fd_write(int fd, const void *buffer, size_t count);

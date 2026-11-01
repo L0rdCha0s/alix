@@ -75,7 +75,46 @@ typedef enum
     SYSCALL_READLINK = 66,
     SYSCALL_SIGNAL_JUMP = 67,
     SYSCALL_PROCESS_UPTIME_NS = 68,
+    SYSCALL_RESOURCE_USAGE = 69,
+    SYSCALL_DIRECTORY = 70,
+    SYSCALL_FILE_IO = 71,
 } syscall_id_t;
+
+/* Owned per-process namespace. Old IDs retain their legacy namespace for
+ * installed binaries. This API never falls back to a matching global FD. */
+typedef enum
+{
+    SYSCALL_FILE_OPEN, SYSCALL_FILE_READ, SYSCALL_FILE_WRITE, SYSCALL_FILE_CLOSE,
+    SYSCALL_FILE_PREAD, SYSCALL_FILE_SEEK, SYSCALL_FILE_STAT,
+    SYSCALL_FILE_GETFD, SYSCALL_FILE_SETFD, SYSCALL_FILE_DUP,
+    SYSCALL_FILE_DUP2, SYSCALL_FILE_DUP3,
+    SYSCALL_FILE_SOCKET_OPEN, SYSCALL_FILE_SOCKET_CONNECT, SYSCALL_FILE_SOCKET_AVAILABLE
+} syscall_file_operation_t;
+#define SYSCALL_FILE_CLOEXEC 1u
+#define SYSCALL_OPEN_CLOEXEC (1u << 17)
+
+#define SYSCALL_USAGE_VERSION 1u
+#define SYSCALL_USAGE_SELF 0
+typedef struct
+{
+    uint32_t version, size;
+    uint32_t tick_frequency, reserved;
+    uint64_t user_ticks, system_ticks, minor_faults, major_faults;
+} syscall_resource_usage_t;
+
+#define SYSCALL_DIRENT_VERSION 1u
+#define SYSCALL_DIRENT_NAME_MAX 4095u
+#define SYSCALL_DIRECTORY_OPEN 0u
+#define SYSCALL_DIRECTORY_NEXT 1u
+#define SYSCALL_DIRECTORY_CLOSE 2u
+#define SYSCALL_DIRECTORY_REWIND 3u
+typedef struct
+{
+    uint32_t version, size;
+    uint64_t inode;
+    uint32_t type, name_length;
+    char name[SYSCALL_DIRENT_NAME_MAX + 1u];
+} syscall_directory_entry_t;
 
 #define SYSCALL_TIMEZONE_VERSION 1u
 #define SYSCALL_TIMEZONE_FIXED 0u
@@ -225,7 +264,9 @@ typedef enum
     SYSCALL_NODE_TYPE_DIR = 0,
     SYSCALL_NODE_TYPE_FILE = 1,
     SYSCALL_NODE_TYPE_BLOCK = 2,
-    SYSCALL_NODE_TYPE_SYMLINK = 3
+    SYSCALL_NODE_TYPE_SYMLINK = 3,
+    SYSCALL_NODE_TYPE_SOCKET = 4,
+    SYSCALL_NODE_TYPE_CHARACTER = 5
 } syscall_node_type_t;
 
 typedef struct

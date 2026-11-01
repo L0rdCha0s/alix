@@ -1,4 +1,19 @@
 # Source preparation is opt-in; normal Alix builds never download upstream code.
+# The upstream runtime uses owned descriptors. Keep the original syscall object
+# for existing Alix C targets/binaries; never mix the two FD namespaces in one ELF.
+ZEN_OWNED_SYSCALL := $(USER_OBJDIR)/lib/syscall-owned.o
+ZEN_FCNTL_OBJECT := $(USER_OBJDIR)/lib/fcntl.o
+ZEN_USER_RUNTIME_OBJECTS := $(filter-out $(USER_OBJDIR)/lib/syscall.o,$(USER_COMMON_OBJECTS)) $(ZEN_OWNED_SYSCALL) $(ZEN_FCNTL_OBJECT)
+
+$(ZEN_OWNED_SYSCALL): user/lib/syscall.c
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -DALIX_OWNED_FDS=1 -c -o $@ $<
+
+$(ZEN_FCNTL_OBJECT): user/lib/fcntl.c
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+
+-include $(ZEN_OWNED_SYSCALL:.o=.d) $(ZEN_FCNTL_OBJECT:.o=.d)
 # QEMU exposes build/ as a FAT disk; never put Mozilla/Zen source trees there.
 ZEN_SOURCE_DIR ?= $(abspath ports/zen/upstream/desktop)
 ZEN_ENGINE_DIR ?= $(abspath ports/zen/upstream/firefox-159.0)
@@ -30,24 +45,24 @@ $(ZEN_SSP_ARCHIVE): $(USER_OBJDIR)/lib/stack_protector.o
 
 zen-ssp-runtime: $(ZEN_SSP_ARCHIVE)
 
-zen-ssp-test: $(USER_COMMON_OBJECTS) $(USER_LD_SCRIPT) $(ZEN_SSP_ARCHIVE)
-	ALIX_RUNTIME_OBJECTS="$(USER_COMMON_OBJECTS)" python3 tests/stack_protector_toolchain_test.py
+zen-ssp-test: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_LD_SCRIPT) $(ZEN_SSP_ARCHIVE)
+	ALIX_RUNTIME_OBJECTS="$(ZEN_USER_RUNTIME_OBJECTS)" python3 tests/stack_protector_toolchain_test.py
 
-zen-cxx-stream-test: $(USER_COMMON_OBJECTS) $(USER_LD_SCRIPT) $(ZEN_SSP_ARCHIVE)
-	ALIX_RUNTIME_OBJECTS="$(USER_COMMON_OBJECTS)" python3 tests/cxx_stream_toolchain_test.py
+zen-cxx-stream-test: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_LD_SCRIPT) $(ZEN_SSP_ARCHIVE)
+	ALIX_RUNTIME_OBJECTS="$(ZEN_USER_RUNTIME_OBJECTS)" python3 tests/cxx_stream_toolchain_test.py
 
-zen-cxx-wide-test: $(USER_COMMON_OBJECTS) $(USER_LD_SCRIPT) $(ZEN_SSP_ARCHIVE)
-	ALIX_RUNTIME_OBJECTS="$(USER_COMMON_OBJECTS)" python3 tests/cxx_stream_toolchain_test.py --wide
+zen-cxx-wide-test: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_LD_SCRIPT) $(ZEN_SSP_ARCHIVE)
+	ALIX_RUNTIME_OBJECTS="$(ZEN_USER_RUNTIME_OBJECTS)" python3 tests/cxx_stream_toolchain_test.py --wide
 
-zen-wchar-float-test: $(USER_COMMON_OBJECTS) $(USER_LD_SCRIPT) $(ZEN_SSP_ARCHIVE)
-	ALIX_RUNTIME_OBJECTS="$(USER_COMMON_OBJECTS)" python3 tests/cxx_stream_toolchain_test.py --wide-float
+zen-wchar-float-test: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_LD_SCRIPT) $(ZEN_SSP_ARCHIVE)
+	ALIX_RUNTIME_OBJECTS="$(ZEN_USER_RUNTIME_OBJECTS)" python3 tests/cxx_stream_toolchain_test.py --wide-float
 
 .PHONY: zen-nearbyint-test zen-math-support-test
-zen-nearbyint-test: $(USER_COMMON_OBJECTS) $(USER_LD_SCRIPT) $(ZEN_SSP_ARCHIVE)
-	ALIX_RUNTIME_OBJECTS="$(USER_COMMON_OBJECTS)" python3 tests/cxx_stream_toolchain_test.py --nearbyint
+zen-nearbyint-test: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_LD_SCRIPT) $(ZEN_SSP_ARCHIVE)
+	ALIX_RUNTIME_OBJECTS="$(ZEN_USER_RUNTIME_OBJECTS)" python3 tests/cxx_stream_toolchain_test.py --nearbyint
 
-zen-math-support-test: $(USER_COMMON_OBJECTS) $(USER_LD_SCRIPT) $(ZEN_SSP_ARCHIVE)
-	ALIX_RUNTIME_OBJECTS="$(USER_COMMON_OBJECTS)" python3 tests/cxx_stream_toolchain_test.py --math-support
+zen-math-support-test: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_LD_SCRIPT) $(ZEN_SSP_ARCHIVE)
+	ALIX_RUNTIME_OBJECTS="$(ZEN_USER_RUNTIME_OBJECTS)" python3 tests/cxx_stream_toolchain_test.py --math-support
 
 $(USER_OBJDIR)/tests/stdio_buffer_test.o: tests/stdio_buffer_test.c
 	@mkdir -p $(@D)
@@ -55,6 +70,13 @@ $(USER_OBJDIR)/tests/stdio_buffer_test.o: tests/stdio_buffer_test.c
 
 $(USER_OBJDIR)/stdio_buffer_test.elf: $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/tests/stdio_buffer_test.o $(USER_LD_SCRIPT)
 	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/tests/stdio_buffer_test.o
+
+$(USER_OBJDIR)/tests/resource_usage_test.o: tests/resource_usage_test.c
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+
+$(USER_OBJDIR)/resource_usage_test.elf: $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/tests/resource_usage_test.o $(USER_LD_SCRIPT)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/tests/resource_usage_test.o
 
 $(USER_OBJDIR)/tests/readlink_test.o: tests/readlink_test.c
 	@mkdir -p $(@D)
@@ -172,20 +194,68 @@ signal-qemu-test: all $(USER_OBJDIR)/signal_test.elf
 timezone-qemu-test: all $(USER_OBJDIR)/timezone_test.elf
 	python3 tests/timezone_qemu_test.py
 
+$(USER_OBJDIR)/tests/directory_stream_test.o: tests/directory_stream_test.c
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+
+$(USER_OBJDIR)/directory_stream_test.elf: $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/tests/directory_stream_test.o $(USER_LD_SCRIPT)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/tests/directory_stream_test.o
+
+.PHONY: directory-contract-test zen-directory-qemu-test
+directory-contract-test:
+	python3 -B tests/directory_snapshot_contract_test.py
+	python3 -B tests/directory_cursor_contract_test.py
+	python3 -B tests/directory_retirement_contract_test.py
+
+zen-directory-qemu-test: all $(USER_OBJDIR)/directory_stream_test.elf
+	python3 -B tests/directory_stream_qemu_test.py
+
+.PHONY: tcp-owned-contract-test tcp-owned-qemu-test
+tcp-owned-contract-test:
+	python3 -B tests/tcp_owned_contract_test.py
+
+tcp-owned-qemu-test:
+	python3 -B tests/tcp_owned_qemu_test.py
+
+.PHONY: io-event-service-test event-tcp-qemu-test shell-lifetime-test
+io-event-service-test:
+	python3 -B tests/io_event_service_contract_test.py
+
+event-tcp-qemu-test:
+	python3 -B tests/tcp_owned_qemu_test.py
+
+shell-lifetime-test:
+	python3 -B tests/shell_actor_lifetime_test.py
+	python3 -B tests/shell_cwd_contract_test.py
+
+$(USER_OBJDIR)/tests/private_fd_test.o: tests/private_fd_test.c
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+
+$(USER_OBJDIR)/private_fd_test.elf: $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/tests/private_fd_test.o $(USER_LD_SCRIPT)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/tests/private_fd_test.o
+
+$(USER_OBJDIR)/tests/owned_fd_libc_test.o: tests/owned_fd_libc_test.c
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+
+$(USER_OBJDIR)/owned_fd_libc_test.elf: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/owned_fd_libc_test.o $(USER_LD_SCRIPT)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/owned_fd_libc_test.o
+
 zen-patch-engine:
 	python3 ports/zen/patch_engine.py --engine-dir "$(ZEN_ENGINE_DIR)"
 
-zen-js-configure: $(USER_COMMON_OBJECTS) $(USER_LD_SCRIPT) $(ZEN_SSP_ARCHIVE)
-	ALIX_RUNTIME_OBJECTS="$(USER_COMMON_OBJECTS)" python3 ports/zen/configure_engine.py --engine-dir "$(ZEN_ENGINE_DIR)"
+zen-js-configure: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_LD_SCRIPT) $(ZEN_SSP_ARCHIVE)
+	ALIX_RUNTIME_OBJECTS="$(ZEN_USER_RUNTIME_OBJECTS)" python3 ports/zen/configure_engine.py --engine-dir "$(ZEN_ENGINE_DIR)"
 
-zen-js-build: $(USER_COMMON_OBJECTS) $(USER_LD_SCRIPT) $(ZEN_SSP_ARCHIVE)
-	ALIX_RUNTIME_OBJECTS="$(USER_COMMON_OBJECTS)" python3 ports/zen/configure_engine.py --engine-dir "$(ZEN_ENGINE_DIR)" --build $(if $(filter 1,$(ZEN_JS_KEEP_GOING)),--keep-going,)
+zen-js-build: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_LD_SCRIPT) $(ZEN_SSP_ARCHIVE)
+	ALIX_RUNTIME_OBJECTS="$(ZEN_USER_RUNTIME_OBJECTS)" python3 ports/zen/configure_engine.py --engine-dir "$(ZEN_ENGINE_DIR)" --build $(if $(filter 1,$(ZEN_JS_KEEP_GOING)),--keep-going,)
 
 zen-patch-test:
 	python3 tests/zen_patch_test.py
 
-zen-toolchain-test: $(USER_COMMON_OBJECTS) $(USER_LD_SCRIPT) $(ZEN_SSP_ARCHIVE)
-	ALIX_RUNTIME_OBJECTS="$(USER_COMMON_OBJECTS)" python3 tests/zen_toolchain_test.py
+zen-toolchain-test: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_LD_SCRIPT) $(ZEN_SSP_ARCHIVE)
+	ALIX_RUNTIME_OBJECTS="$(ZEN_USER_RUNTIME_OBJECTS)" python3 tests/zen_toolchain_test.py
 
 zen-host-tools:
 	python3 ports/zen/build_host_tools.py

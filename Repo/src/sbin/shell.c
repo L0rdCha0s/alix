@@ -921,10 +921,9 @@ static bool shell_prompt_login(shell_state_t *shell)
             process_set_identity(shell->owner_process, record.uid, record.gid);
             if (record.home && record.home[0] != '\0')
             {
-                (void)io_vfs_change_cwd_kernel(record.home, shell->owner_pid);
+                (void)io_vfs_change_shell_cwd_kernel(record.home, shell);
             }
             user_auth_free_record(&record);
-            shell->cwd = process_current_cwd();
             shell_prompt_refresh(shell);
             return true;
         }
@@ -943,7 +942,15 @@ void shell_main(void)
         serial_printf("%s", "Shell: unable to allocate state\r\n");
         return;
     }
-    shell->cwd = process_current_cwd();
+    spinlock_preempt_disable();
+    bool cwd_ready = shell_cwd_init(shell);
+    spinlock_preempt_enable();
+    if (!cwd_ready)
+    {
+        free(shell);
+        serial_printf("Shell: unable to retain cwd");
+        return;
+    }
     shell->stream_fn = shell_stream_console_write;
     shell->stream_context = NULL;
     shell->stdout_fd = process_current_stdout_fd();
@@ -1023,7 +1030,7 @@ static void shell_command_runner(void *arg)
 {
     shell_command_task_t *task = (shell_command_task_t *)arg;
     bool ok = false;
-    if (task && task->handler)
+    if (task && task->handler && (!task->shell || shell_cwd_apply_current(task->shell)))
     {
         ok = task->handler(task->shell, task->output, task->args);
         task->result = ok;
@@ -1202,15 +1209,15 @@ char *shell_execute_line(shell_state_t *shell, const char *input, bool *success)
             task->handler = g_commands[i].handler;
             task->result = false;
 
-            process_t *proc = process_create_kernel_with_parent(g_commands[i].name,
-                                                                shell_command_runner,
-                                                                task,
-                                                                0,
-                                                                shell ? shell->stdout_fd : -1,
-                                                                shell ? shell->owner_process : NULL);
+            shell_actor_t *actor = NULL;
+            process_t *proc = shell_actor_begin(shell, &actor, NULL, NULL) ?
+                shell_actor_create(actor, g_commands[i].name, shell_command_runner, task, 0,
+                                   shell ? shell->stdout_fd : -1) : NULL;
             if (!proc)
             {
+                if (task->args_owned) free(task->args_owned);
                 free(task);
+                shell_actor_complete(actor);
                 handler_result = false;
                 break;
             }
@@ -1236,6 +1243,7 @@ char *shell_execute_line(shell_state_t *shell, const char *input, bool *success)
             {
                 shell_foreground_store(shell, NULL);
             }
+            shell_actor_complete(actor);
             break;
         }
     }
@@ -1306,16 +1314,15 @@ char *shell_execute_line(shell_state_t *shell, const char *input, bool *success)
                         task->handler = shell_cmd_runelf;
                         task->result = false;
 
-                        process_t *proc = process_create_kernel_with_parent("runelf",
-                                                                            shell_command_runner,
-                                                                            task,
-                                                                            0,
-                                                                            shell ? shell->stdout_fd : -1,
-                                                                            shell ? shell->owner_process : NULL);
+                        shell_actor_t *actor = NULL;
+                        process_t *proc = shell_actor_begin(shell, &actor, NULL, NULL) ?
+                            shell_actor_create(actor, "runelf", shell_command_runner, task, 0,
+                                               shell ? shell->stdout_fd : -1) : NULL;
                         if (!proc)
                         {
                             free(path_args);
                             free(task);
+                            shell_actor_complete(actor);
                             handler_result = false;
                         }
                         else
@@ -1338,6 +1345,7 @@ char *shell_execute_line(shell_state_t *shell, const char *input, bool *success)
                             {
                                 shell_foreground_store(shell, NULL);
                             }
+                            shell_actor_complete(actor);
                             free(task);
                         }
                     }

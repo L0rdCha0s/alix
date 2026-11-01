@@ -1,6 +1,7 @@
 #include "process_internal.h"
 #include "fd_table.h"
 #include "errno.h"
+#include "io_stream.h"
 
 /* Kernel-lifetime owner. Admission is bounded; old cwd/FD objects can always
  * enqueue without allocation, including during process teardown. */
@@ -51,7 +52,7 @@ bool process_resource_start_cleanup(void)
 
 static int process_cwd_description_close(void *context)
 {
-    if (context) vfs_node_release(context);
+    if (context) vfs_node_release_owned(context);
     return 0;
 }
 
@@ -108,15 +109,95 @@ bool process_prepare_inherited_context(process_t *process, process_t *parent, bo
             }
         }
     }
+    fd_table_t *directories = NULL;
+    if (ok && process->is_user)
+    {
+        /* User process creation is spawn, not fork: directory streams are not
+         * inherited. All threads of the new process share this owned table. */
+        directories = fd_table_create_deferred(FD_TABLE_MAX_ENTRIES, g_process_retirement);
+        if (!directories) ok = false;
+    }
     if (ok)
     {
         process->uid = uid;
         process->gid = gid;
         process->cwd_owner = owner;
         process->cwd = owner ? fd_description_context(owner) : NULL;
+        process->directory_streams = directories;
     }
+    else (void)fd_description_put(owner);
     spinlock_preempt_enable();
     return ok;
+}
+
+bool process_prepare_user_fds(process_t *process, process_t *parent, int stdout_fd)
+{
+    if (!process || !process->is_user || !process->directory_streams) return false;
+    spinlock_preempt_disable();
+    process_t *source = parent ? parent : current_process_local();
+    bool ok = true;
+    if (source && source->is_user)
+    {
+        spinlock_lock(&source->context_lock);
+        fd_table_t *inherited = source->directory_streams;
+        bool pinned = inherited && fd_table_get(inherited);
+        spinlock_unlock(&source->context_lock);
+        fd_table_t *copy = NULL;
+        ok = pinned && fd_table_clone_deferred(inherited, true, &copy) == 0;
+        if (pinned) fd_table_put(inherited);
+        if (ok)
+        {
+            fd_table_t *empty = process->directory_streams;
+            process->directory_streams = copy;
+            fd_table_put(empty);
+        }
+        if (ok && stdout_fd >= 0)
+        {
+            fd_description_t *output = fd_import_owned(stdout_fd);
+            ok = output != NULL;
+            if (ok)
+            {
+                (void)fd_table_close(process->directory_streams, 1);
+                (void)fd_table_close(process->directory_streams, 2);
+                ok = fd_table_install_at(process->directory_streams, 1, output, 0) == 1 &&
+                     fd_table_install_at(process->directory_streams, 2, output, 0) == 2;
+            }
+            fd_description_put(output);
+        }
+    }
+    else
+    {
+        fd_description_t *input = io_null_input_create(g_process_retirement);
+        fd_description_t *output = fd_import_owned(stdout_fd >= 0 ? stdout_fd : g_console_stdout_fd);
+        ok = input && output;
+        if (ok) ok = fd_table_install_at(process->directory_streams, 0, input, 0) == 0;
+        if (ok) ok = fd_table_install_at(process->directory_streams, 1, output, 0) == 1;
+        if (ok) ok = fd_table_install_at(process->directory_streams, 2, output, 0) == 2;
+        fd_description_put(input);
+        fd_description_put(output);
+    }
+    /* Failed initialization leaves partial entries in this unpublished
+     * process-owned table. Constructor rollback releases it asynchronously. */
+    spinlock_preempt_enable();
+    return ok;
+}
+
+fd_table_t *process_current_fd_table(void)
+{
+    if (!spinlock_preempt_disabled()) return NULL;
+    process_t *process = current_process_local();
+    if (!process || !process->is_user) return NULL;
+    /* This process cannot be destroyed while its current guarded thread is
+     * on a CPU. No borrowed table pointer may cross the blocking wait. */
+    spinlock_lock(&process->context_lock);
+    fd_table_t *table = process->directory_streams;
+    spinlock_unlock(&process->context_lock);
+    return table;
+}
+
+fd_table_t *process_current_directory_table(void)
+{
+    return process_current_fd_table();
 }
 
 fd_description_t *process_acquire_cwd_owner(process_t *process, uint32_t *uid_out, uint32_t *gid_out)
@@ -171,8 +252,11 @@ void process_release_context(process_t *process)
     fd_description_t *owner = process->cwd_owner;
     process->cwd_owner = NULL;
     process->cwd = NULL;
+    fd_table_t *directories = process->directory_streams;
+    process->directory_streams = NULL;
     spinlock_unlock(&process->context_lock);
     (void)fd_description_put(owner);
+    fd_table_put(directories);
     spinlock_preempt_enable();
 }
 

@@ -17,6 +17,7 @@
 #include "keyboard.h"
 #include "vfs.h"
 #include "io_vfs_service.h"
+#include "io_user_file.h"
 #include "interrupts.h"
 #include "timer.h"
 #include "hwinfo.h"
@@ -61,6 +62,9 @@
 
 extern bool io_service_boot_test(void) __attribute__((weak));
 extern bool vfs_io_boot_test(void) __attribute__((weak));
+extern bool shell_cwd_boot_test(void) __attribute__((weak));
+extern bool scheduler_wake_boot_test(void) __attribute__((weak));
+extern bool tcp_owned_boot_test(void) __attribute__((weak));
 
 static void shell_process_entry(void *arg);
 static void storage_flush_process_entry(void *arg);
@@ -661,6 +665,11 @@ static void warmup_run_sequence(void)
         serial_printf("protected VFS service startup failed");
         for (;;) { __asm__ volatile ("cli; hlt" ::: "memory"); }
     }
+    if (!io_user_file_services_start())
+    {
+        serial_printf("owned user file services startup failed");
+        for (;;) process_sleep_ms(1000);
+    }
 #if ENABLE_USB
     serial_printf("%s", "[warmup] calling usb_hid_init\r\n");
     process_t *usb_init = process_create_kernel("usb_initd", (thread_entry_t)usb_hid_init, NULL, 0, -1);
@@ -696,9 +705,27 @@ static void warmup_run_sequence(void)
     if (vfs_io_boot_test && !vfs_io_boot_test())
     {
         serial_printf("VFS_IO_TEST: FAIL boot hook");
-        for (;;) { __asm__ volatile ("cli; hlt" ::: "memory"); }
+        /* Keep timer/serial service alive so the fixture's queued diagnostic
+         * can drain. Startup remains blocked and no shell is exposed. */
+        for (;;) process_sleep_ms(1000);
+    }
+    if (tcp_owned_boot_test && !tcp_owned_boot_test())
+    {
+        serial_printf("TCP_OWNED_TEST: FAIL boot hook");
+        for (;;) process_sleep_ms(1000);
     }
 
+    if (shell_cwd_boot_test && !shell_cwd_boot_test())
+    {
+        serial_printf("SHELL_CWD_TEST: FAIL boot hook");
+        for (;;) process_sleep_ms(1000);
+    }
+
+    if (scheduler_wake_boot_test && !scheduler_wake_boot_test())
+    {
+        serial_printf("SCHEDULER_WAKE_TEST: FAIL boot hook");
+        for (;;) process_sleep_ms(1000);
+    }
 #if ENABLE_STARTUP_SCRIPT
     if (!startup_schedule())
     {

@@ -63,11 +63,26 @@ C_SOURCES += $(PROCESS_SOURCES)
 # Shared ownership primitives used by process-owned asynchronous I/O records.
 C_SOURCES += $(KERNEL_DIR)/fd/table.c $(KERNEL_DIR)/io/request.c $(KERNEL_DIR)/io/service.c
 C_SOURCES += $(KERNEL_DIR)/io/vfs.c $(KERNEL_DIR)/io/vfs_service.c
+C_SOURCES += $(KERNEL_DIR)/io/directory_service.c
+C_SOURCES += $(KERNEL_DIR)/io/event_service.c
+C_SOURCES += $(KERNEL_DIR)/io/tcp.c
+C_SOURCES += $(KERNEL_DIR)/io/stream.c
+C_SOURCES += $(KERNEL_DIR)/io/user_file.c
 
 C_OBJECTS := $(patsubst $(SRC_DIR)/%.c,$(OBJDIR)/%.o,$(C_SOURCES))
 C_OBJECTS += $(DL_SCRIPT_OBJ)
 
 # Optional boot-only acceptance object; ordinary kernels retain only a weak hook.
+SHELL_CWD_SELFTEST ?= 0
+ifeq ($(SHELL_CWD_SELFTEST),1)
+C_OBJECTS += $(OBJDIR)/tests/shell_cwd_boot_test.o
+endif
+
+SCHEDULER_WAKE_SELFTEST ?= 0
+ifeq ($(SCHEDULER_WAKE_SELFTEST),1)
+C_OBJECTS += $(OBJDIR)/tests/scheduler_wake_boot_test.o
+endif
+
 IO_VFS_SELFTEST ?= 0
 ifeq ($(IO_VFS_SELFTEST),1)
 C_OBJECTS += $(OBJDIR)/tests/vfs_io_boot_test.o
@@ -77,6 +92,12 @@ endif
 IO_SERVICE_SELFTEST ?= 0
 ifeq ($(IO_SERVICE_SELFTEST),1)
 C_OBJECTS += $(OBJDIR)/tests/io_service_boot_test.o
+endif
+
+IO_TCP_SELFTEST ?= 0
+ifeq ($(IO_TCP_SELFTEST),1)
+C_OBJECTS += $(OBJDIR)/tests/tcp_owned_boot_test.o
+C_OBJECTS += $(OBJDIR)/tests/io_event_tcp_boot_test.o
 endif
 
 ASM_SOURCES := $(filter-out $(ARCH_DIR)/ap_trampoline.S,$(wildcard $(ARCH_DIR)/*.S))
@@ -103,6 +124,7 @@ USER_COMMON_SOURCES := \
 	$(USER_DIR)/lib/pthread_rwlock.c \
 	$(USER_DIR)/lib/process_posix.c \
 	$(USER_DIR)/lib/filesystem_posix.c \
+	$(USER_DIR)/lib/dirent.c \
 	$(USER_DIR)/lib/math.c \
 	$(USER_DIR)/lib/setjmp.c \
 	$(USER_DIR)/lib/atk_user.c \
@@ -332,6 +354,25 @@ $(OBJDIR)/tests/io_service_boot_test.o: tests/io_service_boot_test.c
 
 $(OBJDIR)/tests/vfs_io_boot_test.o: tests/vfs_io_boot_test.c
 	@mkdir -p $(dir $@)
+	$(CC) $(KERNEL_CFLAGS) -c -o $@ $<
+
+$(OBJDIR)/tests/shell_cwd_boot_test.o: tests/shell_cwd_boot_test.c
+	@mkdir -p $(dir $@)
+	$(CC) $(KERNEL_CFLAGS) -c -o $@ $<
+
+$(OBJDIR)/tests/scheduler_wake_boot_test.o: tests/scheduler_wake_boot_test.c
+	@mkdir -p $(@D)
+	$(CC) $(KERNEL_CFLAGS) -c -o $@ $<
+
+TCP_TEST_PORT ?= 0
+$(OBJDIR)/tests/tcp_owned_boot_test.o: KERNEL_CFLAGS += -DTCP_OWNED_TEST_PORT=$(TCP_TEST_PORT)
+$(OBJDIR)/tests/tcp_owned_boot_test.o: tests/tcp_owned_boot_test.c
+	@mkdir -p $(@D)
+	$(CC) $(KERNEL_CFLAGS) -c -o $@ $<
+
+$(OBJDIR)/tests/io_event_tcp_boot_test.o: KERNEL_CFLAGS += -DTCP_OWNED_TEST_PORT=$(TCP_TEST_PORT)
+$(OBJDIR)/tests/io_event_tcp_boot_test.o: tests/io_event_tcp_boot_test.c
+	@mkdir -p $(@D)
 	$(CC) $(KERNEL_CFLAGS) -c -o $@ $<
 
 $(OBJDIR)/generated/%.o: $(OBJDIR)/generated/%.c

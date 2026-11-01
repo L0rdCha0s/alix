@@ -391,6 +391,14 @@ void vfs_node_release(vfs_node_t *node)
     }
 }
 
+void vfs_node_release_owned(vfs_node_t *node)
+{
+    if (!node) return;
+    vfs_tree_lock_acquire();
+    vfs_node_release(node);
+    vfs_tree_lock_release();
+}
+
 static void vfs_log_backpressure_event(const vfs_mount_t *mount,
                                        const char *phase,
                                        size_t dirty_bytes,
@@ -1487,7 +1495,7 @@ vfs_node_t *vfs_resolve(vfs_node_t *cwd, const char *path)
 /*
  * Create (or return) a directory node at `path`.
  *
- * - Creates intermediate nodes as required.
+ * - Requires the parent directory to exist.
  * - Respects subtree mutability (see `vfs_set_subtree_mutable`).
  * - Returns NULL on failure or if the path exists but is not a directory.
  */
@@ -3039,3 +3047,98 @@ int vfs_resolve_owned(vfs_node_t *cwd, const char *path, vfs_node_t **out)
 void vfs_selftest_lock_tree(void) { vfs_tree_lock_acquire(); }
 void vfs_selftest_unlock_tree(void) { vfs_tree_lock_release(); }
 #endif
+
+static uint64_t g_vfs_next_object_id = 1;
+
+static uint64_t vfs_directory_object_id_locked(vfs_node_t *node)
+{
+    if (node->object_id) return node->object_id;
+    if (!g_vfs_next_object_id || g_vfs_next_object_id == UINT64_MAX) return 0;
+    node->object_id = g_vfs_next_object_id++;
+    return node->object_id;
+}
+
+static int vfs_directory_name_length(const char *name, size_t *length)
+{
+    if (!name || !*name) return -EIO;
+    size_t size = 0;
+    while (size < VFS_PATH_MAX && name[size]) ++size;
+    if (size == VFS_PATH_MAX) return -ENAMETOOLONG;
+    *length = size;
+    return 0;
+}
+
+static size_t vfs_directory_record_bytes(size_t length)
+{
+    /* length was bounded by VFS_PATH_MAX; padding never exposes heap bytes. */
+    return (sizeof(vfs_directory_record_t) + length + 1u + 7u) & ~(size_t)7u;
+}
+
+static int vfs_directory_emit_locked(vfs_node_t *node, const char *name, size_t length,
+                                      unsigned char *destination)
+{
+    uint64_t identity = vfs_directory_object_id_locked(node);
+    if (!identity) return -EOVERFLOW;
+    vfs_directory_record_t *record = (vfs_directory_record_t *)destination;
+    record->inode = identity;
+    record->type = (uint32_t)node->type;
+    record->name_length = (uint32_t)length;
+    memcpy(record->name, name, length);
+    record->name[length] = 0;
+    return 0;
+}
+
+int vfs_directory_snapshot(vfs_node_t *directory, vfs_directory_snapshot_t *out)
+{
+    if (!directory || !out || out->data || out->bytes || out->count) return -EINVAL;
+    vfs_tree_lock_acquire();
+    if (directory->type != VFS_NODE_DIR) { vfs_tree_lock_release(); return -ENOTDIR; }
+    size_t bytes = vfs_directory_record_bytes(1) + vfs_directory_record_bytes(2);
+    size_t count = 2;
+    int result = 0;
+    for (vfs_node_t *child = directory->first_child; child; child = child->next_sibling)
+    {
+        size_t length;
+        result = vfs_directory_name_length(child->name, &length);
+        if (result) break;
+        size_t record_bytes = vfs_directory_record_bytes(length);
+        if (__builtin_add_overflow(bytes, record_bytes, &bytes) || count == SIZE_MAX)
+        { result = -EOVERFLOW; break; }
+        ++count;
+    }
+    if (result) { vfs_tree_lock_release(); return result; }
+    unsigned char *data = calloc(1, bytes);
+    if (!data) { vfs_tree_lock_release(); return -ENOMEM; }
+    /* Tree membership and every name stay fixed through both sizing and copy.
+     * The stream owns only value records after this lock is released. */
+    size_t offset = 0;
+    result = vfs_directory_emit_locked(directory, ".", 1, data);
+    offset += vfs_directory_record_bytes(1);
+    if (!result) result = vfs_directory_emit_locked(directory->parent ? directory->parent : directory,
+                                                    "..", 2, data + offset);
+    offset += vfs_directory_record_bytes(2);
+    for (vfs_node_t *child = directory->first_child; child && !result; child = child->next_sibling)
+    {
+        size_t length;
+        result = vfs_directory_name_length(child->name, &length);
+        if (!result)
+        {
+            result = vfs_directory_emit_locked(child, child->name, length, data + offset);
+            offset += vfs_directory_record_bytes(length);
+        }
+    }
+    vfs_tree_lock_release();
+    if (result) { free(data); return result; }
+    out->data = data;
+    out->bytes = bytes;
+    out->count = count;
+    return 0;
+}
+
+void vfs_directory_snapshot_release(vfs_directory_snapshot_t *snapshot)
+{
+    if (!snapshot) return;
+    free(snapshot->data);
+    snapshot->data = NULL;
+    snapshot->bytes = snapshot->count = 0;
+}

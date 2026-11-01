@@ -187,13 +187,29 @@ in stdio, file/directory APIs, math, resource limits, signal-aware nonlocal jump
 and process timing. Native `vprintf`, `perror`, `strdup`, file-type conversion
 and checked `MADV_NORMAL` now pass a guest fixture. A separate `libalix-math.a`
 reuses LLVM's sqrt/absolute-value/scaling code and passed another 39,861 native
-cases; C++ and Rust guests passed after the archive split. The next engine run
-must verify those compile gates. Buffered streams/exit flushing, signal-aware
+cases; C++ and Rust guests passed after the archive split. The subsequent
+8m46s keep-going build cleared those earlier errors and reached the remaining
+directory API, descriptor flag/duplication and `getrusage` compilation errors.
+Buffered streams/exit flushing, signal-aware
 jumps, real process uptime and the current `RLIMIT_AS` policy now have native
-guest acceptance. Directory/symlink APIs and private descriptor flags/duplication
-remain in progress; the native uptime bridge is being connected upstream.
-A complete SpiderMonkey
-executable is still pending. The earlier
+guest acceptance. Native `readlink` now also passes protected-worker and user
+tests, and the upstream uptime branch compiles. Directory iteration now passes
+native eight-CPU acceptance: owned snapshots, refreshed rewind, long/UTF-8 names,
+exactly-once shared cursor reads and bounded handle admission. The actual engine
+compile subsequently cleared directory and `getrusage` errors, then stopped
+after 6m01s on terminal control (`termios.h`), child-process control (`sys/wait.h`)
+and the known descriptor flags/duplication gap. Private descriptor
+flags/duplication remain in progress. Shell session cwd isolation now passes
+native two-session tests, including relative paths after external owner cwd
+changes, session close and a subsequent eight-CPU TLS run. Registered actor
+owners and protected retirement keep session/capture state through actual CPU
+quiescence; partial unpublished thread/task allocation rollback remains a
+separate constructor limitation. Real `getrusage` accounting
+now passes native tests for CPU time and 128 induced faults, and its upstream
+compile check has passed. Descriptor-table inheritance has passed
+production host/sanitizer tests with shared descriptions, independent flags,
+CLOEXEC filtering and concurrent close/snapshot; user FD routing remains to be
+connected. A complete SpiderMonkey executable is still pending. The earlier
 `build/ports/zen/gecko-configure.log` triplet rejection is historical, not the
 current blocker. See [`ports/zen/README.md`](../ports/zen/README.md) for detailed
 patch/compiler contracts and the latest build diagnostics.
@@ -299,6 +315,7 @@ The following actual Alix guest results are retained under `build/test-out/`:
 | `stdio-buffer-qemu.log`, `stdio-buffer-exit-qemu.log` | All three buffering modes, positions, wide I/O and 128 close/global-flush races passed; a separate queued marker appeared through normal exit flushing. |
 | `signal-jump-qemu.log` | Eight CPUs passed 64 real-fault handler jumps, 512 repeated checkpoints, masks/pending delivery, ancestor unwind, FP retention and stale/foreign rejection. |
 | `process-uptime-qemu.log` | Eight CPUs passed 1,024 samples with a shared process creation epoch and elapsed sleep time. The real clock resolution remains 10ms. |
+| `vfs-owned-bridge-qemu.log` | Real symlink/cwd snapshots, 4095-byte target boundaries, killed blocked caller cleanup and a fresh request passed, followed by public readlink truncation/error tests. Ordinary kernel restoration was verified. |
 | `calendar-locale-qemu.log` | Gregorian UTC conversion, C/POSIX locale, TLS buffers across eight CPUs, real wall time and versioned timezone configuration snapshots passed. |
 | `alix-toolchain-qemu.log` | Actual native Clang C++ output passed vector, compiler TLS, PID and stdio execution checks. |
 | `cxx-stream-qemu.log`, `cxx-wide-qemu.log` | Real upstream narrow/wide streams, C/POSIX facets, 256 concurrent numeric roundtrips, 133,120 wide-mask checks and extended-precision conversions passed. |
@@ -312,6 +329,7 @@ The following actual Alix guest results are retained under `build/test-out/`:
 | `timezone-qemu.log` | Eight CPUs passed POSIX rules, DST folds/gaps, formatting and 63 independently generated reference cases through real TZif files written and loaded inside Alix. |
 | `tzdata-package-qemu.log` | The full pinned 2026f package staged 606 files twice, verified their hashes and passed 2,392 calendar cases across 598 names. Existing configuration and custom files were preserved; the package remained inactive. |
 | `io-service-boot-qemu.log` | Protected workers passed three killed callers, independent cleanup while both storage workers blocked, two late-result releases, retained joins and shutdown waiting for a live caller. The following eight-CPU TLS test passed and the normal kernel was restored. |
+| `resource-usage-qemu.log` | Eight CPUs produced increasing sampled CPU time and 128 recoverable faults; invalid selectors/output and the current zero-major-fault policy passed. The fault-context regression passed afterward. |
 
 The Rust fixture contains one `println!`. Its marker appears twice because
 current global console routing taps output into shell capture as well as
@@ -345,8 +363,16 @@ already has the requested bits. Malformed-frame and stale-permission models
 passed. The subsequent calendar, four stack-protector modes, raw TLS and native
 toolchain guests all passed without unexpected faults.
 UTC calendar/locale and the new timezone snapshot syscall have passed their host
-contracts and native eight-CPU fixture. The standalone refcounted FD table
-has host concurrency/sanitizer checks but is not wired into kernel I/O yet.
+contracts and native eight-CPU fixture. The refcounted FD table now owns native
+directory streams and has host concurrency/sanitizer checks. Public file/socket
+descriptor routing still uses the legacy global table.
+Owned TCP pool references now pass native eight-CPU lifetime tests and a real
+16 KiB HTTP transfer after releasing the original owner. The event-driven TCP
+executor also passes native pending-read multiplexing, three killed callers,
+untouched abandoned output, cleanup and shutdown, with five packet-checked
+FIN/ACK exchanges. Public descriptor routing remains to be connected. One later TLS
+stall has retained debugger/packet evidence; the expanded-diagnostic rerun
+passed, but the SMP stability concern is still unexplained.
 The protected I/O executor passed native cancellation, cleanup and shutdown
 acceptance. The first run exposed deferred thread reclamation depending on a
 later context switch on the former CPU. Bounded idle maintenance fixed that

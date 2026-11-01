@@ -115,6 +115,7 @@ static void process_reap_retired_memory(void) { CHECK(!scheduler_locked, "memory
         claimed = false; scheduler_lock_release(flags); current_cpu = 1; return false;
     }
     next->state = THREAD_STATE_RUNNING; next->in_transition = false;
+    current.running_cpu = RUN_QUEUE_CPU_INVALID; current.in_transition = false;
     claimed = false; scheduler_lock_release(flags); return true;
 }
 '''
@@ -147,6 +148,22 @@ int main(void)
     reset(true, false); current.state = THREAD_STATE_RUNNING;
     scheduler_schedule(true);
     CHECK(selections == 0 && switches == 0 && !scheduler_locked && (irq_flags & 512), "run-current fast path changed");
+
+    /* A sleeper releases the scheduler lock before asking to park. An early
+     * wake plus nested timer handoff can resume it RUNNING and consume its
+     * wake_pending flag before the original scheduler_schedule(false). */
+    for (unsigned enabled = 0; enabled < 2; ++enabled)
+    {
+        reset(enabled,false);current.state=THREAD_STATE_RUNNING;current.running_cpu=0;run_queue.total=1;
+        uint64_t initial_flags=irq_flags;
+        scheduler_schedule(false);
+        CHECK(switches==1 && enqueues==1 && current.in_run_queue && current.state==THREAD_STATE_READY,
+              "wake-before-park lost a running thread after its consumed wakeup");
+        CHECK(current.running_cpu==RUN_QUEUE_CPU_INVALID && irq_flags==initial_flags && !scheduler_locked,
+              "wake-before-park handoff changed CPU ownership or interrupt state");
+        reset(enabled,false);current.state=THREAD_STATE_ZOMBIE;run_queue.total=1;
+        scheduler_schedule(false);CHECK(!enqueues,"terminal thread requeued after park request");
+    }
 
     /* A current thread pinned elsewhere must yield its stack even when the
      * local run queue is empty. Unbound/same-CPU threads retain the fast path. */

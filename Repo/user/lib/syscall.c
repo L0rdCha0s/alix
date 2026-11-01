@@ -1,5 +1,13 @@
 #include "usyscall.h"
 #include "libc.h"
+#ifdef ALIX_OWNED_FDS
+#include "errno.h"
+static int64_t owned_file_result(int64_t result)
+{
+    if (result < 0) { errno = (int)-result; return -1; }
+    return result;
+}
+#endif
 
 static inline long syscall0(long id)
 {
@@ -79,22 +87,48 @@ static inline long syscall6(long id, long a0, long a1, long a2, long a3, long a4
 
 ssize_t sys_write(int fd, const void *buffer, size_t count)
 {
+#ifdef ALIX_OWNED_FDS
+    return owned_file_result(sys_file_io(SYSCALL_FILE_WRITE,(uint64_t)(int64_t)fd,(uintptr_t)buffer,count,0));
+#else
     return (ssize_t)syscall3(SYSCALL_WRITE, fd, (long)buffer, (long)count);
+#endif
 }
 
 ssize_t sys_read(int fd, void *buffer, size_t count)
 {
+#ifdef ALIX_OWNED_FDS
+    return owned_file_result(sys_file_io(SYSCALL_FILE_READ,(uint64_t)(int64_t)fd,(uintptr_t)buffer,count,0));
+#else
     return (ssize_t)syscall3(SYSCALL_READ, fd, (long)buffer, (long)count);
+#endif
 }
 
 int sys_close(int fd)
 {
+#ifdef ALIX_OWNED_FDS
+    return (int)owned_file_result(sys_file_io(SYSCALL_FILE_CLOSE,(uint64_t)(int64_t)fd,0,0,0));
+#else
     return (int)syscall1(SYSCALL_CLOSE, fd);
+#endif
 }
 
 int sys_open(const char *path, uint64_t flags)
 {
+#ifdef ALIX_OWNED_FDS
+    return (int)owned_file_result(sys_file_io(SYSCALL_FILE_OPEN,(uintptr_t)path,flags,0,0));
+#else
     return (int)syscall2(SYSCALL_OPEN, (long)path, (long)flags);
+#endif
+}
+
+int64_t sys_file_io(uint32_t operation, uint64_t first, uint64_t second, uint64_t third, uint64_t fourth)
+{
+    return syscall5(SYSCALL_FILE_IO, operation, (long)first, (long)second, (long)third, (long)fourth);
+}
+
+int64_t sys_directory(uint32_t operation, int handle, void *argument, size_t bytes)
+{
+    return syscall4(SYSCALL_DIRECTORY, operation, handle, (long)argument, (long)bytes);
 }
 
 void *sys_sbrk(int64_t increment)
@@ -261,27 +295,47 @@ ssize_t sys_font_cache(void *buffer, size_t capacity)
 
 int64_t sys_lseek(int fd, int64_t offset, int whence)
 {
+#ifdef ALIX_OWNED_FDS
+    return owned_file_result(sys_file_io(SYSCALL_FILE_SEEK,(uint64_t)(int64_t)fd,(uint64_t)offset,(uint64_t)(int64_t)whence,0));
+#else
     return (int64_t)syscall3(SYSCALL_LSEEK, fd, (long)offset, (long)whence);
+#endif
 }
 
 int sys_fstat(int fd, syscall_stat_t *st)
 {
+#ifdef ALIX_OWNED_FDS
+    return (int)owned_file_result(sys_file_io(SYSCALL_FILE_STAT,(uint64_t)(int64_t)fd,(uintptr_t)st,0,0));
+#else
     return (int)syscall2(SYSCALL_FSTAT, fd, (long)st);
+#endif
 }
 
 ssize_t sys_pread(int fd, void *buffer, size_t count, size_t offset)
 {
+#ifdef ALIX_OWNED_FDS
+    return owned_file_result(sys_file_io(SYSCALL_FILE_PREAD,(uint64_t)(int64_t)fd,(uintptr_t)buffer,count,offset));
+#else
     return (ssize_t)syscall4(SYSCALL_PREAD, fd, (long)buffer, (long)count, (long)offset);
+#endif
 }
 
 int sys_socket_open(const char *iface_name)
 {
+#ifdef ALIX_OWNED_FDS
+    return (int)owned_file_result(sys_file_io(SYSCALL_FILE_SOCKET_OPEN,(uintptr_t)iface_name,0,0,0));
+#else
     return (int)syscall2(SYSCALL_SOCKET_OPEN, (long)iface_name, 0);
+#endif
 }
 
 int sys_socket_connect(int fd, const char *ipv4_text, uint16_t port)
 {
+#ifdef ALIX_OWNED_FDS
+    return (int)owned_file_result(sys_file_io(SYSCALL_FILE_SOCKET_CONNECT,(uint64_t)(int64_t)fd,(uintptr_t)ipv4_text,port,0));
+#else
     return (int)syscall3(SYSCALL_SOCKET_CONNECT, fd, (long)ipv4_text, (long)port);
+#endif
 }
 
 ssize_t sys_list_dir(const char *path, syscall_dirent_t *entries, size_t capacity)
@@ -301,7 +355,11 @@ int sys_mkdir(const char *path)
 
 ssize_t sys_socket_available(int fd)
 {
+#ifdef ALIX_OWNED_FDS
+    return owned_file_result(sys_file_io(SYSCALL_FILE_SOCKET_AVAILABLE,(uint64_t)(int64_t)fd,0,0,0));
+#else
     return (ssize_t)syscall1(SYSCALL_SOCKET_AVAILABLE, fd);
+#endif
 }
 
 uint64_t sys_thread_self(void)
@@ -317,6 +375,11 @@ int sys_thread_set_tls(uintptr_t base)
 uint64_t sys_process_uptime_ns(void)
 {
     return (uint64_t)syscall0(SYSCALL_PROCESS_UPTIME_NS);
+}
+
+int sys_resource_usage(int which, syscall_resource_usage_t *output, size_t bytes)
+{
+    return (int)syscall3(SYSCALL_RESOURCE_USAGE, which, (long)output, (long)bytes);
 }
 
 uint64_t sys_monotonic_millis(void)

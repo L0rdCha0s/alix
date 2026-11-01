@@ -205,7 +205,7 @@ void scheduler_log_if_stalled(const char *label, uint64_t start_ticks)
                   (unsigned long long)(ms / 1000ULL));
     }
 }
-void cpu_account_tick(thread_t *thread)
+void cpu_account_tick(thread_t *thread, bool user_mode)
 {
     uint32_t cpu_index = current_cpu_index();
     if (cpu_index >= SMP_MAX_CPUS)
@@ -249,6 +249,7 @@ void cpu_account_tick(thread_t *thread)
     if (proc)
     {
         __atomic_fetch_add(&proc->runtime_ticks, delta, __ATOMIC_RELAXED);
+        process_usage_add_cpu(proc, delta, user_mode);
     }
 }
 

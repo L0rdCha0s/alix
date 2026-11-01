@@ -80,6 +80,23 @@ bool fd_description_is_deferred_to(const fd_description_t *description, const fd
 
 fd_table_t *fd_table_create(size_t capacity);
 bool fd_table_get(fd_table_t *table);
+/* Reserve a not-yet-visible OPEN slot before worker-side create/truncate. The
+ * returned deferred description owns a table reference and cancels its ticket
+ * on final cleanup. No table->reservation reference cycle exists. Caller holds
+ * a preparation guard until registering this owner in a request. */
+int fd_table_reserve_deferred(fd_table_t *table, fd_description_t **out);
+bool fd_table_reservation_valid(const fd_description_t *description);
+/* Caller owns the reservation. Clear only its matching ticket, before a failed
+ * OPEN returns; later deferred cleanup still owns the table reference. */
+int fd_table_reservation_cancel(fd_description_t *reservation);
+/* Caller owns both references under its result guard. Commit retains target;
+ * reservation remains request-owned until normal completion/cleanup. */
+int fd_table_reservation_commit(fd_description_t *reservation, fd_description_t *target, uint32_t flags);
+/* Snapshot an owned deferred table under its lock. The caller holds a bounded
+ * preparation guard through the returned owner's publication. An exec snapshot
+ * omits CLOEXEC entries; other entries retain shared open descriptions/offsets.
+ * On failure out is NULL and deferred cleanup owns any partial snapshot. */
+int fd_table_clone_deferred(fd_table_t *source, bool close_on_exec, fd_table_t **out);
 void fd_table_put(fd_table_t *table);
 size_t fd_table_capacity(const fd_table_t *table);
 /* Atomically prevent further lookups/mutations, then drop slot references

@@ -19,20 +19,33 @@ static process_t *process_create_kernel_internal(const char *name,
                                                  size_t stack_size,
                                                  int stdout_fd,
                                                  process_t *parent,
-                                                 bool kernel_service)
+                                                 bool kernel_service,
+                                                 process_creation_watch_t *watch)
 {
     process_create_log(name, "begin");
     if (!entry)
     {
         process_create_log(name, "no_entry");
+        if (watch) __atomic_store_n(&watch->constructed, true, __ATOMIC_RELEASE);
         return NULL;
     }
 
     process_create_log(name, "alloc_start");
+    /* Kernel allocation only allocates process metadata and shares existing
+     * kernel page tables; protect that bounded allocation-to-registration gap. */
+    if (watch) spinlock_preempt_disable();
     process_t *proc = allocate_process(name, false);
+    if (watch && proc)
+    {
+        proc->join_waiters = 1;
+        __atomic_store_n(&watch->pid, proc->pid, __ATOMIC_RELEASE);
+        __atomic_store_n(&watch->owner, proc, __ATOMIC_RELEASE);
+    }
+    if (watch) spinlock_preempt_enable();
     if (!proc)
     {
         process_create_log(name, "alloc_fail");
+        if (watch) __atomic_store_n(&watch->constructed, true, __ATOMIC_RELEASE);
         return NULL;
     }
 
@@ -42,6 +55,13 @@ static process_t *process_create_kernel_internal(const char *name,
     if (kernel_service) proc->join_waiters = 1;
     if (!process_prepare_inherited_context(proc, parent, kernel_service))
     {
+        if (watch)
+        {
+            proc->state = PROCESS_STATE_ZOMBIE;
+            proc->exit_status = -1;
+            __atomic_store_n(&watch->constructed, true, __ATOMIC_RELEASE);
+            return NULL; /* Registered owner rolls back on the protected worker. */
+        }
         paging_destroy_space(&proc->address_space);
         process_release_context(proc);
         free(proc);
@@ -57,6 +77,13 @@ static process_t *process_create_kernel_internal(const char *name,
     thread_t *thread = thread_create(proc, name, entry, arg, stack_size, false, proc->is_user);
     if (!thread)
     {
+        if (watch)
+        {
+            proc->state = PROCESS_STATE_ZOMBIE;
+            proc->exit_status = -1;
+            __atomic_store_n(&watch->constructed, true, __ATOMIC_RELEASE);
+            return NULL;
+        }
         paging_destroy_space(&proc->address_space);
         process_release_context(proc);
         free(proc);
@@ -80,6 +107,7 @@ static process_t *process_create_kernel_internal(const char *name,
     {
         serial_printf("[proc usb_initd] finalize %s\r\n", result ? "success" : "fail");
     }
+    if (watch) __atomic_store_n(&watch->constructed, true, __ATOMIC_RELEASE);
     return result;
 }
 
@@ -114,7 +142,7 @@ static process_t *process_create_user_dummy_internal(const char *name,
     {
         return NULL;
     }
-    if (!process_prepare_inherited_context(proc, parent, false))
+    if (!process_prepare_inherited_context(proc, parent, false) || !process_prepare_user_fds(proc, parent, stdout_fd))
     {
         paging_destroy_space(&proc->address_space);
         process_release_context(proc);
@@ -208,7 +236,7 @@ static process_t *process_create_user_elf_internal(const char *name,
     {
         return NULL;
     }
-    if (!process_prepare_inherited_context(proc, parent, false))
+    if (!process_prepare_inherited_context(proc, parent, false) || !process_prepare_user_fds(proc, parent, stdout_fd))
     {
         paging_destroy_space(&proc->address_space);
         process_release_context(proc);
@@ -311,7 +339,7 @@ process_t *process_create_kernel(const char *name,
                                  size_t stack_size,
                                  int stdout_fd)
 {
-    return process_create_kernel_internal(name, entry, arg, stack_size, stdout_fd, NULL, false);
+    return process_create_kernel_internal(name, entry, arg, stack_size, stdout_fd, NULL, false, NULL);
 }
 
 process_t *process_create_kernel_with_parent(const char *name,
@@ -321,13 +349,13 @@ process_t *process_create_kernel_with_parent(const char *name,
                                              int stdout_fd,
                                              process_t *parent)
 {
-    return process_create_kernel_internal(name, entry, arg, stack_size, stdout_fd, parent, false);
+    return process_create_kernel_internal(name, entry, arg, stack_size, stdout_fd, parent, false, NULL);
 }
 
 process_t *process_create_kernel_service(const char *name, thread_entry_t entry,
                                          void *argument, size_t stack_size)
 {
-    return process_create_kernel_internal(name, entry, argument, stack_size, -1, NULL, true);
+    return process_create_kernel_internal(name, entry, argument, stack_size, -1, NULL, true, NULL);
 }
 
 process_t *process_create_user_dummy(const char *name,
@@ -772,6 +800,51 @@ int process_join_kernel_service(process_t *process, int *status_out)
     return 0;
 }
 
+process_t *process_create_kernel_observed(const char *name, thread_entry_t entry,
+                                           void *argument, size_t stack_size, int stdout_fd,
+                                           process_creation_watch_t *watch)
+{
+    if (!watch || __atomic_load_n(&watch->owner, __ATOMIC_ACQUIRE) ||
+        __atomic_load_n(&watch->constructed, __ATOMIC_ACQUIRE) ||
+        __atomic_load_n(&watch->complete, __ATOMIC_ACQUIRE)) return NULL;
+    /* Inherit the actual creator, never a borrowed session-owner process
+     * pointer retained across potentially blocking construction. */
+    return process_create_kernel_internal(name, entry, argument, stack_size, stdout_fd, NULL, false, watch);
+}
+
+int process_creation_watch_stop(process_creation_watch_t *watch)
+{
+    if (!watch || spinlock_preempt_disabled()) return -22;
+    /* The descriptor cleanup worker is persistent. A constructor may be
+     * asleep inside VFS, or may have been killed before publication. */
+    while (!__atomic_load_n(&watch->constructed, __ATOMIC_ACQUIRE) &&
+           !__atomic_load_n(&watch->complete, __ATOMIC_ACQUIRE) &&
+           !process_creation_watch_creator_stopped(watch)) process_sleep_ms(1);
+    process_t *owner = __atomic_load_n(&watch->owner, __ATOMIC_ACQUIRE);
+    if (owner)
+    {
+        if (owner == current_process_local() || owner->kernel_service) return -22;
+        /* Stop before waiting for creator completion: that creator may itself
+         * be joining this actor. The retained factory owner keeps metadata
+         * valid until the creator's last access or terminal handoff. */
+        process_kill_tree(owner);
+        wait_queue_wait(&owner->wait_queue, process_join_ready, owner);
+    }
+    while (!__atomic_load_n(&watch->complete, __ATOMIC_ACQUIRE) &&
+           !process_creation_watch_creator_stopped(watch)) process_sleep_ms(1);
+    return 0;
+}
+
+void process_creation_watch_release(process_creation_watch_t *watch)
+{
+    /* Protected cleanup only, after stop and after all containing raw-pointer
+     * slots have been cleared. No caller can resume using this record. */
+    if (!watch) return;
+    process_t *owner = __atomic_exchange_n(&watch->owner, NULL, __ATOMIC_ACQ_REL);
+    if (owner) process_destroy_retained(owner);
+}
+
+
 bool process_kill(process_t *process, int status)
 {
     if (!process)
@@ -819,10 +892,13 @@ void process_kill_tree(process_t *process)
     {
         process_kill_tree(child);
         process_join(child, NULL);
+        /* Another registered owner may intentionally retain a quiescent
+         * child. Detach before dropping our traversal ref so the loop advances. */
+        process_detach_child(child);
         process_destroy_retained(child);
     }
 
-    process_kill(process, -1);
+    if (!process_is_zombie(process)) process_kill(process, -1);
 }
 
 process_t *process_current(void)
@@ -2248,7 +2324,7 @@ void process_on_timer_tick(interrupt_frame_t *frame)
     }
 
     thread_t *thread = current_thread_local();
-    cpu_account_tick(thread);
+    cpu_account_tick(thread, (frame->cs & 3u) == 3u);
 
     /* Generic spinlocks raise this depth before attempting the lock.  Do not
      * enter scheduler housekeeping from an interrupt while the interrupted

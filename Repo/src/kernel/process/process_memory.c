@@ -269,6 +269,7 @@ process_t *allocate_process(const char *name, bool is_user)
     spinlock_init(&proc->threads_lock);
     spinlock_init(&proc->memory_lock);
     spinlock_init(&proc->context_lock);
+    spinlock_init(&proc->usage_lock);
     proc->threads = NULL;
     proc->thread_count = 0;
     proc->running_thread_count = 0;

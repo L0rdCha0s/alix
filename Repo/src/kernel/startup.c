@@ -130,6 +130,15 @@ static void startup_process_entry(void *arg)
         .cwd_changed_fn = NULL,
         .cwd_changed_context = NULL
     };
+    spinlock_preempt_disable();
+    bool cwd_ready = shell_cwd_init(shell);
+    spinlock_preempt_enable();
+    if (!cwd_ready)
+    {
+        free(shell);
+        startup_command_list_reset(&list);
+        process_exit(1);
+    }
 
     for (size_t i = 0; i < list.count; ++i)
     {
@@ -163,6 +172,7 @@ static void startup_process_entry(void *arg)
         spinlock_unlock(&g_startup_command_lock);
     }
 
+    shell_cwd_destroy(shell);
     free(shell);
     startup_command_list_reset(&list);
     process_exit(0);

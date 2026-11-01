@@ -30,6 +30,23 @@ typedef enum
 #define VFS_UID_ROOT 0u
 #define VFS_GID_ROOT 0u
 
+/* Immutable, heap-owned directory contents. Records are 8-byte aligned and
+ * followed by name_length bytes plus NUL; no node pointer enters this buffer.
+ * Caller supplies an empty snapshot and releases it on a protected worker. */
+typedef struct
+{
+    uint64_t inode;
+    uint32_t type, name_length;
+    unsigned char name[];
+} vfs_directory_record_t;
+typedef struct
+{
+    unsigned char *data;
+    size_t bytes, count;
+} vfs_directory_snapshot_t;
+int vfs_directory_snapshot(vfs_node_t *directory, vfs_directory_snapshot_t *out);
+void vfs_directory_snapshot_release(vfs_directory_snapshot_t *snapshot);
+
 typedef ssize_t (*vfs_read_cb_t)(vfs_node_t *node, size_t offset, void *buffer, size_t count, void *context);
 typedef ssize_t (*vfs_write_cb_t)(vfs_node_t *node, size_t offset, const void *buffer, size_t count, void *context);
 
@@ -113,5 +130,9 @@ bool vfs_node_try_retain(vfs_node_t *node);
 /* Protected worker only. Follows the final link; retains before tree unlock. */
 int vfs_resolve_owned(vfs_node_t *cwd, const char *path, vfs_node_t **out);
 void vfs_node_release(vfs_node_t *node);
+/* Protected worker, without caller locks/preemption guard. Serializes final
+ * orphan-directory subtree teardown with tree readers, and consumes one owner.
+ * Internal tree-held releases continue using vfs_node_release directly. */
+void vfs_node_release_owned(vfs_node_t *node);
 
 #endif

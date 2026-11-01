@@ -23,6 +23,7 @@ typedef struct
     bool used;
     const fd_ops_t *ops;
     void *context;
+    fd_importer_t importer;
 } fd_entry_t;
 
 static fd_entry_t g_fd_table[FD_MAX];
@@ -36,7 +37,7 @@ static bool fd_valid(int fd)
 /*
  * Allocate the lowest-numbered free FD and install ops/context.
  */
-int fd_allocate(const fd_ops_t *ops, void *context)
+int fd_allocate_importable(const fd_ops_t *ops, void *context, fd_importer_t importer)
 {
     if (!ops)
     {
@@ -51,6 +52,7 @@ int fd_allocate(const fd_ops_t *ops, void *context)
             g_fd_table[i].used = true;
             g_fd_table[i].ops = ops;
             g_fd_table[i].context = context;
+            g_fd_table[i].importer = importer;
             spinlock_unlock(&g_fd_lock);
             return i;
         }
@@ -59,12 +61,17 @@ int fd_allocate(const fd_ops_t *ops, void *context)
     return -1;
 }
 
+int fd_allocate(const fd_ops_t *ops, void *context)
+{
+    return fd_allocate_importable(ops, context, NULL);
+}
+
 /*
  * Install an FD at a specific number.
  *
  * Used for reserving conventional descriptors (e.g. fd=1 for stdout).
  */
-int fd_install(int fd, const fd_ops_t *ops, void *context)
+int fd_install_importable(int fd, const fd_ops_t *ops, void *context, fd_importer_t importer)
 {
     if (!ops || !fd_valid(fd))
     {
@@ -79,8 +86,24 @@ int fd_install(int fd, const fd_ops_t *ops, void *context)
     g_fd_table[fd].used = true;
     g_fd_table[fd].ops = ops;
     g_fd_table[fd].context = context;
+    g_fd_table[fd].importer = importer;
     spinlock_unlock(&g_fd_lock);
     return fd;
+}
+
+int fd_install(int fd, const fd_ops_t *ops, void *context)
+{
+    return fd_install_importable(fd, ops, context, NULL);
+}
+
+fd_description_t *fd_import_owned(int fd)
+{
+    if (!fd_valid(fd) || !spinlock_preempt_disabled()) return NULL;
+    spinlock_lock(&g_fd_lock);
+    fd_entry_t *entry = &g_fd_table[fd];
+    fd_description_t *description = entry->used && entry->importer ? entry->importer(entry->context) : NULL;
+    spinlock_unlock(&g_fd_lock);
+    return description;
 }
 
 /*
@@ -99,6 +122,7 @@ void fd_release(int fd)
     g_fd_table[fd].used = false;
     g_fd_table[fd].ops = NULL;
     g_fd_table[fd].context = NULL;
+    g_fd_table[fd].importer = NULL;
     spinlock_unlock(&g_fd_lock);
 }
 
@@ -179,6 +203,7 @@ int fd_close(int fd)
     entry->used = false;
     entry->ops = NULL;
     entry->context = NULL;
+    entry->importer = NULL;
     spinlock_unlock(&g_fd_lock);
 
     if (ops && ops->close)

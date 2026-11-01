@@ -37,6 +37,7 @@ static _Thread_local unsigned held_locks, fail_allocations;
 static _Thread_local unsigned preempt_depth;
 static void spinlock_preempt_disable(void) { ++preempt_depth; }
 static void spinlock_preempt_enable(void) { CHECK(preempt_depth); --preempt_depth; }
+static bool __attribute__((unused)) spinlock_preempt_disabled(void) { return preempt_depth!=0; }
 static uint64_t live_allocations;
 static void spinlock_init(spinlock_t *lock) { lock->value = 0; }
 static void spinlock_lock(spinlock_t *lock)

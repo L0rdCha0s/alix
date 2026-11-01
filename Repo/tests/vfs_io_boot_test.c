@@ -79,6 +79,8 @@ bool vfs_io_boot_test(void)
     }
 #define REQUIRE(test, label) do { if (!(test)) { state->failure = (label); goto failed; } } while (0)
     serial_printf("VFS_IO_TEST: start real protected VFS");
+    REQUIRE(vfs_mkdir(vfs_root(), "/tmp") != NULL, "fixture temporary directory");
+    REQUIRE(vfs_mkdir(vfs_root(), "/tmp/vfs-owned-test") != NULL, "fixture parent directory");
     REQUIRE(vfs_mkdir(vfs_root(), "/tmp/vfs-owned-test/dir") != NULL, "fixture directory");
     REQUIRE(vfs_boot_link(state, "/tmp/vfs-owned-test/link", "../zones/Area/City"), "fixture link");
     REQUIRE(vfs_boot_link(state, "/tmp/vfs-owned-test/alias", "dir"), "fixture alias");

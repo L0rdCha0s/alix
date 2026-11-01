@@ -3,6 +3,9 @@
 #include "process.h"
 #include "heap.h"
 #include "errno.h"
+#include "libc.h"
+#include "io_stream.h"
+#include "io_tcp.h"
 
 typedef struct
 {
@@ -122,7 +125,7 @@ static int io_vfs_file_close(void *context)
     io_vfs_file_t *file = context;
     if (file)
     {
-        if (file->node) vfs_node_release(file->node);
+        if (file->node) vfs_node_release_owned(file->node);
         free(file);
     }
     return 0;
@@ -137,6 +140,96 @@ static const fd_ops_t io_vfs_ops = {
     .close = io_vfs_file_close,
 };
 
+bool io_vfs_description_valid(const fd_description_t *description)
+{
+    return description && fd_description_ops(description)->close == io_vfs_file_close;
+}
+
+typedef struct
+{
+    vfs_node_t *node;
+    vfs_directory_snapshot_t snapshot;
+    size_t cursor, index;
+    bool cursor_owned;
+    wait_queue_t cursor_waiters;
+} io_vfs_directory_t;
+
+static bool io_vfs_directory_ready(void *context)
+{
+    io_vfs_directory_t *directory = context;
+    bool expected = false;
+    return __atomic_compare_exchange_n(&directory->cursor_owned, &expected, true, false,
+                                        __ATOMIC_ACQUIRE, __ATOMIC_RELAXED);
+}
+
+static int io_vfs_directory_close(void *context)
+{
+    io_vfs_directory_t *directory = context;
+    if (directory)
+    {
+        vfs_directory_snapshot_release(&directory->snapshot);
+        if (directory->node) vfs_node_release_owned(directory->node);
+        free(directory);
+    }
+    return 0;
+}
+
+static const fd_ops_t io_vfs_directory_ops = { .close = io_vfs_directory_close };
+
+static int io_vfs_directory_next(io_vfs_directory_t *directory, void *output, bool rewind)
+{
+    wait_queue_wait(&directory->cursor_waiters, io_vfs_directory_ready, directory);
+    int result = 0;
+    if (rewind)
+    {
+        /* POSIX rewind refreshes the directory state. A failed refresh keeps
+         * the old snapshot/cursor intact. The protected worker owns this heap
+         * record across any VFS wait. */
+        vfs_directory_snapshot_t *fresh = calloc(1, sizeof(*fresh));
+        if (!fresh) result = -ENOMEM;
+        else
+        {
+            result = vfs_directory_snapshot(directory->node, fresh);
+            if (!result)
+            {
+                vfs_directory_snapshot_release(&directory->snapshot);
+                directory->snapshot = *fresh;
+                directory->cursor = directory->index = 0;
+            }
+            free(fresh);
+        }
+    }
+    else if (directory->index < directory->snapshot.count)
+    {
+        size_t remaining = directory->cursor <= directory->snapshot.bytes ?
+                           directory->snapshot.bytes - directory->cursor : 0;
+        if (remaining < sizeof(vfs_directory_record_t)) result = -EIO;
+        else
+        {
+            const vfs_directory_record_t *record = (const void *)(directory->snapshot.data + directory->cursor);
+            size_t record_bytes = (sizeof(*record) + (size_t)record->name_length + 1u + 7u) & ~(size_t)7u;
+            if (!record->inode || record->name_length > SYSCALL_DIRENT_NAME_MAX ||
+                record_bytes > remaining || record->name[record->name_length]) result = -EIO;
+            else
+            {
+                syscall_directory_entry_t *entry = output;
+                entry->version = SYSCALL_DIRENT_VERSION;
+                entry->size = sizeof(*entry);
+                entry->inode = record->inode;
+                entry->type = record->type;
+                entry->name_length = record->name_length;
+                memcpy(entry->name, record->name, record->name_length + 1u);
+                directory->cursor += record_bytes;
+                ++directory->index;
+                result = 1;
+            }
+        }
+    }
+    __atomic_store_n(&directory->cursor_owned, false, __ATOMIC_RELEASE);
+    wait_queue_wake_all(&directory->cursor_waiters);
+    return result;
+}
+
 void io_vfs_execute(io_request_t *request, io_service_result_t *result,
                      fd_retirement_queue_t *retirement)
 {
@@ -148,9 +241,38 @@ void io_vfs_execute(io_request_t *request, io_service_result_t *result,
     size_t available = io_request_buffer_size(request) - sizeof(*operation);
     if (!operation || operation->reserved) return;
     fd_description_t *description = io_request_description(request);
+    if (operation->opcode == IO_VFS_OPEN_DIR)
+    {
+        if (!retirement || description || !io_request_cwd(request)) return;
+        size_t length = 0;
+        while (length < available && length < VFS_PATH_MAX && operation->data[length]) ++length;
+        if (length == available || length == VFS_PATH_MAX) { result->result = -ENAMETOOLONG; return; }
+        io_vfs_directory_t *directory = calloc(1, sizeof(*directory));
+        if (!directory) { result->result = -ENOMEM; return; }
+        wait_queue_init(&directory->cursor_waiters);
+        description = fd_description_create_deferred(&io_vfs_directory_ops, directory, retirement);
+        if (!description) { free(directory); result->result = -ENOMEM; return; }
+        result->result = vfs_resolve_owned(io_request_cwd(request), (const char *)operation->data, &directory->node);
+        if (!result->result) result->result = vfs_directory_snapshot(directory->node, &directory->snapshot);
+        if (result->result) fd_description_put(description);
+        else result->description_owned = description;
+        return;
+    }
+    if (operation->opcode == IO_VFS_READ_DIR || operation->opcode == IO_VFS_REWIND_DIR)
+    {
+        if (!description || fd_description_ops(description)->close != io_vfs_directory_close)
+        { result->result = -EBADF; return; }
+        if (operation->opcode == IO_VFS_READ_DIR &&
+            (operation->count != sizeof(syscall_directory_entry_t) || operation->count > available)) return;
+        result->result = io_vfs_directory_next(fd_description_context(description), operation->data,
+                                                operation->opcode == IO_VFS_REWIND_DIR);
+        return;
+    }
     if (operation->opcode == IO_VFS_RESOLVE_CWD)
     {
-        if (description || !io_request_cwd(request)) return;
+        /* Optional input description is solely a caller-lifetime pin. Workers
+         * never inspect its context or derive authority from it. */
+        if (!io_request_cwd(request)) return;
         size_t length = 0;
         while (length < available && length < 4096u && operation->data[length]) ++length;
         if (length == available || length == 4096u) { result->result = -ENAMETOOLONG; return; }
@@ -159,14 +281,14 @@ void io_vfs_execute(io_request_t *request, io_service_result_t *result,
         if (result->result) return;
         if (!vfs_is_dir(node))
         {
-            vfs_node_release(node);
+            vfs_node_release_owned(node);
             result->result = -ENOTDIR;
             return;
         }
         result->description_owned = process_cwd_description_create_owned(node);
         if (!result->description_owned)
         {
-            vfs_node_release(node);
+            vfs_node_release_owned(node);
             result->result = -ENOMEM;
         }
         return;
@@ -185,7 +307,7 @@ void io_vfs_execute(io_request_t *request, io_service_result_t *result,
     if (operation->opcode == IO_VFS_OPEN)
     {
         uint32_t known = SYSCALL_OPEN_READ | SYSCALL_OPEN_WRITE | SYSCALL_OPEN_CREATE | SYSCALL_OPEN_TRUNCATE;
-        if (!retirement || description || !io_request_cwd(request) ||
+        if (!retirement || (description && !fd_table_reservation_valid(description)) || !io_request_cwd(request) ||
             (operation->flags & ~known) || !(operation->flags & (SYSCALL_OPEN_READ | SYSCALL_OPEN_WRITE)) ||
             ((operation->flags & SYSCALL_OPEN_TRUNCATE) && !(operation->flags & SYSCALL_OPEN_WRITE))) return;
         size_t length = 0;
@@ -207,7 +329,22 @@ void io_vfs_execute(io_request_t *request, io_service_result_t *result,
         else result->description_owned = description;
         return;
     }
-    if (!description || fd_description_ops(description)->close != io_vfs_file_close)
+    if (io_stream_description_valid(description))
+    {
+        io_stream_execute(request, result);
+        return;
+    }
+    if (io_tcp_description_valid(description))
+    {
+        if (operation->opcode == IO_VFS_STAT)
+        {
+            operation->stat = (syscall_stat_t){ .type = SYSCALL_NODE_TYPE_SOCKET };
+            result->result = 0;
+        }
+        else result->result = -ESPIPE;
+        return;
+    }
+    if (!io_vfs_description_valid(description))
     {
         result->result = -EBADF;
         return;

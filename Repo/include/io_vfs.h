@@ -13,7 +13,10 @@ typedef enum
     IO_VFS_STAT,
     IO_VFS_SYNC,
     IO_VFS_READLINK,
-    IO_VFS_RESOLVE_CWD
+    IO_VFS_RESOLVE_CWD,
+    IO_VFS_OPEN_DIR,
+    IO_VFS_READ_DIR,
+    IO_VFS_REWIND_DIR
 } io_vfs_opcode_t;
 
 /* The complete object lives in io_request_buffer(). All data/path bytes are
@@ -40,5 +43,7 @@ typedef struct
  * File offset gates sleep; their wait predicates receive heap-owned handles. */
 void io_vfs_execute(io_request_t *request, io_service_result_t *result,
                      fd_retirement_queue_t *retirement);
+/* Caller holds a description reference; regular-file backend identity only. */
+bool io_vfs_description_valid(const fd_description_t *description);
 
 #endif

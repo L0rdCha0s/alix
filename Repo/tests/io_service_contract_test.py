@@ -107,7 +107,10 @@ static void spinlock_lock(spinlock_t *lock) {
     while(__atomic_exchange_n(&lock->value,1,__ATOMIC_ACQUIRE)) sched_yield(); ++held_locks;
 }
 static void spinlock_unlock(spinlock_t *lock) { CHECK(held_locks); --held_locks; __atomic_store_n(&lock->value,0,__ATOMIC_RELEASE); }
-static bool spinlock_preempt_disabled(void) { return prep_guard || held_locks; }
+static _Thread_local unsigned owned_preempt_depth;
+static void spinlock_preempt_disable(void) { ++owned_preempt_depth; }
+static void spinlock_preempt_enable(void) { CHECK(owned_preempt_depth); --owned_preempt_depth; }
+static bool spinlock_preempt_disabled(void) { return prep_guard || held_locks || owned_preempt_depth; }
 static pthread_mutex_t wait_lock=PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t wait_changed=PTHREAD_COND_INITIALIZER;
 static void wait_queue_init(wait_queue_t *queue) { queue->initialized=true; }

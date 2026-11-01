@@ -2,6 +2,22 @@
 
 This kernel exposes a small syscall surface for user programs. Syscalls are dispatched via vector 0x80.
 
+Syscall 69 (`RESOURCE_USAGE`) returns a versioned 48-byte snapshot for the
+current process: clock frequency, sampled user/system ticks and minor/major
+fault counters. The kernel holds process ownership through a bounded guard,
+releases its usage lock before copying, and rejects invalid selectors, sizes
+and destinations. `getrusage(RUSAGE_SELF)` translates this into native timevals
+and signed counters. `RLIMIT_AS` separately reports the current absence of an
+aggregate virtual-memory quota; it does not promise unlimited physical memory.
+
+Syscall 70 (`DIRECTORY`) opens, reads, rewinds or closes opaque per-process
+directory handles. Arguments are operation, handle, user pointer and byte size.
+OPEN uses a NUL-terminated path; NEXT requires a versioned 4120-byte result and
+returns one entry, zero at EOF, or negative errno. CLOSE/REWIND take no pointer.
+The handle namespace is separate from legacy file/socket FDs. All path lookup
+and cursor work runs on protected workers with registered owned requests; only
+the live caller performs user copies. See [directory streams](vfs.md).
+
 ## ABI / Entry (`src/arch/x86/syscall_entry.S`)
 
 User code executes `int 0x80`. The IDT routes vector 0x80 to `syscall_entry`, which:

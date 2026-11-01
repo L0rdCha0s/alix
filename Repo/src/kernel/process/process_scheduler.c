@@ -2605,6 +2605,12 @@ __attribute__((visibility("default"))) void scheduler_schedule(bool requeue_curr
         bool have_current = current &&
                             !current->is_idle &&
                             current->state == THREAD_STATE_RUNNING;
+        /* A wake and nested preemption can occur after a waiter releases the
+         * scheduler lock but before its original schedule(false). That handoff
+         * consumes wake_pending and resumes the waiter RUNNING. State is now
+         * authoritative: replacing a runnable current must preserve it on a
+         * run queue even when the stale caller still intends to park. */
+        if (have_current) requeue_current = true;
         bool wake_blocked_current = current &&
                                     !current->is_idle &&
                                     current->wake_pending &&
@@ -2982,6 +2988,7 @@ bool process_handle_user_page_fault(interrupt_frame_t *frame,
                                                   (error_code & 0x2u) != 0,
                                                   (error_code & 0x10u) != 0);
         process_memory_unlock(proc, flags);
+        if (committed) process_usage_add_fault(proc, false);
         return committed;
     }
     /* Legacy stack and sbrk faults only grow data mappings. */
@@ -2990,7 +2997,9 @@ bool process_handle_user_page_fault(interrupt_frame_t *frame,
     if (fault < proc->user_heap_base || fault >= proc->user_heap_brk)
     {
         process_memory_unlock(proc, memory_flags);
-        return process_stack_handle_page_fault(proc, fault, (uintptr_t)frame->rsp);
+        bool committed = process_stack_handle_page_fault(proc, fault, (uintptr_t)frame->rsp);
+        if (committed) process_usage_add_fault(proc, false);
+        return committed;
     }
 
     uintptr_t page_base = align_down_uintptr(fault, PAGE_SIZE_BYTES_LOCAL);
@@ -3014,6 +3023,7 @@ bool process_handle_user_page_fault(interrupt_frame_t *frame,
 
     bool committed = process_heap_commit_range(proc, commit_start, commit_end);
     process_memory_unlock(proc, memory_flags);
+    if (committed) process_usage_add_fault(proc, false);
     return committed;
 }
 

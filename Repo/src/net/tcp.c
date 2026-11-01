@@ -14,6 +14,7 @@
 #include "process.h"
 #include "procfs.h"
 #include "spinlock.h"
+#include "errno.h"
 
 typedef struct thread thread_t;
 
@@ -141,6 +142,9 @@ struct net_tcp_socket
     size_t tx_frame_capacity;
     int fd;
     bool fd_registered;
+    uint32_t owned_references; /* Nonzero excludes pool reuse and legacy reset. */
+    bool owned_retiring; /* Transport owner survives user refs through FIN/ACK. */
+    uint32_t transport_users; /* Owned callbacks temporarily outside TCP lock. */
     tcp_reass_segment_t *reass_head;
     size_t reass_bytes;
     size_t reass_segments;
@@ -381,6 +385,9 @@ static void tcp_reset_socket(net_tcp_socket_t *socket)
     {
         return;
     }
+    /* Owned descriptions and operation pins keep this pool slot, its buffers
+     * and wait queue alive. Only the last protected put may recycle it. */
+    if (socket->owned_references || socket->transport_users) return;
     int fd = socket->fd;
     bool fd_registered = socket->fd_registered;
     tcp_reassembly_clear(socket);
@@ -982,7 +989,7 @@ static uint32_t tcp_initial_seq(void)
     return s_iss;
 }
 
-net_tcp_socket_t *net_tcp_socket_open(net_interface_t *iface)
+static net_tcp_socket_t *tcp_socket_open_internal(net_interface_t *iface, bool owned)
 {
     net_tcp_socket_t *socket = NULL;
 
@@ -1008,16 +1015,17 @@ net_tcp_socket_t *net_tcp_socket_open(net_interface_t *iface)
                 socket = NULL;
                 break;
             }
-            int fd = fd_allocate(&g_tcp_fd_ops, socket);
-            if (fd < 0)
+            int fd = owned ? -1 : fd_allocate(&g_tcp_fd_ops, socket);
+            if (!owned && fd < 0)
             {
                 tcp_reset_socket(socket);
                 socket = NULL;
                 break;
             }
             socket->fd = fd;
-            socket->fd_registered = true;
-            socket->owner = thread_current();
+            socket->fd_registered = !owned;
+            socket->owned_references = owned ? 1u : 0u;
+            socket->owner = owned ? NULL : thread_current();
             break;
         }
     }
@@ -1038,6 +1046,126 @@ net_tcp_socket_t *net_tcp_socket_open(net_interface_t *iface)
     }
 #endif
     return socket;
+}
+
+net_tcp_socket_t *net_tcp_socket_open(net_interface_t *iface)
+{
+    return tcp_socket_open_internal(iface, false);
+}
+
+net_tcp_socket_t *net_tcp_socket_open_owned(net_interface_t *iface)
+{
+    return tcp_socket_open_internal(iface, true);
+}
+
+static bool tcp_socket_in_pool(const net_tcp_socket_t *socket)
+{
+    uintptr_t address = (uintptr_t)socket, base = (uintptr_t)g_sockets;
+    return address >= base && address - base < sizeof(g_sockets) &&
+           (address - base) % sizeof(g_sockets[0]) == 0;
+}
+
+bool net_tcp_socket_get_owned(net_tcp_socket_t *socket)
+{
+    if (!tcp_socket_in_pool(socket)) return false;
+    uint64_t flags = tcp_lock();
+    bool valid = socket->state != TCP_STATE_UNUSED && socket->owned_references &&
+                 socket->owned_references != UINT32_MAX;
+    if (valid) ++socket->owned_references;
+    tcp_unlock(flags);
+    return valid;
+}
+
+/* TCP lock held. The static pool/timer owns retiring transports after the last
+ * external owner disappears. No caller stack or description is retained. */
+static bool tcp_owned_retire_poll_locked(net_tcp_socket_t *socket, uint64_t now)
+{
+    if (!socket->owned_retiring || socket->transport_users) return false;
+    bool active = socket->state == TCP_STATE_ESTABLISHED || socket->state == TCP_STATE_CLOSE_WAIT ||
+                  socket->state == TCP_STATE_FIN_WAIT_1 || socket->state == TCP_STATE_FIN_WAIT_2 ||
+                  socket->state == TCP_STATE_LAST_ACK;
+    if (!active || now >= socket->connect_deadline)
+    {
+        tcp_reset_socket(socket);
+        return true;
+    }
+    if ((socket->state == TCP_STATE_ESTABLISHED || socket->state == TCP_STATE_CLOSE_WAIT) &&
+        !socket->awaiting_ack)
+    {
+        bool passive = socket->state == TCP_STATE_CLOSE_WAIT;
+        if (!tcp_send_segment(socket, socket->seq_next, TCP_FLAG_FIN | TCP_FLAG_ACK, NULL, 0, true, true))
+        {
+            tcp_reset_socket(socket);
+            return true;
+        }
+        socket->state = passive ? TCP_STATE_LAST_ACK : TCP_STATE_FIN_WAIT_1;
+    }
+    return false;
+}
+
+/* A callback may wake a scheduler queue or emit debug outside the TCP lock.
+ * Keep owned queue storage stable across that gap, including after the final
+ * descriptor put. Zero denotes legacy mode; overflow skips the optional
+ * callback instead of wrapping or exposing a recycled queue. */
+static int tcp_owned_transport_pin_locked(net_tcp_socket_t *socket)
+{
+    if (!socket->owned_references && !socket->owned_retiring) return 0;
+    if (socket->transport_users == UINT32_MAX) return -EOVERFLOW;
+    /* Queue wake/debug callbacks are bounded and do not sleep. Keep their
+     * ownership local until unpin even if this otherwise ordinary kernel
+     * caller is killed after dropping the IRQ-masking TCP lock. */
+    spinlock_preempt_disable();
+    ++socket->transport_users;
+    return 1;
+}
+
+static void tcp_owned_transport_unpin_locked(net_tcp_socket_t *socket, int pin)
+{
+    if (pin > 0)
+    {
+        if (socket->transport_users) --socket->transport_users;
+        spinlock_preempt_enable();
+    }
+}
+
+int net_tcp_socket_put_owned(net_tcp_socket_t *socket)
+{
+    if (!tcp_socket_in_pool(socket)) return -EINVAL;
+    uint64_t flags = tcp_lock();
+    int result = socket->owned_references ? 0 : -EBADF;
+    if (!result && --socket->owned_references == 0)
+    {
+        socket->owned_retiring = true;
+        socket->connect_deadline = timer_ticks() + g_connect_timeout_ticks;
+        (void)tcp_owned_retire_poll_locked(socket, timer_ticks());
+    }
+    tcp_unlock(flags);
+    return result;
+}
+
+int net_tcp_socket_owned_snapshot(net_tcp_socket_t *socket, net_tcp_owned_status_t *out)
+{
+    if (!out || !tcp_socket_in_pool(socket)) return -EINVAL;
+    uint64_t flags = tcp_lock();
+    if (!socket->owned_references || socket->state == TCP_STATE_UNUSED)
+    { tcp_unlock(flags); return -EBADF; }
+    uint32_t status = 0;
+    bool connected = socket->state == TCP_STATE_ESTABLISHED || socket->state == TCP_STATE_CLOSE_WAIT;
+    if (connected) status |= NET_TCP_OWNED_CONNECTED;
+    if (socket->rx_size) status |= NET_TCP_OWNED_READABLE;
+    if (socket->remote_closed && !socket->rx_size) status |= NET_TCP_OWNED_EOF;
+    if (socket->error || socket->state == TCP_STATE_ERROR) status |= NET_TCP_OWNED_ERROR;
+    if (socket->state == TCP_STATE_ARP || socket->state == TCP_STATE_SYN_SENT) status |= NET_TCP_OWNED_CONNECTING;
+    if (socket->state == TCP_STATE_ESTABLISHED && !socket->remote_closed &&
+        !socket->awaiting_ack && socket->remote_window) status |= NET_TCP_OWNED_WRITABLE;
+    out->references = socket->owned_references;
+    out->flags = status;
+    out->available = socket->rx_size;
+    out->event_sequence = __atomic_load_n(&socket->read_event_seq, __ATOMIC_ACQUIRE);
+    out->mss = socket->mss;
+    out->reserved = 0;
+    tcp_unlock(flags);
+    return 0;
 }
 
 bool net_tcp_socket_connect(net_tcp_socket_t *socket, uint32_t remote_ip, uint16_t remote_port)
@@ -1523,7 +1651,15 @@ void net_tcp_socket_close(net_tcp_socket_t *socket)
 
     if (socket->state == TCP_STATE_CLOSED || socket->state == TCP_STATE_ERROR)
     {
-        tcp_reset_socket(socket);
+        if (!socket->owned_references) tcp_reset_socket(socket);
+        else
+        {
+            socket->remote_closed = true;
+            tcp_signal_read_event(socket);
+            tcp_unlock(lock_flags);
+            wait_queue_wake_all(&socket->wait_queue);
+            return;
+        }
     }
     tcp_unlock(lock_flags);
 }
@@ -1563,6 +1699,7 @@ net_tcp_socket_t *net_tcp_socket_from_fd(int fd)
         {
             continue;
         }
+
         if (socket->fd_registered && socket->fd == fd)
         {
             tcp_unlock(flags);
@@ -1723,12 +1860,19 @@ void net_tcp_poll(void)
             continue;
         }
 
+        if (tcp_owned_retire_poll_locked(socket, now)) continue;
+
         if (now - socket->debug_last_log_tick >= log_interval)
         {
             socket->debug_last_log_tick = now;
-            tcp_unlock(lock_flags);
-            net_tcp_log_state(socket, "poll");
-            lock_flags = tcp_lock();
+            int pin = tcp_owned_transport_pin_locked(socket);
+            if (pin >= 0)
+            {
+                tcp_unlock(lock_flags);
+                net_tcp_log_state(socket, "poll");
+                lock_flags = tcp_lock();
+                tcp_owned_transport_unpin_locked(socket, pin);
+            }
         }
 
         if (socket->state == TCP_STATE_ARP)
@@ -1800,16 +1944,21 @@ void net_tcp_poll(void)
         }
         if (socket->state == TCP_STATE_CLOSE_WAIT && socket->remote_closed)
         {
-            if (socket->rx_size == 0)
+            if (socket->rx_size == 0 && !socket->owned_references)
             {
                 socket->state = TCP_STATE_CLOSED;
             }
-            else
+            else if (socket->rx_size != 0)
             {
                 /* Ensure any blocked readers wake to drain remaining data. */
-                tcp_unlock(lock_flags);
-                wait_queue_wake_all(&socket->wait_queue);
-                lock_flags = tcp_lock();
+                int pin = tcp_owned_transport_pin_locked(socket);
+                if (pin >= 0)
+                {
+                    tcp_unlock(lock_flags);
+                    wait_queue_wake_all(&socket->wait_queue);
+                    lock_flags = tcp_lock();
+                    tcp_owned_transport_unpin_locked(socket, pin);
+                }
             }
         }
     }
@@ -2182,6 +2331,11 @@ void net_tcp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
     }
 
 out:
+    ;
+    /* RX can race final descriptor release after dropping the TCP lock. The
+     * transport lease spans the entire queue wake/debug continuation. */
+    int transport_pin = wake_waiters ? tcp_owned_transport_pin_locked(socket) : 0;
+    if (transport_pin < 0) wake_waiters = false;
     tcp_unlock(lock_flags);
     if (wake_waiters)
     {
@@ -2191,6 +2345,12 @@ out:
                       net_tcp_socket_state(socket),
                       socket->rx_size,
                       socket->remote_closed ? 1U : 0U);
+    }
+    if (transport_pin > 0)
+    {
+        lock_flags = tcp_lock();
+        tcp_owned_transport_unpin_locked(socket, transport_pin);
+        tcp_unlock(lock_flags);
     }
 }
 

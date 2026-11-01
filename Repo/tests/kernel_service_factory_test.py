@@ -32,6 +32,7 @@ typedef void (*thread_entry_t)(void *);
 typedef struct { uint64_t cr3; } paging_space_t;
 typedef struct vfs_node { unsigned identity; } vfs_node_t;
 typedef struct process process_t;
+typedef struct { uint64_t creator_pid,creator_tid,pid; process_t *owner; bool constructed,complete; } process_creation_watch_t;
 typedef struct thread {
     process_t *process; thread_entry_t entry; void *argument;
     int exit_status,state; bool exited,preempt_pending; unsigned time_slice_remaining;
@@ -48,7 +49,9 @@ static spinlock_t g_process_lock;
 static bool scheduler_locked,fail_process,fail_thread,fail_context,expect_service,run_immediately,exit_armed;
 static uint64_t irq_flags=514,next_pid=1;
 static unsigned live_allocations,destroyed,page_destroys,publications,marks,child_queries;
-static unsigned context_attempts,context_releases;
+static unsigned context_attempts,context_releases,prep_depth;
+static void spinlock_preempt_disable(void) { ++prep_depth; }
+static void spinlock_preempt_enable(void) { CHECK(prep_depth); --prep_depth; }
 static int g_console_stdout_fd=1;
 static jmp_buf exit_target;
 static uint64_t cpu_save_flags(void) { return irq_flags; }
@@ -143,6 +146,7 @@ static void wait_queue_wait(wait_queue_t *queue,wait_queue_predicate_t predicate
         CHECK(predicate(context)); scheduler_lock_release(flags);
     }
 }
+static void process_detach_child(process_t *process) { process->parent=NULL; }
 static process_t *process_retain_first_child(process_t *process) { (void)process; ++child_queries; return NULL; }
 static int process_join(process_t *process,int *status) { (void)process; (void)status; CHECK(!"unexpected child join"); return -1; }
 process_t *process_finalize_new_process(process_t *,thread_t *,int,process_t *);
@@ -155,7 +159,7 @@ void process_exit(int) __attribute__((noreturn));
     code += function_definition(scheduler, "void process_release_reference(") + "\n"
     for signature in ("static void process_destroy_retained(", "static bool process_join_ready(",
                       "static bool process_join_begin(", "static void process_join_end(",
-                      "int process_join_kernel_service(", "void process_exit(", "bool process_kill(", "void process_kill_tree("):
+                      "int process_join_kernel_service(", "void process_exit(", "bool process_kill(", "bool process_is_zombie(", "void process_kill_tree("):
         code += function_definition(api, signature) + "\n"
     code += function_definition(scheduler, "static void process_reap_orphans(") + r'''
 static void body(void *argument) { CHECK(argument); ++*(unsigned *)argument; }

@@ -7,6 +7,7 @@
 
 typedef struct shell_output shell_output_t;
 typedef struct shell_state shell_state_t;
+typedef struct shell_actor shell_actor_t;
 typedef void (*shell_console_tap_fn)(void *context, const char *data, size_t len);
 
 struct shell_output
@@ -22,7 +23,14 @@ struct shell_output
 
 struct shell_state
 {
-    vfs_node_t *cwd;
+    vfs_node_t *cwd; /* Compatibility view owned by cwd_owner. */
+    spinlock_t cwd_lock;
+    fd_description_t *cwd_owner;
+    fd_description_t *lifetime_owner; /* Optional session pin; immutable. */
+    spinlock_t actors_lock;
+    shell_actor_t *actors;
+    size_t actor_live;
+    bool actors_closing, actors_paused;
     void (*stream_fn)(void *context, const char *data, size_t len);
     void *stream_context;
     int stdout_fd;
@@ -34,6 +42,23 @@ struct shell_state
     void (*cwd_changed_fn)(void *context, vfs_node_t *cwd);
     void *cwd_changed_context;
 };
+
+/* Caller owns shell-state lifetime. Acquire/replace/init require a bounded
+ * preparation/result guard; destruction only enqueues deferred references. */
+bool shell_cwd_init(shell_state_t *shell);
+fd_description_t *shell_cwd_acquire(shell_state_t *shell);
+int shell_cwd_replace_owned(shell_state_t *shell, fd_description_t *owner);
+void shell_cwd_destroy(shell_state_t *shell);
+bool shell_cwd_apply_current(shell_state_t *shell);
+void shell_actors_init(shell_state_t *shell);
+bool shell_actor_begin(shell_state_t *shell, shell_actor_t **out, void (*retired)(void *, shell_actor_t *), void *context);
+process_t *shell_actor_create(shell_actor_t *actor, const char *name, thread_entry_t entry, void *argument, size_t stack_size, int stdout_fd);
+void shell_actor_complete(shell_actor_t *actor);
+bool shell_actor_quiescent(shell_actor_t *actor);
+uint64_t shell_actor_pid(const shell_actor_t *actor);
+void shell_actors_reap(shell_state_t *shell);
+void shell_actors_mark_closing(shell_state_t *shell);
+bool shell_actors_retire_all(shell_state_t *shell);
 
 /* Foreground tracking is shared across threads (shell workers + interruptors). */
 static inline process_t *shell_foreground_load(shell_state_t *shell)

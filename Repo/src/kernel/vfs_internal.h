@@ -28,6 +28,7 @@ struct vfs_node
     uint64_t atime;
     uint64_t mtime;
     uint64_t ctime;
+    uint64_t object_id; /* Runtime identity, assigned under the tree lock. */
 
     size_t refcount;
     size_t size;

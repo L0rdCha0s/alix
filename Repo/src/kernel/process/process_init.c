@@ -1,4 +1,5 @@
 #include "process_internal.h"
+#include "io_stream.h"
 
 /*
  * src/kernel/process/process_init.c
@@ -26,17 +27,17 @@ void process_system_init(void)
 
     if (g_console_stdout_fd < 0)
     {
-        g_console_stdout_fd = fd_install(1, &console_stdout_ops, NULL);
+        g_console_stdout_fd = fd_install_importable(1, &console_stdout_ops, NULL, io_console_import_owned);
         if (g_console_stdout_fd < 0)
         {
-            g_console_stdout_fd = fd_allocate(&console_stdout_ops, NULL);
+            g_console_stdout_fd = fd_allocate_importable(&console_stdout_ops, NULL, io_console_import_owned);
         }
         if (g_console_stdout_fd < 0)
         {
             fatal("unable to allocate console stdout fd");
         }
     }
-    if (fd_install(2, &console_stdout_ops, NULL) < 0)
+    if (fd_install_importable(2, &console_stdout_ops, NULL, io_console_import_owned) < 0)
     {
         /* Best effort: stderr may already be reserved. */
     }

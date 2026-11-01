@@ -41,6 +41,9 @@ def main(cxx=False):
         objects = json.loads(manifest.read_text())
         if not objects or not any(Path(obj).name == "crt0.o" for obj in objects):
             raise RuntimeError("native Alix startup objects are missing")
+        names = [Path(obj).name for obj in objects]
+        if "syscall.o" in names or names.count("syscall-owned.o") != 1 or names.count("fcntl.o") != 1:
+            raise RuntimeError("upstream links require the owned-FD runtime; use the current make zen-* target")
         for obj in objects:
             path = Path(obj)
             header = path.read_bytes()[:20]

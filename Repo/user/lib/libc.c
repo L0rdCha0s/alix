@@ -3546,6 +3546,8 @@ int fstat(int fd, struct stat *st)
         case SYSCALL_NODE_TYPE_FILE: mode = S_IFREG; break;
         case SYSCALL_NODE_TYPE_BLOCK: mode = S_IFBLK; break;
         case SYSCALL_NODE_TYPE_SYMLINK: mode = S_IFLNK; break;
+        case SYSCALL_NODE_TYPE_SOCKET: mode = S_IFSOCK; break;
+        case SYSCALL_NODE_TYPE_CHARACTER: mode = S_IFCHR; break;
         default: errno = EIO; return -1;
     }
     st->st_size = tmp.size_bytes;

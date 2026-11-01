@@ -2,8 +2,8 @@
 zen-fetch-cxx:
 	python3 ports/zen/libcxx/fetch.py
 
-zen-cxx-runtime: $(USER_COMMON_OBJECTS) $(USER_LD_SCRIPT)
-	ALIX_RUNTIME_OBJECTS="$(USER_COMMON_OBJECTS)" python3 ports/zen/libcxx/build.py --smoke
+zen-cxx-runtime: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_LD_SCRIPT)
+	ALIX_RUNTIME_OBJECTS="$(ZEN_USER_RUNTIME_OBJECTS)" python3 ports/zen/libcxx/build.py --smoke
 
 .PHONY: zen-cxx-runtime-qemu-test
 zen-cxx-runtime-qemu-test: all zen-cxx-runtime

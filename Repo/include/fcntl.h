@@ -10,7 +10,20 @@
 #define O_TRUNC  SYSCALL_OPEN_TRUNCATE
 #define O_APPEND (1u << 16)
 #define O_BINARY 0
+#define O_CLOEXEC SYSCALL_OPEN_CLOEXEC
+#define FD_CLOEXEC SYSCALL_FILE_CLOEXEC
+#define F_DUPFD 0
+#define F_GETFD 1
+#define F_SETFD 2
+#define F_DUPFD_CLOEXEC 1030
 
+#ifdef __cplusplus
+extern "C" {
+#endif
 int open(const char *path, uint64_t flags, ...);
+int fcntl(int fd, int command, ...);
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* FCNTL_H */

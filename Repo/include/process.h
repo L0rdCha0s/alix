@@ -12,8 +12,17 @@
 #define PROCESS_GID_INVALID 0xFFFFFFFFu
 
 typedef struct fd_description fd_description_t;
+typedef struct fd_table fd_table_t;
 typedef struct fd_retirement_queue fd_retirement_queue_t;
 typedef struct process process_t;
+/* Heap-registered construction/actor owner. The factory retains owner before
+ * publication; complete is the creator's last access to the record/process. */
+typedef struct
+{
+    uint64_t creator_pid, creator_tid, pid;
+    process_t *owner;
+    bool constructed, complete;
+} process_creation_watch_t;
 typedef struct thread thread_t;
 typedef struct trap_frame trap_frame_t;
 
@@ -124,6 +133,17 @@ process_t *process_create_kernel_with_parent(const char *name,
                                              size_t stack_size,
                                              int stdout_fd,
                                              process_t *parent);
+bool process_creation_watch_init(process_creation_watch_t *watch);
+void process_creation_watch_complete(process_creation_watch_t *watch);
+bool process_creation_watch_creator_stopped(const process_creation_watch_t *watch);
+bool process_creation_watch_quiescent(const process_creation_watch_t *watch);
+process_t *process_create_kernel_observed(const char *name, thread_entry_t entry,
+                                           void *argument, size_t stack_size, int stdout_fd,
+                                           process_creation_watch_t *watch);
+/* Protected finalizer only: no caller locks/guard; stop waits for real
+ * quiescence and creator completion. Clear containing raw slots before release. */
+int process_creation_watch_stop(process_creation_watch_t *watch);
+void process_creation_watch_release(process_creation_watch_t *watch);
 /* Parentless, kill-protected service with one retained owner reference set
  * before enqueue. Only the owner calls process_join_kernel_service; success
  * consumes that reference after all worker threads are off CPUs/queues. */
@@ -169,6 +189,7 @@ bool process_handle_user_page_fault(interrupt_frame_t *frame,
                                     uint64_t address);
 uint64_t process_current_pid(void);
 uint64_t process_current_uptime_ns(void);
+int process_user_resource_usage(int which, uintptr_t output, size_t bytes);
 uint32_t process_get_uid(const process_t *process);
 uint32_t process_get_gid(const process_t *process);
 void process_set_identity(process_t *process, uint32_t uid, uint32_t gid);
@@ -182,6 +203,10 @@ fd_retirement_queue_t *process_fd_retirement_queue(void);
  * owner publication/rollback. Credentials and cwd are one context-lock snapshot.
  * Deferred put safely unwinds OOM/admission failure; no raw VFS release needed. */
 fd_description_t *process_acquire_cwd_owner(process_t *process, uint32_t *uid_out, uint32_t *gid_out);
+/* Borrowed only by the current user thread inside its preparation/result guard.
+ * Directory handles are internal to DIR and never index the legacy global FD table. */
+fd_table_t *process_current_directory_table(void);
+fd_table_t *process_current_fd_table(void);
 /* Worker/guarded creator; owned node transfers on success only. */
 fd_description_t *process_cwd_description_create_owned(vfs_node_t *node);
 bool process_cwd_description_valid(fd_description_t *owner);

@@ -6,6 +6,7 @@
 #include "serial.h"
 #include "fd.h"
 #include "io_vfs_service.h"
+#include "io_user_file.h"
 #include "heap.h"
 #include "vfs.h"
 #include "libc.h"
@@ -1148,6 +1149,13 @@ uint64_t syscall_dispatch(syscall_frame_t *frame, uint64_t vector)
         case SYSCALL_READLINK:
             result = io_vfs_readlink_user((const char *)frame->rdi, (void *)frame->rsi, (size_t)frame->rdx);
             break;
+        case SYSCALL_DIRECTORY:
+            result = io_vfs_directory_user((uint32_t)frame->rdi, (int)frame->rsi,
+                                            (void *)frame->rdx, (size_t)frame->r10);
+            break;
+        case SYSCALL_FILE_IO:
+            result = io_user_file_dispatch((uint32_t)frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
+            break;
         case SYSCALL_OPEN:
             result = syscall_do_open((const char *)frame->rdi, frame->rsi);
             break;
@@ -1548,6 +1556,9 @@ uint64_t syscall_dispatch(syscall_frame_t *frame, uint64_t vector)
             break;
         case SYSCALL_PROCESS_UPTIME_NS:
             result = (int64_t)process_current_uptime_ns();
+            break;
+        case SYSCALL_RESOURCE_USAGE:
+            result = process_user_resource_usage((int)frame->rdi, frame->rsi, (size_t)frame->rdx);
             break;
         case SYSCALL_GETPID:
             spinlock_preempt_disable();

@@ -131,17 +131,18 @@ the signal, stdio-loader, timezone and narrow-stream gates. Correct native
 system-header ordering preserves Mozilla's visibility wrappers. The latest
 C++ keep-going build passes the wide libc++, pthread read/write lock, X/Open
 constant and nearbyint gates, and compiles the actual Alix Wasm context bridge.
-Its latest completed run configures successfully, then exits 2 after 5m57s.
-Independent compiler gaps now include `vprintf`/`perror`/`setvbuf`, standard
-file-mode bits, `readlink` and directory APIs, `strdup`, math evaluation types
-and `sqrtf`/`fabsf`/`fabsl`/`scalbnf`, `MADV_NORMAL`, descriptor flags/duplication,
-signal-aware jumps, and resource/timestamp platform interfaces. These require
-native implementations; the shell has not linked or executed yet.
-Since that full run, the math library, buffered stdio including exit flushing,
-signal-aware jumps, resource policy and process uptime have passed native
-fixtures. The actual timestamp translation unit now compiles through patch 7.
-The protected filesystem/descriptor integration remains pending; the next
-complete build must verify all corrections together.
+Its latest completed run configures successfully, then exits 2 after 6m01s.
+That run cleared the earlier stdio, file-mode, readlink, directory, math,
+signal-jump, resource-accounting and timestamp compilation errors. The current
+compiler gaps are terminal control (`termios.h`), child-process control
+(`sys/wait.h`) and descriptor flags/duplication (`F_GETFD`, `F_SETFD`,
+`FD_CLOEXEC`, `dup`). The shell has not linked or executed yet.
+The math library, buffered stdio including exit flushing, signal-aware jumps,
+resource accounting/policy and process uptime have native fixture acceptance.
+Protected readlink and directory streams also pass in eight-CPU Alix guests;
+directory cursors and orphan-subtree retirement have host sanitizer coverage.
+Per-process public file/socket descriptors and their inheritance remain to be
+connected; directory streams currently use a separate opaque handle table.
 
 The full latest outputs are `build/ports/zen/spidermonkey-configure.log` and
 `build/ports/zen/spidermonkey-build.log`. These are actual compiler diagnostics;

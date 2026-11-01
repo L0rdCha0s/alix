@@ -13,6 +13,9 @@ extern "C" {
 ssize_t read(int fd, void *buffer, size_t count);
 ssize_t write(int fd, const void *buffer, size_t count);
 int close(int fd);
+int dup(int fd);
+int dup2(int source, int destination);
+int dup3(int source, int destination, int flags);
 int access(const char *path, int mode);
 int unlink(const char *path);
 ssize_t readlink(const char *path, char *buffer, size_t capacity);

@@ -5,7 +5,7 @@
 #include_next <sys/time.h>
 #else
 #include "sys/types.h"
-#include "time.h"
+#include <time.h>
 
 struct timeval
 {

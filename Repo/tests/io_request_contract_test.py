@@ -28,6 +28,10 @@ def main():
 typedef struct syscall_stat syscall_stat_t;
 typedef struct { uint32_t value; } spinlock_t;
 static _Thread_local unsigned held_locks;
+static _Thread_local unsigned preempt_depth;
+static void spinlock_preempt_disable(void) { ++preempt_depth; }
+static void spinlock_preempt_enable(void) { CHECK(preempt_depth); --preempt_depth; }
+static bool spinlock_preempt_disabled(void) { return preempt_depth!=0; }
 static _Thread_local bool cleanup_worker;
 static _Thread_local int fail_after = -1;
 static void (*allocation_hook)(void);
