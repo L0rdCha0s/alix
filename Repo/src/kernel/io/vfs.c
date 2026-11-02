@@ -8,6 +8,7 @@
 #include "io_tcp.h"
 #include "io_pipe.h"
 #include "io_audio.h"
+#include "system_identity.h"
 
 typedef struct
 {
@@ -59,7 +60,8 @@ static ssize_t io_vfs_file_write(void *context, const void *buffer, size_t count
     if (!file || !file->writable) return -EBADF;
     if (!buffer && count) return -EINVAL;
     io_vfs_offset_lock(file);
-    bool append = (fd_description_status_flags(file->description) & FD_STATUS_APPEND) != 0;
+    uint32_t status = fd_description_status_flags(file->description);
+    bool append = (status & FD_STATUS_APPEND) != 0;
     ssize_t result = append ? vfs_write_append(file->node, buffer, count, false, &file->offset) :
         count > 0x7fffffffffffffffULL - file->offset ? -EFBIG :
         vfs_write_data_at(file->node, (size_t)file->offset, buffer, count);
@@ -68,6 +70,10 @@ static ssize_t io_vfs_file_write(void *context, const void *buffer, size_t count
         if ((size_t)result > count) result = -EIO;
         else if (!append) file->offset += (uint64_t)result;
     }
+    /* The protected worker retains this open description and its node through
+     * data/metadata commit and the device cache flush. Failed persistence is
+     * reported even though the in-memory write and offset may have advanced. */
+    if (result > 0 && (status & FD_STATUS_SYNC) && !vfs_flush_node(file->node)) result = -EIO;
     io_vfs_offset_unlock(file);
     return result == -1 ? -EIO : result;
 }
@@ -129,6 +135,20 @@ static int io_vfs_file_stat(void *context, syscall_stat_t *out)
     return 0;
 }
 
+static int64_t io_vfs_file_available(io_vfs_file_t *file)
+{
+    io_vfs_offset_lock(file);
+    size_t size = 0;
+    int64_t result = -EIO;
+    if (vfs_stat(file->node, &size, NULL, NULL, NULL, NULL))
+    {
+        uint64_t available = size > file->offset ? (uint64_t)size - file->offset : 0;
+        result = available > INT64_MAX ? INT64_MAX : (int64_t)available;
+    }
+    io_vfs_offset_unlock(file);
+    return result;
+}
+
 static int io_vfs_file_close(void *context)
 {
     io_vfs_file_t *file = context;
@@ -176,7 +196,7 @@ int io_vfs_open_owned(vfs_node_t *cwd, const char *path, uint32_t flags,
     if (!output) return -EINVAL;
     *output = NULL;
     uint32_t known = SYSCALL_OPEN_READ | SYSCALL_OPEN_WRITE | SYSCALL_OPEN_CREATE |
-                     SYSCALL_OPEN_TRUNCATE | SYSCALL_OPEN_EXCLUSIVE | SYSCALL_OPEN_APPEND | SYSCALL_OPEN_NONBLOCK;
+                     SYSCALL_OPEN_TRUNCATE | SYSCALL_OPEN_EXCLUSIVE | SYSCALL_OPEN_APPEND | SYSCALL_OPEN_NONBLOCK | SYSCALL_OPEN_SYNC;
     if (!retirement || !cwd || !path || (flags & ~known) || !(flags & (SYSCALL_OPEN_READ | SYSCALL_OPEN_WRITE)) ||
         ((flags & SYSCALL_OPEN_TRUNCATE) && !(flags & SYSCALL_OPEN_WRITE))) return -EINVAL;
     io_vfs_file_t *file = calloc(1, sizeof(*file));
@@ -188,7 +208,7 @@ int io_vfs_open_owned(vfs_node_t *cwd, const char *path, uint32_t flags,
     if (!description) { free(file); return -ENOMEM; }
     file->description = description;
     (void)fd_description_initialize_status(description, flags &
-        (SYSCALL_OPEN_READ | SYSCALL_OPEN_WRITE | SYSCALL_OPEN_APPEND | SYSCALL_OPEN_NONBLOCK));
+        (SYSCALL_OPEN_READ | SYSCALL_OPEN_WRITE | SYSCALL_OPEN_APPEND | SYSCALL_OPEN_NONBLOCK | SYSCALL_OPEN_SYNC));
     int result = vfs_open_data_flags_owned(cwd, path, (flags & SYSCALL_OPEN_CREATE) != 0,
                                            (flags & SYSCALL_OPEN_TRUNCATE) != 0,
                                            (flags & SYSCALL_OPEN_EXCLUSIVE) != 0, uid, gid, &file->node);
@@ -350,6 +370,14 @@ void io_vfs_execute(io_request_t *request, io_service_result_t *result,
         }
         return;
     }
+    if (operation->opcode == IO_VFS_SYSTEM_INFO)
+    {
+        if (description || !io_request_cwd(request) || operation->flags ||
+            operation->count != sizeof(syscall_utsname_t) || available != sizeof(syscall_utsname_t)) return;
+        result->result = system_identity_snapshot(io_request_cwd(request), io_request_uid(request),
+                                                     io_request_gid(request), (void *)operation->data);
+        return;
+    }
     if (operation->opcode == IO_VFS_GETCWD)
     {
         if (description || !io_request_cwd(request) || operation->flags ||
@@ -422,7 +450,7 @@ void io_vfs_execute(io_request_t *request, io_service_result_t *result,
     }
     if (operation->opcode == IO_VFS_OPEN)
     {
-        uint32_t known = SYSCALL_OPEN_READ | SYSCALL_OPEN_WRITE | SYSCALL_OPEN_CREATE | SYSCALL_OPEN_TRUNCATE | SYSCALL_OPEN_EXCLUSIVE | SYSCALL_OPEN_APPEND;
+        uint32_t known = SYSCALL_OPEN_READ | SYSCALL_OPEN_WRITE | SYSCALL_OPEN_CREATE | SYSCALL_OPEN_TRUNCATE | SYSCALL_OPEN_EXCLUSIVE | SYSCALL_OPEN_APPEND | SYSCALL_OPEN_NONBLOCK | SYSCALL_OPEN_SYNC;
         if (!retirement || (description && !fd_table_reservation_valid(description)) || !io_request_cwd(request) ||
             (operation->flags & ~known) || !(operation->flags & (SYSCALL_OPEN_READ | SYSCALL_OPEN_WRITE)) ||
             ((operation->flags & SYSCALL_OPEN_TRUNCATE) && !(operation->flags & SYSCALL_OPEN_WRITE))) return;
@@ -486,6 +514,10 @@ void io_vfs_execute(io_request_t *request, io_service_result_t *result,
             break;
         case IO_VFS_STAT:
             result->result = io_vfs_file_stat(file, &operation->stat);
+            break;
+        case IO_VFS_AVAILABLE:
+            if (operation->flags || operation->count || operation->offset || operation->whence) break;
+            result->result = io_vfs_file_available(file);
             break;
         case IO_VFS_SYNC:
             io_vfs_offset_lock(file);

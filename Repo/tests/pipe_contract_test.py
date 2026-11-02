@@ -83,12 +83,15 @@ static void ring_and_ownership(void) {
     CHECK(fd_table_pin(table,2,&pin,NULL)==-EBADF&&!pin);
     spinlock_preempt_enable();
     unsigned char *in=calloc(1,IO_PIPE_CAPACITY),*out=calloc(1,IO_PIPE_CAPACITY);CHECK(in&&out);
+    CHECK(step(reader,IO_PIPE_AVAILABLE,NULL,0,true)==0 && step(writer,IO_PIPE_AVAILABLE,NULL,0,true)==0);
     for(unsigned i=0;i<IO_PIPE_CAPACITY;++i)in[i]=(unsigned char)(i*73+11);
     CHECK(step(reader,IO_PIPE_READ,out,1,false)==-EINVAL);
     CHECK(step(reader,IO_PIPE_WRITE,in,1,true)==-EBADF&&step(writer,IO_PIPE_READ,out,1,true)==-EBADF);
     CHECK(step(writer,IO_PIPE_WRITE,in,IO_PIPE_CAPACITY,true)==IO_PIPE_CAPACITY);
+    CHECK(step(reader,IO_PIPE_AVAILABLE,NULL,0,true)==IO_PIPE_CAPACITY && step(writer,IO_PIPE_AVAILABLE,NULL,0,true)==IO_PIPE_CAPACITY);
     CHECK(step(writer,IO_PIPE_WRITE,in,IO_PIPE_ATOMIC,false)==-EINVAL);
     CHECK(step(reader,IO_PIPE_READ,out,IO_PIPE_ATOMIC/2,true)==IO_PIPE_ATOMIC/2);
+    CHECK(step(reader,IO_PIPE_AVAILABLE,NULL,0,true)==IO_PIPE_CAPACITY-IO_PIPE_ATOMIC/2);
     CHECK(!memcmp(out,in,IO_PIPE_ATOMIC/2));
     CHECK(step(writer,IO_PIPE_WRITE,in,IO_PIPE_ATOMIC,false)==-EINVAL);
     CHECK(step(reader,IO_PIPE_READ,out,IO_PIPE_ATOMIC/2,true)==IO_PIPE_ATOMIC/2);

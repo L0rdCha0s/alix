@@ -21,7 +21,8 @@ int posix_spawn_file_actions_destroy(posix_spawn_file_actions_t *actions)
 {
     if (!actions || actions->magic != ACTIONS_MAGIC || actions->count > actions->capacity) return EINVAL;
     for (uint32_t index = 0; index < actions->count; ++index)
-        if (actions->actions[index].operation == SYSCALL_SPAWN_OPEN) free((void *)(uintptr_t)actions->actions[index].path);
+        if (actions->actions[index].operation == SYSCALL_SPAWN_OPEN ||
+            actions->actions[index].operation == SYSCALL_SPAWN_CHDIR) free((void *)(uintptr_t)actions->actions[index].path);
     free(actions->actions); memset(actions, 0, sizeof(*actions)); return 0;
 }
 
@@ -61,6 +62,18 @@ int posix_spawn_file_actions_addopen(posix_spawn_file_actions_t *actions, int fd
     if (!copy) { errno = saved; return ENOMEM; }
     int result = add_action(actions, (syscall_spawn_action_t){ .operation = SYSCALL_SPAWN_OPEN, .fd = fd,
                                  .path = (uintptr_t)copy, .flags = (uint32_t)flags, .mode = mode });
+    if (result) free(copy);
+    errno = saved; return result;
+}
+
+int posix_spawn_file_actions_addchdir_np(posix_spawn_file_actions_t *actions, const char *path)
+{
+    if (!path) return EINVAL;
+    int saved = errno;
+    char *copy = strdup(path);
+    if (!copy) { errno = saved; return ENOMEM; }
+    int result = add_action(actions, (syscall_spawn_action_t){ .operation = SYSCALL_SPAWN_CHDIR,
+                                                              .path = (uintptr_t)copy });
     if (result) free(copy);
     errno = saved; return result;
 }

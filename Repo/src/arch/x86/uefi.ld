@@ -52,8 +52,15 @@ SECTIONS
     __kernel_data_start = .;
     *(.data*)
     *(.rodata*)
-    __kernel_data_end = .;
   }
+
+  .note.gnu.build-id ALIGN(4) :
+  {
+    __kernel_build_id_start = .;
+    KEEP(*(.note.gnu.build-id))
+    __kernel_build_id_end = .;
+  }
+  __kernel_data_end = .;
 
   /* Page-align start of BSS, keep 16-byte alignment inside if needed */
   . = ALIGN(0x1000);

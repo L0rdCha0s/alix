@@ -11,13 +11,14 @@
 #include "serial.h"
 #include "netinet/tcp.h"
 #include "sys/stat.h"
+#include "sys/ioctl.h"
 #define CHECK(c) do { if (!(c)) { job->failed = __LINE__; job->error = errno; goto finished; } } while (0)
 typedef struct {
     unsigned index, failed; int error, descriptor, alias;
     pthread_t thread; struct sockaddr_in address; struct pollfd entry;
     struct sockaddr_in local, peer;
     socklen_t length;
-    int option;
+    int option, available_before, available_after;
     struct stat metadata;
     unsigned char bytes[16384], first[32], second[32];
 } job_t;
@@ -76,6 +77,10 @@ static void *worker(void *context)
           fcntl(job->descriptor, F_GETFL) == (int)(O_RDWR | (flags ? O_NONBLOCK : 0)));
     job->alias = dup(job->descriptor);
     CHECK(job->alias >= 0 && fcntl(job->alias, F_GETFD) == 0);
+    job->option=flags?0:1;CHECK(!ioctl(job->alias,FIONBIO,&job->option));
+    CHECK(fcntl(job->descriptor,F_GETFL)==(int)(O_RDWR|(flags?0:O_NONBLOCK)));
+    job->option=flags?1:0;CHECK(!ioctl(job->descriptor,FIONBIO,&job->option));
+    CHECK(fcntl(job->alias,F_GETFL)==(int)(O_RDWR|(flags?O_NONBLOCK:0)));
     if (query_contract(job, false)) goto finished;
     CHECK(connect(job->descriptor, NULL, sizeof(job->address)) == -1 && errno == EFAULT);
     CHECK(connect(job->descriptor, (const struct sockaddr *)&job->address, 1) == -1 && errno == EINVAL);
@@ -91,10 +96,13 @@ static void *worker(void *context)
     CHECK(send(job->descriptor, "G", 1, MSG_DONTWAIT | MSG_NOSIGNAL) == 1);
     job->entry.events = POLLIN;
     CHECK(poll(&job->entry, 1, 5000) == 1 && (job->entry.revents & POLLIN));
+    CHECK(!ioctl(job->descriptor,FIONREAD,&job->available_before) && job->available_before>=32 && job->available_before<=16384);
+    CHECK(ioctl(job->descriptor,FIONREAD,(void *)"readonly")==-1 && errno==EFAULT);
     CHECK(recv(job->descriptor, (void *)"readonly", 8, MSG_PEEK | MSG_DONTWAIT) == -1 && errno == EFAULT);
     CHECK(recv(job->descriptor, job->first, sizeof(job->first), MSG_PEEK | MSG_DONTWAIT) == sizeof(job->first));
     CHECK(recv(job->alias, job->second, sizeof(job->second), MSG_PEEK | MSG_DONTWAIT) == sizeof(job->second) &&
           !memcmp(job->first, job->second, sizeof(job->first)));
+    CHECK(!ioctl(job->alias,FIONREAD,&job->available_after) && job->available_after>=job->available_before && job->available_after<=16384);
     CHECK(recv(job->alias, job->bytes, sizeof(job->first), MSG_DONTWAIT) == sizeof(job->first) &&
           !memcmp(job->first, job->bytes, sizeof(job->first)));
     size_t total = sizeof(job->first);
@@ -109,6 +117,7 @@ static void *worker(void *context)
     CHECK(poll(&job->entry, 1, 5000) == 1 && (job->entry.revents & POLLHUP));
     CHECK(recv(job->descriptor, job->first, 1, MSG_PEEK | MSG_DONTWAIT) == 0 &&
           recv(job->alias, job->first, 1, MSG_DONTWAIT) == 0);
+    CHECK(!ioctl(job->descriptor,FIONREAD,&job->available_after) && !job->available_after);
 finished:
     if (job->alias >= 0) close(job->alias);
     if (job->descriptor >= 0) close(job->descriptor);
@@ -154,6 +163,7 @@ static int error_contract(uint16_t refused_port)
     REQUIRE(descriptor >= 0 && connect(descriptor, (const struct sockaddr *)&test->address, sizeof(test->address)) == -1 && errno == EINPROGRESS);
     test->entry = (struct pollfd){ .fd = descriptor, .events = POLLOUT };
     REQUIRE(poll(&test->entry, 1, 5000) == 1 && (test->entry.revents & POLLERR));
+    REQUIRE(!ioctl(descriptor,FIONREAD,&test->value) && !test->value);
     test->length = sizeof(test->value);
     REQUIRE(getsockopt(descriptor, SOL_SOCKET, SO_ERROR, (void *)"readonly", &test->length) == -1 && errno == EFAULT);
     REQUIRE(getsockopt(descriptor, SOL_SOCKET, SO_ERROR, &test->value, (socklen_t *)"readonly") == -1 && errno == EFAULT);
@@ -212,5 +222,6 @@ int main(int argc, char **argv)
     free(jobs);
     if (failures || error_contract((uint16_t)atoi(argv[2]))) return 1;
     serial_printf("SOCKET_TEST: PASS cpus=8 bytes=131072 blocking=1 nonblock=1 per_call=1 peek=1 aliases=1 eof=1 copy_checks=1\n");
+    serial_printf("SOCKET_IOCTL_TEST: PASS cpus=8 nonblock=1 readable=1 peek_preserved=1 error_preserved=1 eof=1\n");
     return 0;
 }

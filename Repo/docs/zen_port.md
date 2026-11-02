@@ -112,11 +112,66 @@ close/reuse and killed-caller checks, including exception-only hangup waits.
 The actual vendored Rust libc passes fd_set/timeval layout and select calls.
 NSPR's real prnetdb.c compiles using native reentrant host/protocol queries;
 the native pthread include also lets the complete nsDeviceContext.cpp compile.
-A focused compilation audit passes 54 of NSPR's 64 selected C sources. The ten
-remaining sources still require dynamic loading, ioctl/file-lock interfaces,
-process launch, shared-file operations, identity and native random-noise
-integration. These are individual source compilations, not an NSPR library
+A refreshed compilation audit passes 60 of NSPR's 64 selected C sources. The
+four remaining sources require dynamic loading and shared-file operations.
+These are individual source compilations, not an NSPR library
 link or runtime result. See [poll/select](kernel/poll.md).
+
+Native ioctl now supplies atomic nonblocking changes, readable-byte snapshots
+and per-slot CLOEXEC controls. Eight-CPU pipe/file/TCP checks, legacy namespace
+rejection and actual Gecko Rust libc ABI tests pass. Queries preserve offsets,
+peeked bytes and pending socket errors. NSPR's configured Unix source advances
+past sys/ioctl.h. See [descriptor controls](kernel/ioctl.md).
+
+Native uname/hostname and primary-group/effective-identity getters now pass
+eight-CPU tests, including 512 snapshots during 64 hostname replacements.
+The version identifies the actual running kernel's ELF build ID, verified
+against the private boot image. The configured NSPR metadata code also passes
+native open-flag, 64-bit size and checked timestamp-conversion tests. Its
+complete Unix source now stops on three shared-mapping/msync errors; a complete
+NSPR library still has not linked or run. See
+[system identity](kernel/system_identity.md) for ownership and validation scope.
+
+NSPR's public random-noise, physical-memory and CPU-count functions also run
+inside Alix. Its entropy backend uses native getentropy and returns at most
+256 bytes per call, as permitted by NSPR's short-result contract. Failures
+return zero with the native error mapped into NSPR; no clock data replaces
+unavailable entropy. Guest tests cover 512 samples across eight pinned CPUs,
+descriptor exhaustion, buffer protection and a separate CPU configuration
+without RDRAND. The fixture links whole upstream resource/error-mapping
+objects, instruments the per-thread error sink and disables SSP only for
+this component test so the unavailable-entropy case can reach main.
+Production compiler flags and SSP startup remain unchanged; complete NSPR
+initialization is still unverified.
+
+Native synchronous file writes now pass eight-CPU execution and independent
+AlixFS remount readback: 64 append writes retain all 32 KiB without an explicit
+fsync. The shared sync flag survives aliases, F_SETFL and partial ioctl changes;
+failed flushes report EIO and the legacy namespace rejects sync before mutation.
+Gecko's actual Rust libc checks the native 64-bit open ABI and synchronous
+calls. NSPR's poll/select/nonblocking selectors now use the existing native
+interfaces, and its actual nonblocking helper preserves O_SYNC. See
+[synchronous files](kernel/synchronous_files.md).
+Enforced descriptor limits now pass 512 operations on eight pinned CPUs,
+including atomic pipes, sockets, preservation of high descriptors and failed
+truncation, checked metadata copies and spawn inheritance/isolation. Host
+ASan/UBSan and TSan checks pass 8,000 concurrent operations. The actual Rust
+libc fixture checks its native resource ABI and enforced open failure. NSPR's
+complete pthread I/O source now compiles, and its table-size entry points run
+against the native FD policy. Its multicast request structure is declared;
+multicast operations remain unsupported. Complete NSPR startup remains
+unverified. See [descriptor limits](kernel/descriptor_limits.md).
+
+NSPR's native launch helper now uses Alix posix_spawn with an owned environment
+snapshot, redirected standard descriptors and child-only cwd actions. Its actual
+code passes 25 child launches with eight pinned callers, crossed stdio, CLOEXEC,
+environment variants, constructor-time cwd/environment, failure restoration and
+descriptor cleanup. The kernel cwd action separately passes 24 concurrent child
+launches with ordered relative opens, relative executable/PATH lookup and parent
+isolation. ASan/UBSan checks fault each helper preparation step and validate cwd
+ownership/error cleanup. The complete upstream process source compiles; full
+NSPR initialization and its wait daemon remain unverified. See
+[child processes](kernel/child_processes.md).
 
 The existing browser remains available during the port.
 
@@ -393,6 +448,14 @@ make zen-gecko-os-interfaces-qemu-test # fsync/remount, advice and memory counts
 make zen-select-qemu-test              # Owned selection, signals, TCP and cleanup
 make zen-filesystem-primitives-qemu-test # Resize, canonical paths and empty dirs
 make zen-flock-qemu-test            # Whole-file locks, aliases, cancellation and exit
+make zen-ioctl-qemu-test            # Native descriptor controls and legacy rejection
+make zen-system-identity-qemu-test  # Kernel build ID, hostname and credentials
+make zen-nspr-file-abi-qemu-test    # Configured NSPR metadata/open ABI component
+make zen-nspr-resources-qemu-test   # Real NSPR resource APIs and unavailable entropy
+make zen-synchronous-file-qemu-test # Native O_SYNC and independent disk remount
+make zen-fd-limits-qemu-test        # Enforced FD quotas, inheritance and legacy rejection
+make zen-spawn-cwd-qemu-test        # Ordered child cwd actions and parent isolation
+make zen-nspr-spawn-qemu-test       # Actual NSPR native launch helper
 make zen-rust-file-urls-qemu-test # Actual Gecko URL crate and native file readback
 make zen-rust-os-consumers-qemu-test # Real Glean logging, errno and storage paths
 make zen-rust-directories-qemu-test # Actual dirs crates and native XDG/account paths
@@ -430,13 +493,21 @@ The following actual Alix guest results are retained under `build/test-out/`:
 | `filesystem-primitives-qemu.log` | Eight CPUs pass file resizing/zero-fill, shared alias offsets and shared-node read snapshots, symlink-aware realpath, directory-only rmdir and invalid/read-only user-copy checks. |
 | `fsync-legacy-root-qemu.log` | Disk written before the mount-root fix retains the new mount-point name and passes complete native file readback. |
 | `select-native-qemu.log` | Eight pinned select waiters, all descriptor bits/highest slot, multi-set counts, monotonic timeouts, safe copies, TCP/EOF, exception-only hangup, close/reuse, EINTR and killed-caller cleanup. |
-| `rust-libc-ffi-native-qemu.log` | Actual Gecko-vendored Rust libc linked to Alix: C/Rust scalar ABI, heap, environment, opaque FILE I/O, 64-bit offsets, pipes, sockets, address lookup, fsync, physical-page queries and native select. |
+| `rust-libc-ffi-native-qemu.log` | Actual Gecko-vendored Rust libc linked to Alix: C/Rust scalar ABI, heap, environment, opaque FILE I/O, 64-bit offsets, pipes, sockets, address lookup, fsync, physical-page queries, select, ioctl and native system/credential identity. |
 | `executable-path-native-qemu.log` | Kernel file loader and native spawn/PATH launch expose full absolute paths before main, independently of mutable argv/cwd; rename snapshot and invalid/short/read-only reply checks. |
 | `rust-std-qemu.log` | Actual upstream std: native pthread identities/handles/TLS; File/OwnedFd ownership, offsets, resizing, paths, directories and pipes; 1,536 concurrent C/Rust environment updates, 512 snapshots, raw bytes, owned iterators, real cwd/executable paths and exact-uid account fallback; original allocation/time/synchronization/HashMap checks also pass. |
 | `rust-file-urls-qemu.log` | Actual Gecko URL crate: native absolute paths, percent escaping, Unicode and invalid UTF-8 byte roundtrips, local/remote-host handling, NUL rejection at file open and eight-CPU file readback through decoded URLs. |
 | `rust-os-consumers-qemu.log` | Actual Glean public FD logger delivers 256 JSON records from eight pinned CPUs; native errno crate/C errno isolation and strerror_r formatting, C/Rust errno/signal ABI, real storage-path module canonicalization/errors, and kill identity/error probes pass. XPCOM service startup and full browser linkage remain unverified. |
 | `rust-directories-qemu.log` | Actual dirs/dirs-sys crates: eight CPUs parse real XDG files with HOME expansion, disabled/relative paths, escaping, Unicode and invalid UTF-8; defaults, overrides, account fallback and C/Rust passwd ABI; profile-directory creation and preferences write/sync/readback under the real default account config path. |
 | `flock-native-qemu.log` | Eight pinned CPUs preserve 256 file updates under real shared/exclusive locks; advisory behavior, dup/final-close, rename, native inheritance, descriptor reuse, EINTR, storage progress and killed-waiter sibling-lock release pass. Rust File lock APIs independently pass 256 pinned critical sections in rust-std-qemu.log. |
+| `ioctl-native-qemu.log`, `ioctl-legacy-qemu.log` | Eight CPUs pass 768 pipe snapshots, atomic nonblocking/shared-status behavior, per-slot CLOEXEC, file offset/EOF counts, exact copy widths and pointer errors; a separate legacy guest rejects controls without altering private flags. |
+| `system-identity-qemu.log` | Running kernel build ID matches the booted ELF; credentials, checked copies and hostname bounds pass alongside 512 snapshots on eight CPUs during 64 atomic hostname replacements. |
+| `nspr-file-abi-qemu.log` | Actual configured NSPR metadata converters and native open ABI pass 64-bit flags/sizes, second-to-microsecond conversion and overflow rejection. Extracted functions use an instrumented error sink; complete NSPR startup is not tested. |
+| `nspr-resources-qemu.log`, `nspr-resources-unsupported-qemu.log` | Whole upstream resource objects pass 512 eight-CPU samples, native memory/CPU counts, bounded short results, descriptor pressure and checked-copy errors. A separate CPU without RDRAND returns zero, maps ENOSYS and preserves output. Full NSPR initialization and production SSP startup are outside this fixture. |
+| `synchronous-file-qemu.log`, `synchronous-file-remount-qemu.log`, `synchronous-file-legacy-qemu.log` | Eight pinned writers append 64 complete records; immutable sync state, shared offsets and checked inputs pass. A separate boot reads all 32 KiB and metadata without an explicit fsync; legacy wrapper and raw kernel reject sync without truncation. |
+| `fd-limits-qemu.log`, `fd-limits-legacy-qemu.log` | 512 eight-CPU operations pass real FD quotas, atomic pipes, sockets, failed-truncate preservation, high slots, cross-page copies and spawn policy inheritance/isolation. A separate legacy guest rejects FD-limit calls without altering private limits. |
+| `spawn-cwd-qemu.log` | Eight pinned launchers create 24 children with owned cwd actions, ordered relative opens, relative executable/PATH lookup, constructor-time cwd and parent isolation through failures. |
+| `nspr-spawn-qemu.log` | Actual NSPR spawn helper launches 25 children, including crossed stdio and eight pinned callers; environment variants, CLOEXEC, blocking child streams, cwd/constructor state, failed-launch restoration and temporary-FD cleanup pass. Full NSPR initialization and wait daemon are not tested. |
 | `thread-elf_tls-qemu.log` | Eight CPUs passed initialized TLS, zeroed TLS, 128-byte alignment, constructors and thread-local errno checks. |
 | `thread-libc-qemu.log` | Four-CPU allocator/once/TSD checks and exit ordering passed; required `main PASS` and `exit PASS` are present. |
 | `thread-main_exit-qemu.log` | `MAIN_THREAD_EXIT_TEST: PASS main_joined=1 tls=1 last=1`: workers survive initial-thread exit and the last participant performs final cleanup. |

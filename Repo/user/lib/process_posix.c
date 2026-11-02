@@ -10,6 +10,10 @@ pid_t getpid(void)
     return sys_getpid();
 }
 
+uint32_t geteuid(void) { return getuid(); }
+uint32_t getgid(void) { return (uint32_t)sys_process(SYSCALL_PROCESS_GETGID, 0, 0, 0); }
+uint32_t getegid(void) { return getgid(); }
+
 static int resource_snapshot(syscall_resource_usage_t *snapshot)
 {
     int result = sys_resource_usage(RUSAGE_SELF, snapshot, sizeof(*snapshot));
@@ -33,19 +37,6 @@ clock_t clock(void)
     uint64_t fraction = ((ticks % snapshot.tick_frequency) * CLOCKS_PER_SEC) / snapshot.tick_frequency;
     if (fraction > INT64_MAX - base) { errno = EOVERFLOW; return (clock_t)-1; }
     return (clock_t)(base + fraction);
-}
-
-int getrlimit(int resource, struct rlimit *limit)
-{
-    if (!limit) { errno = EFAULT; return -1; }
-    if (resource != RLIMIT_AS) { errno = EINVAL; return -1; }
-    /* Alix currently imposes no aggregate per-process virtual-memory quota.
-     * This is independent of its finite address window, per-region layout
-     * limits and allocation failures. No configurable limit is being hidden;
-     * adding such a kernel policy must replace this query with its snapshot. */
-    limit->rlim_cur = RLIM_INFINITY;
-    limit->rlim_max = RLIM_INFINITY;
-    return 0;
 }
 
 static void resource_ticks_to_timeval(uint64_t ticks, uint32_t frequency, struct timeval *value)

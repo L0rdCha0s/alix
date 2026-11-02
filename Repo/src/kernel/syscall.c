@@ -972,6 +972,8 @@ static int64_t syscall_do_mkdir(const char *path)
  */
 static int64_t syscall_do_open(const char *path, uint64_t flags)
 {
+    /* Legacy global descriptors have no protected synchronous-write worker. */
+    if (flags & SYSCALL_OPEN_SYNC) return -ENOTSUP;
     if (!path)
     {
         return -1;

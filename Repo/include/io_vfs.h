@@ -24,7 +24,9 @@ typedef enum
     IO_VFS_RENAME,
     IO_VFS_TRUNCATE,
     IO_VFS_REALPATH,
-    IO_VFS_MKDIR
+    IO_VFS_MKDIR,
+    IO_VFS_AVAILABLE,
+    IO_VFS_SYSTEM_INFO
 } io_vfs_opcode_t;
 
 /* The complete object lives in io_request_buffer(). All data/path bytes are

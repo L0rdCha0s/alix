@@ -1,0 +1,204 @@
+--- a/nsprpub/pr/src/md/unix/uxproces.c
++++ b/nsprpub/pr/src/md/unix/uxproces.c
+@@ -10,6 +10,12 @@
+ #include <signal.h>
+ #include <sys/wait.h>
+ #include <string.h>
++#if defined(ALIX)
++#include <spawn.h>
++#include <alix_process.h>
++#include <sys/ioctl.h>
++#include <stdlib.h>
++#endif
+ #if defined(AIX)
+ #include <dlfcn.h> /* For dlopen, dlsym, dlclose */
+ #endif
+@@ -129,11 +135,179 @@
+ static void pr_InstallSigchldHandler(void);
+ #endif
+ 
++#if defined(ALIX)
++typedef struct {
++    posix_spawn_file_actions_t actions;
++    char** snapshot;
++    char** merged;
++    PRFileDesc* redirected[3];
++    int source[3], temporary[3], nonblock[3];
++    PRBool changed[3], initialized;
++} AlixSpawnState;
++
++/* The native spawn syscall owns its descriptor/cwd/argv/environment snapshots
++ * before returning. All preparation storage here belongs to this live call. */
++static int
++_MD_alix_spawn(pid_t* pid, const char* path, char* const* argv,
++               char* const* envp, const PRProcessAttr* attr)
++{
++    AlixSpawnState* state = calloc(1, sizeof(*state));
++    if (!state) {
++        return ENOMEM;
++    }
++    for (int index = 0; index < 3; ++index) {
++        state->temporary[index] = -1;
++    }
++    int error = 0;
++    char* const* environment = envp;
++    if (!environment) {
++        state->snapshot = alix_environment_copy();
++        if (!state->snapshot) {
++            error = ENOMEM;
++            goto finished;
++        }
++        environment = state->snapshot;
++    }
++    if (attr && attr->fdInheritBuffer) {
++        size_t count = 0;
++        while (environment[count]) {
++            if (count == 256) {
++                error = E2BIG;
++                goto finished;
++            }
++            ++count;
++        }
++        state->merged = calloc(count + 2, sizeof(*state->merged));
++        if (!state->merged) {
++            error = ENOMEM;
++            goto finished;
++        }
++        PRBool replaced = PR_FALSE;
++        for (size_t index = 0; index < count; ++index) {
++            state->merged[index] = environment[index];
++            if (!replaced && !strncmp(environment[index], "NSPR_INHERIT_FDS=", 17)) {
++                state->merged[index] = attr->fdInheritBuffer;
++                replaced = PR_TRUE;
++            }
++        }
++        if (!replaced) {
++            state->merged[count] = attr->fdInheritBuffer;
++        }
++        environment = state->merged;
++    }
++    error = posix_spawn_file_actions_init(&state->actions);
++    if (error) {
++        goto finished;
++    }
++    state->initialized = PR_TRUE;
++    if (attr) {
++        state->redirected[0] = attr->stdinFd;
++        state->redirected[1] = attr->stdoutFd;
++        state->redirected[2] = attr->stderrFd;
++    }
++    /* Snapshot all three sources before applying any dup2, including crossed
++     * mappings and sources already numbered 0/1/2. CLOEXEC hides temporaries. */
++    for (int index = 0; index < 3; ++index) {
++        if (!state->redirected[index]) {
++            continue;
++        }
++        state->source[index] = state->redirected[index]->secret->md.osfd;
++        state->temporary[index] = fcntl(state->source[index], F_DUPFD_CLOEXEC, 3);
++        if (state->temporary[index] < 0) {
++            error = errno == EINVAL ? EMFILE : errno;
++            goto finished;
++        }
++        error = posix_spawn_file_actions_adddup2(&state->actions,
++                                                 state->temporary[index], index);
++        if (error) {
++            goto finished;
++        }
++    }
++    for (int index = 0; index < 3; ++index) {
++        if (state->temporary[index] < 0) {
++            continue;
++        }
++        error = posix_spawn_file_actions_addclose(&state->actions, state->temporary[index]);
++        if (error) {
++            goto finished;
++        }
++        PRBool duplicate = PR_FALSE;
++        for (int earlier = 0; earlier < index; ++earlier) {
++            if (state->redirected[earlier] && state->source[earlier] == state->source[index]) {
++                duplicate = PR_TRUE;
++            }
++        }
++        if (state->source[index] >= 3 && !duplicate) {
++            error = posix_spawn_file_actions_addclose(&state->actions, state->source[index]);
++            if (error) {
++                goto finished;
++            }
++        }
++    }
++    if (attr && attr->currentDirectory) {
++        error = posix_spawn_file_actions_addchdir_np(&state->actions, attr->currentDirectory);
++        if (error) {
++            goto finished;
++        }
++    }
++    /* Like Unix fork/exec, stdio uses blocking shared open descriptions.
++     * Change only NONBLOCK; failed launches restore each changed source. */
++    for (int index = 0; index < 3; ++index) {
++        if (state->temporary[index] < 0) {
++            continue;
++        }
++        int flags = fcntl(state->temporary[index], F_GETFL);
++        if (flags < 0) {
++            error = errno;
++            goto finished;
++        }
++        if (flags & O_NONBLOCK) {
++            if (ioctl(state->temporary[index], FIONBIO, &state->nonblock[index]) != 0) {
++                error = errno;
++                goto finished;
++            }
++            state->changed[index] = PR_TRUE;
++        }
++    }
++    error = posix_spawn(pid, path, &state->actions, NULL, argv, environment);
++finished:
++    for (int index = 0; index < 3; ++index) {
++        if (state->temporary[index] >= 0) {
++            if (error && state->changed[index]) {
++                state->nonblock[index] = 1;
++                (void)ioctl(state->temporary[index], FIONBIO, &state->nonblock[index]);
++            }
++            close(state->temporary[index]);
++        }
++    }
++    if (state->initialized) {
++        posix_spawn_file_actions_destroy(&state->actions);
++    }
++    free(state->merged);
++    alix_environment_free(state->snapshot);
++    free(state);
++    return error;
++}
++#endif /* ALIX */
++
+ static PRProcess*
+ ForkAndExec(const char* path, char* const* argv,
+             char* const* envp, const PRProcessAttr* attr)
+ {
+     PRProcess* process;
++#if defined(ALIX)
++    process = PR_NEW(PRProcess);
++    if (!process) {
++        PR_SetError(PR_OUT_OF_MEMORY_ERROR, 0);
++        return NULL;
++    }
++    int error = _MD_alix_spawn(&process->md.pid, path, argv, envp, attr);
++    if (error) {
++        _PR_MD_MAP_DEFAULT_ERROR(error);
++        PR_DELETE(process);
++        return NULL;
++    }
++#else
+     int nEnv, idx;
+     char* const* childEnvp;
+     char** newEnvp = NULL;
+@@ -318,6 +492,8 @@
+     if (newEnvp) {
+         PR_DELETE(newEnvp);
+     }
++
++#endif /* ALIX */
+ 
+ #if defined(_PR_NATIVE_THREADS)
+     PR_Lock(pr_wp.ml);

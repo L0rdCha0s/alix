@@ -1,0 +1,29 @@
+--- a/nsprpub/pr/src/pthreads/ptio.c
++++ b/nsprpub/pr/src/pthreads/ptio.c
+@@ -26,7 +26,7 @@
+ #if defined(SOLARIS)
+ #include <sys/filio.h> /* to pick up FIONREAD */
+ #endif
+-#ifdef _PR_POLL_AVAILABLE
++#if defined(_PR_POLL_AVAILABLE) || defined(ALIX)
+ #include <poll.h>
+ #endif
+ #ifdef AIX
+@@ -176,7 +176,7 @@
+ 
+ #if defined(AIX4_1)
+ #define _PRSelectFdSetArg_t void*
+-#elif (defined(AIX) && !defined(AIX4_1)) || defined(SOLARIS) ||   \
++#elif defined(ALIX) || (defined(AIX) && !defined(AIX4_1)) || defined(SOLARIS) ||   \
+     defined(HPUX10_30) || defined(HPUX11) || defined(LINUX) ||    \
+     defined(__GNU__) || defined(__GLIBC__) || defined(FREEBSD) || \
+     defined(NETBSD) || defined(OPENBSD) || defined(NTO) ||        \
+@@ -3237,7 +3237,7 @@
+     (PRReservedFN)_PR_InvalidInt
+ };
+ 
+-#if defined(SOLARIS) || defined(LINUX) || defined(__GNU__) || \
++#if defined(ALIX) || defined(SOLARIS) || defined(LINUX) || defined(__GNU__) || \
+     defined(__GLIBC__) || defined(AIX) || defined(FREEBSD) || \
+     defined(NETBSD) || defined(OPENBSD) || defined(NTO) ||    \
+     defined(DARWIN) || defined(RISCOS)

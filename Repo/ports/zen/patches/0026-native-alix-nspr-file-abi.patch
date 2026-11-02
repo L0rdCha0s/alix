@@ -1,0 +1,61 @@
+--- a/nsprpub/pr/include/md/_unixos.h
++++ b/nsprpub/pr/include/md/_unixos.h
+@@ -591,7 +591,12 @@
+ #endif
+ 
+ typedef PRIntn (*_MD_Fstat64)(PRIntn osfd, _MDStat64* buf);
++#if defined(ALIX)
++/* Native open flags use the uint64_t ABI declared by Alix's fcntl.h. */
++typedef PRIntn (*_MD_Open64)(const char* path, uint64_t oflag, ...);
++#else
+ typedef PRIntn (*_MD_Open64)(const char* path, int oflag, ...);
++#endif
+ typedef PRIntn (*_MD_Stat64)(const char* path, _MDStat64* buf);
+ typedef _MDOff64_t (*_MD_Lseek64)(PRIntn osfd, _MDOff64_t, PRIntn whence);
+ typedef void* (*_MD_Mmap64)(void* addr, PRSize len, PRIntn prot, PRIntn flags,
+--- a/nsprpub/pr/src/md/unix/unix.c
++++ b/nsprpub/pr/src/md/unix/unix.c
+@@ -2470,6 +2470,19 @@
+ #error "I don't know yet"
+ #endif
+ 
++#if defined(ALIX)
++static int
++_MD_alix_stat_times_valid(const struct stat* sb)
++{
++    PRUint64 maximum = (PRUint64)(PR_INT64_MAX / PR_USEC_PER_SEC);
++    if (sb->st_mtime > maximum || sb->st_ctime > maximum) {
++        PR_SetError(PR_RANGE_ERROR, EOVERFLOW);
++        return -1;
++    }
++    return 0;
++}
++#endif
++
+ static int
+ _MD_convert_stat_to_fileinfo(const struct stat* sb,
+                              PRFileInfo* info)
+@@ -2490,6 +2503,11 @@
+ #endif /* defined(_PR_HAVE_LARGE_OFF_T) */
+     info->size = sb->st_size;
+ 
++#if defined(ALIX)
++    if (_MD_alix_stat_times_valid(sb) < 0) {
++        return -1;
++    }
++#endif
+     _MD_set_fileinfo_times(sb, info);
+     return 0;
+ } /* _MD_convert_stat_to_fileinfo */
+@@ -2508,6 +2526,11 @@
+ 
+     LL_I2L(info->size, sb->st_size);
+ 
++#if defined(ALIX)
++    if (_MD_alix_stat_times_valid(sb) < 0) {
++        return -1;
++    }
++#endif
+     _MD_set_fileinfo64_times(sb, info);
+     return 0;
+ } /* _MD_convert_stat64_to_fileinfo64 */

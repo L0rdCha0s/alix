@@ -1,7 +1,7 @@
 #include "usyscall.h"
 #include "libc.h"
-#ifdef ALIX_OWNED_FDS
 #include "errno.h"
+#ifdef ALIX_OWNED_FDS
 static int64_t owned_file_result(int64_t result)
 {
     if (result < 0) { errno = (int)-result; return -1; }
@@ -122,6 +122,7 @@ int sys_open(const char *path, uint64_t flags)
 #ifdef ALIX_OWNED_FDS
     return (int)owned_file_result(sys_file_io(SYSCALL_FILE_OPEN,(uintptr_t)path,flags,0,0));
 #else
+    if (flags & SYSCALL_OPEN_SYNC) { errno = ENOTSUP; return -1; }
     return (int)syscall2(SYSCALL_OPEN, (long)path, (long)flags);
 #endif
 }

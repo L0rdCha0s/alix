@@ -106,6 +106,14 @@ bool io_pipe_execute(io_request_t *request, io_service_result_t *result)
     fd_description_t *description = io_request_description(request);
     if (!io_pipe_description_valid(description)) { result->result = -EBADF; return true; }
     io_pipe_endpoint_t *endpoint = fd_description_context(description);
+    if (operation->opcode == IO_PIPE_AVAILABLE)
+    {
+        if (operation->count) return true;
+        spinlock_lock(&endpoint->pipe->lock);
+        result->result = (int64_t)endpoint->pipe->used;
+        spinlock_unlock(&endpoint->pipe->lock);
+        return true;
+    }
     bool writing = operation->opcode == IO_PIPE_WRITE;
     if ((operation->opcode != IO_PIPE_READ && !writing)) return true;
     if (writing != endpoint->writing) { result->result = -EBADF; return true; }

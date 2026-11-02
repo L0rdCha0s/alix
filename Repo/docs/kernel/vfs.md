@@ -46,6 +46,11 @@ Resolution supports:
 
 ## Protected user I/O
 
+Process-owned regular files support `O_SYNC` writes through the protected
+storage worker. Each successful nonempty write waits for data/metadata
+commit and a device cache flush. See [synchronous files](synchronous_files.md)
+for ownership, failure semantics and independent remount evidence.
+
 Syscall 66 implements native `readlink` through persistent VFS workers. The
 caller copies its path into a heap request and captures an owned cwd description
 with its credentials. Workers receive no caller stack or user address. Results

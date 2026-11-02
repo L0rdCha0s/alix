@@ -52,6 +52,9 @@ typedef struct
     size_t bytes, count;
 } vfs_directory_snapshot_t;
 int vfs_directory_snapshot(vfs_node_t *directory, vfs_directory_snapshot_t *out);
+/* Caller retains file. Allocate one coherent NUL-terminated raw-data copy
+ * under its data lock; callbacks are excluded. Output belongs to the caller. */
+int vfs_file_snapshot_owned(vfs_node_t *file, size_t maximum, unsigned char **data, size_t *size);
 void vfs_directory_snapshot_release(vfs_directory_snapshot_t *snapshot);
 
 typedef ssize_t (*vfs_read_cb_t)(vfs_node_t *node, size_t offset, void *buffer, size_t count, void *context);

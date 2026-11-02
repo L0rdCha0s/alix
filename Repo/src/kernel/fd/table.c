@@ -43,7 +43,7 @@ struct fd_table
     fd_retirement_item_t retirement;
     uint32_t references;
     spinlock_t lock;
-    size_t capacity;
+    size_t capacity, soft_limit, hard_limit;
     uint64_t next_ticket;
     bool closed;
     fd_table_entry_t entries[];
@@ -255,7 +255,7 @@ void *fd_description_context(const fd_description_t *description)
 
 int fd_description_initialize_status(fd_description_t *description, uint32_t flags)
 {
-    uint32_t known = FD_STATUS_READ | FD_STATUS_WRITE | FD_STATUS_APPEND | FD_STATUS_NONBLOCK;
+    uint32_t known = FD_STATUS_READ | FD_STATUS_WRITE | FD_STATUS_APPEND | FD_STATUS_NONBLOCK | FD_STATUS_SYNC;
     if (!description || (flags & ~known)) return -EINVAL;
     __atomic_store_n(&description->status_flags, flags, __ATOMIC_RELEASE);
     return 0;
@@ -269,10 +269,21 @@ uint32_t fd_description_status_flags(const fd_description_t *description)
 int fd_description_set_status_flags(fd_description_t *description, uint32_t flags)
 {
     uint32_t mutable = FD_STATUS_APPEND | FD_STATUS_NONBLOCK;
-    uint32_t known = mutable | FD_STATUS_READ | FD_STATUS_WRITE;
+    uint32_t known = mutable | FD_STATUS_READ | FD_STATUS_WRITE | FD_STATUS_SYNC;
     if (!description || (flags & ~known)) return -EINVAL;
     uint32_t old = __atomic_load_n(&description->status_flags, __ATOMIC_RELAXED), next;
     do { next = (old & ~mutable) | (flags & mutable); }
+    while (!__atomic_compare_exchange_n(&description->status_flags, &old, next, false,
+                                         __ATOMIC_RELEASE, __ATOMIC_RELAXED));
+    return 0;
+}
+
+int fd_description_update_status_flags(fd_description_t *description, uint32_t mask, uint32_t flags)
+{
+    uint32_t mutable = FD_STATUS_APPEND | FD_STATUS_NONBLOCK;
+    if (!description || (mask & ~mutable) || (flags & ~mask)) return -EINVAL;
+    uint32_t old = __atomic_load_n(&description->status_flags, __ATOMIC_RELAXED), next;
+    do { next = (old & ~mask) | flags; }
     while (!__atomic_compare_exchange_n(&description->status_flags, &old, next, false,
                                          __ATOMIC_RELEASE, __ATOMIC_RELAXED));
     return 0;
@@ -295,6 +306,7 @@ static fd_table_t *fd_table_create_internal(size_t capacity, fd_retirement_queue
     table->retirement_queue = queue;
     table->references = 1;
     table->capacity = capacity;
+    table->soft_limit = table->hard_limit = capacity;
     table->next_ticket = 1;
     spinlock_init(&table->lock);
     return table;
@@ -318,6 +330,27 @@ bool fd_table_get(fd_table_t *table)
 size_t fd_table_capacity(const fd_table_t *table)
 {
     return table ? table->capacity : 0;
+}
+
+int fd_table_get_limits(fd_table_t *table, uint64_t *soft, uint64_t *hard)
+{
+    if (!table || !soft || !hard) return -EINVAL;
+    spinlock_lock(&table->lock);
+    int result = table->closed ? -EBADF : 0;
+    if (!result) { *soft = table->soft_limit; *hard = table->hard_limit; }
+    spinlock_unlock(&table->lock);
+    return result;
+}
+
+int fd_table_set_limits(fd_table_t *table, uint64_t soft, uint64_t hard, bool raise_allowed)
+{
+    if (!table || soft > hard) return -EINVAL;
+    spinlock_lock(&table->lock);
+    int result = table->closed ? -EBADF :
+        hard > table->capacity || (hard > table->hard_limit && !raise_allowed) ? -EPERM : 0;
+    if (!result) { table->soft_limit = (size_t)soft; table->hard_limit = (size_t)hard; }
+    spinlock_unlock(&table->lock);
+    return result;
 }
 
 void fd_table_shutdown(fd_table_t *table)
@@ -402,7 +435,7 @@ int fd_table_install(fd_table_t *table, fd_description_t *description,
     }
     else
     {
-        for (size_t index = (size_t)minimum; index < table->capacity; ++index)
+        for (size_t index = (size_t)minimum; index < table->soft_limit; ++index)
         {
             if (!table->entries[index].description && !table->entries[index].reservation)
             {
@@ -437,7 +470,7 @@ int fd_table_install_pair(fd_table_t *table, fd_description_t *first,
     else
     {
         unsigned found = 0;
-        for (size_t index = 0; index < table->capacity && found < 2; ++index)
+        for (size_t index = 0; index < table->soft_limit && found < 2; ++index)
             if (!table->entries[index].description && !table->entries[index].reservation)
                 slots[found++] = (int)index;
         if (found == 2)
@@ -481,6 +514,10 @@ int fd_table_install_at(fd_table_t *table, int fd,
     if (table->closed)
     {
         result = -EBADF;
+    }
+    else if ((size_t)fd >= table->soft_limit)
+    {
+        result = -EMFILE;
     }
     else if (table->entries[fd].description || table->entries[fd].reservation)
     {
@@ -579,7 +616,7 @@ int fd_table_close_if(fd_table_t *table, int fd, fd_description_t *expected)
     return expected ? fd_table_remove(table, fd, expected) : -EINVAL;
 }
 
-int fd_table_dup(fd_table_t *table, int source, int minimum, uint32_t flags)
+static int fd_table_duplicate_from(fd_table_t *table, int source, int minimum, uint32_t flags, bool check_minimum)
 {
     if (!fd_table_valid(table, source))
     {
@@ -593,8 +630,8 @@ int fd_table_dup(fd_table_t *table, int source, int minimum, uint32_t flags)
     spinlock_lock(&table->lock);
     if (!table->closed && table->entries[source].description)
     {
-        result = -EMFILE;
-        for (size_t index = (size_t)minimum; index < table->capacity; ++index)
+        result = check_minimum && (size_t)minimum >= table->soft_limit ? -EINVAL : -EMFILE;
+        for (size_t index = (size_t)minimum; index < table->soft_limit; ++index)
         {
             if (!table->entries[index].description && !table->entries[index].reservation)
             {
@@ -613,6 +650,16 @@ int fd_table_dup(fd_table_t *table, int source, int minimum, uint32_t flags)
     }
     spinlock_unlock(&table->lock);
     return result;
+}
+
+int fd_table_dup(fd_table_t *table, int source, int minimum, uint32_t flags)
+{
+    return fd_table_duplicate_from(table, source, minimum, flags, false);
+}
+
+int fd_table_dup_minimum(fd_table_t *table, int source, int minimum, uint32_t flags)
+{
+    return fd_table_duplicate_from(table, source, minimum, flags, true);
 }
 
 static int fd_table_duplicate_to(fd_table_t *table, int source, int destination,
@@ -637,6 +684,10 @@ static int fd_table_duplicate_to(fd_table_t *table, int source, int destination,
         if (source == destination)
         {
             result = destination;
+        }
+        else if ((size_t)destination >= table->soft_limit)
+        {
+            result = -EBADF;
         }
         else if (table->entries[destination].reservation)
         {
@@ -780,7 +831,7 @@ int fd_table_reserve_deferred(fd_table_t *table, fd_description_t **out)
     spinlock_lock(&table->lock);
     if (table->closed) result = -EBADF;
     else if (!table->next_ticket || table->next_ticket == (uint64_t)-1) result = -EOVERFLOW;
-    else for (size_t index = 0; index < table->capacity; ++index)
+    else for (size_t index = 0; index < table->soft_limit; ++index)
     {
         fd_table_entry_t *entry = &table->entries[index];
         if (entry->description || entry->reservation) continue;
@@ -839,6 +890,7 @@ int fd_table_clone_deferred(fd_table_t *source, bool close_on_exec, fd_table_t *
         if (!fd_description_get(entry->description)) { result = -EOVERFLOW; break; }
         copy->entries[index] = *entry;
     }
+    if (!result) { copy->soft_limit = source->soft_limit; copy->hard_limit = source->hard_limit; }
     spinlock_unlock(&source->lock);
     if (result) fd_table_put(copy);
     else *out = copy;

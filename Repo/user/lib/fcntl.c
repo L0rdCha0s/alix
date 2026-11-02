@@ -33,7 +33,7 @@ int fcntl(int fd, int command, ...)
     if (command == F_SETFD)
         return fd_result(sys_file_io(SYSCALL_FILE_SETFD,source,(uint64_t)(int64_t)argument,0,0));
     return fd_result(sys_file_io(SYSCALL_FILE_DUP,source,(uint64_t)(int64_t)argument,
-                                  command == F_DUPFD_CLOEXEC ? SYSCALL_FILE_CLOEXEC : 0,0));
+                                  command == F_DUPFD_CLOEXEC ? SYSCALL_FILE_CLOEXEC : 0,SYSCALL_DUP_CHECK_MINIMUM));
 }
 
 int dup(int fd)

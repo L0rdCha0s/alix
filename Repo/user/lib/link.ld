@@ -49,6 +49,12 @@ SECTIONS
         *(.gcc_except_table*)
     } :text
 
+    /* Keep optional executable build notes in the existing text arena. */
+    .note.gnu.build-id : ALIGN(4)
+    {
+        KEEP(*(.note.gnu.build-id))
+    } :text
+
     . = ALIGN(0x1000);
 
     .data : ALIGN(16)

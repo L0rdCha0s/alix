@@ -41,6 +41,13 @@ the event executor and a live-caller reservation commit. Unlock is immediate
 without queue admission. See [whole-file locks](flock.md) for duplicate/close,
 conversion and cancellation semantics. Byte-range fcntl locks remain pending.
 
+`SYSCALL_FILE_IOCTL` takes fd, native request number, user pointer and payload
+size. FIONBIO/FIONREAD require exactly four bytes; FIOCLEX/FIONCLEX require a
+zero pointer and size. Nonblocking updates preserve unrelated status bits.
+Readable-byte queries pin the original description in the existing protected
+I/O services and perform checked copyout only in the live caller. See
+[descriptor controls](ioctl.md) for supported backends and native validation.
+
 Syscall 69 (`RESOURCE_USAGE`) returns a versioned 48-byte snapshot for the
 current process: clock frequency, sampled user/system ticks and minor/major
 fault counters. The kernel holds process ownership through a bounded guard,
@@ -104,6 +111,17 @@ loader/readiness services. Its child registry is separate from public FDs.
 allow retry after bad status copyout and prevent duplicate reaping. The current
 argv launcher uses an empty environment. See
 [child_processes.md](child_processes.md) for lifetime and native acceptance.
+
+`FILE_IO` also exposes `SYSTEM_INFO` and `HOSTNAME` metadata operations,
+independent of either FD namespace. Protected workers own the hostname
+snapshot; the live caller checks and copies the result. `PROCESS` operation 4
+returns the current primary group. See [system identity](system_identity.md)
+for the 325-byte uname wire format, build ID and credential semantics.
+
+GET_LIMIT/SET_LIMIT metadata operations use a 16-byte native resource pair.
+RLIMIT_NOFILE is enforced by the process's owned table across allocations and
+spawn inheritance; RLIMIT_AS reports the current absence of an aggregate
+address-space quota. See [descriptor limits](descriptor_limits.md).
 
 ## ABI / Entry (`src/arch/x86/syscall_entry.S`)
 

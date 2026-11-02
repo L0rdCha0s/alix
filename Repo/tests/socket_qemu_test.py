@@ -37,7 +37,8 @@ if __name__ == '__main__':
         try:
             run_native_elf('socket_test.elf',
                 ('SOCKET_QUERY_TEST: PASS endpoints=1 options=1 failed_copy=1 error_once=1 cpus=8',
-                 'SOCKET_TEST: PASS cpus=8 bytes=131072 blocking=1 nonblock=1 per_call=1 peek=1 aliases=1 eof=1 copy_checks=1'),
+                 'SOCKET_TEST: PASS cpus=8 bytes=131072 blocking=1 nonblock=1 per_call=1 peek=1 aliases=1 eof=1 copy_checks=1',
+                 'SOCKET_IOCTL_TEST: PASS cpus=8 nonblock=1 readable=1 peek_preserved=1 error_preserved=1 eof=1'),
                 ROOT / 'build/test-out/socket-native-qemu.log', 'native POSIX IPv4 TCP sockets', 120,
                 arguments=(str(server.server_address[1]), str(refused_port)), expected_wait_status=0,
                 fail_on_missing_markers_at_exit=True, pcap_path=ROOT / 'build/test-out/socket-native-network.pcap')

@@ -7,6 +7,8 @@
 typedef uint16_t in_port_t;
 typedef uint32_t in_addr_t;
 struct in_addr { in_addr_t s_addr; };
+/* Request layout only; native multicast membership is not implemented. */
+struct ip_mreq { struct in_addr imr_multiaddr, imr_interface; };
 struct in6_addr { union { uint8_t bytes[16]; uint16_t words[8]; uint32_t dwords[4]; } __data; };
 #define s6_addr __data.bytes
 #define s6_addr16 __data.words

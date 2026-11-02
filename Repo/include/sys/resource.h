@@ -10,7 +10,8 @@
 typedef uint64_t rlim_t;
 struct rlimit { rlim_t rlim_cur, rlim_max; };
 #define RLIM_INFINITY UINT64_MAX
-#define RLIMIT_AS 9
+#define RLIMIT_NOFILE SYSCALL_RESOURCE_NOFILE
+#define RLIMIT_AS SYSCALL_RESOURCE_AS
 #define RUSAGE_SELF SYSCALL_USAGE_SELF
 /* Native measured fields. No swap/file-backed paging is implemented yet, so
  * successful recoverable user faults are minor faults; major faults stay zero. */
@@ -24,6 +25,7 @@ struct rusage
 extern "C" {
 #endif
 int getrlimit(int resource, struct rlimit *limit);
+int setrlimit(int resource, const struct rlimit *limit);
 int getrusage(int who, struct rusage *usage);
 #ifdef __cplusplus
 }

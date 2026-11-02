@@ -11,8 +11,11 @@ This folder documents how the kernel boots, schedules work, manages memory, expo
 - Native user child launch and waiting: `docs/kernel/child_processes.md`
 - Memory (heap, paging, user mappings): `docs/kernel/memory.md`
 - VFS/filesystems/mounts: `docs/kernel/vfs.md`
+- Synchronous file writes and persistence: `docs/kernel/synchronous_files.md`
+- Enforced process descriptor limits: `docs/kernel/descriptor_limits.md`
 - AlixFS2 backend details: `docs/kernel/alixfs.md`
 - Syscalls, FDs, sockets: `docs/kernel/syscalls.md`
+- Kernel build identity, hostname and process credentials: `docs/kernel/system_identity.md`
 - Process-owned byte pipes: `docs/kernel/pipes.md`
 - Native poll/select readiness and cancellation: `docs/kernel/poll.md`
 - Native socket entry points and remaining network API work: `docs/kernel/sockets.md`

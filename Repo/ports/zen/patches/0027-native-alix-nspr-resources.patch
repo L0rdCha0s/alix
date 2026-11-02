@@ -1,0 +1,46 @@
+--- a/nsprpub/pr/src/md/unix/uxrng.c
++++ b/nsprpub/pr/src/md/unix/uxrng.c
+@@ -8,6 +8,26 @@
+ #include <unistd.h>
+ #include <errno.h>
+ #include <sys/time.h>
++
++#if defined(ALIX)
++
++/* PR_GetRandomNoise permits a short result. Native getentropy supplies at
++ * most 256 bytes per call; do not substitute predictable clocks on failure. */
++extern PRSize
++_PR_MD_GetRandomNoise(void* buf, PRSize size)
++{
++    if (!size) {
++        return 0;
++    }
++    PRSize count = size > 256 ? 256 : size;
++    if (getentropy(buf, count) != 0) {
++        _PR_MD_MAP_DEFAULT_ERROR(errno);
++        return 0;
++    }
++    return count;
++}
++
++#else
+ 
+ #if defined(SOLARIS)
+ 
+@@ -115,3 +135,5 @@
+ 
+     return n;
+ } /* end _PR_MD_GetRandomNoise() */
++
++#endif /* ALIX */
+--- a/nsprpub/pr/src/misc/prsystem.c
++++ b/nsprpub/pr/src/misc/prsystem.c
+@@ -243,7 +243,7 @@
+ {
+     PRUint64 bytes = 0;
+ 
+-#if defined(LINUX) || defined(SOLARIS)
++#if defined(LINUX) || defined(SOLARIS) || defined(ALIX)
+ 
+     long pageSize = sysconf(_SC_PAGESIZE);
+     long pageCount = sysconf(_SC_PHYS_PAGES);

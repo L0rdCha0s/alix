@@ -8,7 +8,9 @@ ZEN_TERMIOS_OBJECT := $(USER_OBJDIR)/lib/termios.o
 ZEN_POLL_OBJECT := $(USER_OBJDIR)/lib/poll.o
 ZEN_SOCKET_OBJECT := $(USER_OBJDIR)/lib/socket-owned.o
 ZEN_SELECT_OBJECT := $(USER_OBJDIR)/lib/select-owned.o
-ZEN_USER_RUNTIME_OBJECTS := $(filter-out $(USER_OBJDIR)/lib/syscall.o $(USER_OBJDIR)/lib/libc.o $(USER_OBJDIR)/lib/socket.o $(USER_OBJDIR)/lib/select.o,$(USER_COMMON_OBJECTS)) $(ZEN_UPSTREAM_LIBC) $(ZEN_OWNED_SYSCALL) $(ZEN_FCNTL_OBJECT) $(ZEN_TERMIOS_OBJECT) $(ZEN_POLL_OBJECT) $(ZEN_SOCKET_OBJECT) $(ZEN_SELECT_OBJECT)
+ZEN_IOCTL_OBJECT := $(USER_OBJDIR)/lib/ioctl-owned.o
+ZEN_RESOURCE_OBJECT := $(USER_OBJDIR)/lib/resource-owned.o
+ZEN_USER_RUNTIME_OBJECTS := $(filter-out $(USER_OBJDIR)/lib/syscall.o $(USER_OBJDIR)/lib/libc.o $(USER_OBJDIR)/lib/socket.o $(USER_OBJDIR)/lib/select.o $(USER_OBJDIR)/lib/ioctl.o $(USER_OBJDIR)/lib/resource.o,$(USER_COMMON_OBJECTS)) $(ZEN_UPSTREAM_LIBC) $(ZEN_OWNED_SYSCALL) $(ZEN_FCNTL_OBJECT) $(ZEN_TERMIOS_OBJECT) $(ZEN_POLL_OBJECT) $(ZEN_SOCKET_OBJECT) $(ZEN_SELECT_OBJECT) $(ZEN_IOCTL_OBJECT) $(ZEN_RESOURCE_OBJECT)
 
 $(ZEN_UPSTREAM_LIBC): user/lib/libc.c
 	@mkdir -p $(@D)
@@ -26,11 +28,19 @@ $(ZEN_SELECT_OBJECT): user/lib/select.c
 	@mkdir -p $(@D)
 	$(CC) $(USER_CFLAGS) -DALIX_OWNED_FDS=1 -c -o $@ $<
 
+$(ZEN_IOCTL_OBJECT): user/lib/ioctl.c
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -DALIX_OWNED_FDS=1 -c -o $@ $<
+
+$(ZEN_RESOURCE_OBJECT): user/lib/resource.c
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -DALIX_OWNED_FDS=1 -c -o $@ $<
+
 $(ZEN_FCNTL_OBJECT): user/lib/fcntl.c
 	@mkdir -p $(@D)
 	$(CC) $(USER_CFLAGS) -c -o $@ $<
 
--include $(ZEN_UPSTREAM_LIBC:.o=.d) $(ZEN_OWNED_SYSCALL:.o=.d) $(ZEN_FCNTL_OBJECT:.o=.d) $(ZEN_TERMIOS_OBJECT:.o=.d) $(ZEN_POLL_OBJECT:.o=.d) $(ZEN_SOCKET_OBJECT:.o=.d) $(ZEN_SELECT_OBJECT:.o=.d)
+-include $(ZEN_UPSTREAM_LIBC:.o=.d) $(ZEN_OWNED_SYSCALL:.o=.d) $(ZEN_FCNTL_OBJECT:.o=.d) $(ZEN_TERMIOS_OBJECT:.o=.d) $(ZEN_POLL_OBJECT:.o=.d) $(ZEN_SOCKET_OBJECT:.o=.d) $(ZEN_SELECT_OBJECT:.o=.d) $(ZEN_IOCTL_OBJECT:.o=.d) $(ZEN_RESOURCE_OBJECT:.o=.d)
 
 $(USER_OBJDIR)/tests/terminal_test.o: tests/terminal_test.c
 	@mkdir -p $(@D)
@@ -179,6 +189,90 @@ zen-flock-qemu-test: all $(USER_OBJDIR)/flock_test.elf
 	python3 tests/flock_qemu_test.py
 flock-contract-test:
 	python3 tests/flock_contract_test.py
+
+$(USER_OBJDIR)/tests/ioctl_test.o: tests/ioctl_test.c
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+$(USER_OBJDIR)/tests/ioctl_legacy_test.o: tests/ioctl_legacy_test.c
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+$(USER_OBJDIR)/ioctl_test.elf: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/ioctl_test.o $(USER_LD_SCRIPT)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/ioctl_test.o
+$(USER_OBJDIR)/ioctl_legacy_test.elf: $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/tests/ioctl_legacy_test.o $(USER_LD_SCRIPT)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/tests/ioctl_legacy_test.o
+.PHONY: zen-ioctl-qemu-test
+zen-ioctl-qemu-test: all $(USER_OBJDIR)/ioctl_test.elf $(USER_OBJDIR)/ioctl_legacy_test.elf
+	python3 tests/ioctl_qemu_test.py
+
+$(USER_OBJDIR)/tests/system_identity_test.o: tests/system_identity_test.c
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+$(USER_OBJDIR)/system_identity_test.elf: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/system_identity_test.o $(USER_LD_SCRIPT)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/system_identity_test.o
+.PHONY: zen-system-identity-qemu-test
+zen-system-identity-qemu-test: all $(USER_OBJDIR)/system_identity_test.elf
+	python3 tests/system_identity_qemu_test.py
+.PHONY: zen-nspr-file-abi-qemu-test
+zen-nspr-file-abi-qemu-test: all $(ZEN_USER_RUNTIME_OBJECTS) $(ZEN_SSP_ARCHIVE)
+	python3 ports/zen/build_nspr_file_abi_test.py
+	python3 tests/nspr_file_abi_qemu_test.py
+
+.PHONY: zen-nspr-resources-qemu-test
+zen-nspr-resources-qemu-test: all $(ZEN_USER_RUNTIME_OBJECTS) $(ZEN_SSP_ARCHIVE)
+	python3 ports/zen/build_nspr_resources_test.py
+	python3 tests/nspr_resources_qemu_test.py
+
+$(USER_OBJDIR)/tests/synchronous_file_test.o: tests/synchronous_file_test.c
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+
+$(USER_OBJDIR)/tests/synchronous_file_legacy_test.o: tests/synchronous_file_legacy_test.c
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+
+$(USER_OBJDIR)/synchronous_file_test.elf: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/synchronous_file_test.o $(USER_LD_SCRIPT)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/synchronous_file_test.o
+
+$(USER_OBJDIR)/synchronous_file_legacy_test.elf: $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/tests/synchronous_file_legacy_test.o $(USER_LD_SCRIPT)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/tests/synchronous_file_legacy_test.o
+
+.PHONY: zen-synchronous-file-qemu-test
+zen-synchronous-file-qemu-test: all $(USER_OBJDIR)/synchronous_file_test.elf $(USER_OBJDIR)/synchronous_file_legacy_test.elf
+	python3 tests/synchronous_file_qemu_test.py
+
+$(USER_OBJDIR)/tests/fd_limits_test.o: tests/fd_limits_test.c
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+
+$(USER_OBJDIR)/tests/fd_limits_legacy_test.o: tests/fd_limits_legacy_test.c
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+
+$(USER_OBJDIR)/fd_limits_test.elf: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/fd_limits_test.o $(USER_LD_SCRIPT)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/fd_limits_test.o
+
+$(USER_OBJDIR)/fd_limits_legacy_test.elf: $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/tests/fd_limits_legacy_test.o $(USER_LD_SCRIPT)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/tests/fd_limits_legacy_test.o
+
+.PHONY: zen-fd-limits-qemu-test
+zen-fd-limits-qemu-test: all $(USER_OBJDIR)/fd_limits_test.elf $(USER_OBJDIR)/fd_limits_legacy_test.elf
+	python3 tests/fd_limits_qemu_test.py
+
+$(USER_OBJDIR)/tests/spawn_cwd_test.o: tests/spawn_cwd_test.c
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+
+$(USER_OBJDIR)/spawn_cwd_test.elf: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/spawn_cwd_test.o $(USER_LD_SCRIPT)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/spawn_cwd_test.o
+
+.PHONY: zen-spawn-cwd-qemu-test
+zen-spawn-cwd-qemu-test: all $(USER_OBJDIR)/spawn_cwd_test.elf
+	python3 tests/spawn_cwd_qemu_test.py
+
+.PHONY: zen-nspr-spawn-qemu-test
+zen-nspr-spawn-qemu-test: all $(ZEN_USER_RUNTIME_OBJECTS) $(ZEN_SSP_ARCHIVE)
+	python3 ports/zen/build_nspr_spawn_test.py
+	python3 tests/nspr_spawn_qemu_test.py
 
 $(USER_OBJDIR)/tests/executable_path_test.o: tests/executable_path_test.c
 	@mkdir -p $(@D)

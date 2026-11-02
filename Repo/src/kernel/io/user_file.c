@@ -13,7 +13,8 @@
 #include <stdint.h>
 
 _Static_assert(FD_STATUS_READ == SYSCALL_OPEN_READ && FD_STATUS_WRITE == SYSCALL_OPEN_WRITE &&
-               FD_STATUS_APPEND == SYSCALL_OPEN_APPEND && FD_STATUS_NONBLOCK == SYSCALL_OPEN_NONBLOCK,
+               FD_STATUS_APPEND == SYSCALL_OPEN_APPEND && FD_STATUS_NONBLOCK == SYSCALL_OPEN_NONBLOCK &&
+               FD_STATUS_SYNC == SYSCALL_OPEN_SYNC,
                "private descriptor status wire flags");
 
 typedef enum { USER_STORAGE, USER_TCP, USER_DNS, USER_PIPE, USER_AUDIO, USER_POLL, USER_FLOCK } user_file_service_t;
@@ -198,7 +199,30 @@ static int64_t user_file_finish(user_file_service_t kind, uint32_t operation,
     io_request_t *request = NULL;
     if (!result) result = process_io_result_current(&request, &status);
     int64_t value = result ? result : status.result;
-    if (!result && !value && operation == SYSCALL_FILE_FLOCK)
+    if (!result && !value && (operation == SYSCALL_FILE_SYSTEM_INFO || operation == SYSCALL_FILE_HOSTNAME))
+    {
+        io_vfs_operation_t *work = io_request_buffer(request);
+        syscall_utsname_t *info = (void *)work->data;
+        if (operation == SYSCALL_FILE_SYSTEM_INFO)
+            value = capacity == sizeof(*info) && user_copy_to_user(output, info, sizeof(*info)) ? 0 : -EFAULT;
+        else
+        {
+            size_t length = strnlen(info->nodename, sizeof(info->nodename));
+            if (length == sizeof(info->nodename)) value = -EIO;
+            else if (capacity <= length) value = -ENAMETOOLONG;
+            else if (!user_copy_to_user(output, info->nodename, length + 1)) value = -EFAULT;
+        }
+    }
+    else if (!result && value >= 0 && operation == SYSCALL_FILE_IOCTL)
+    {
+        void *data = kind == USER_TCP ? (void *)((io_tcp_operation_t *)io_request_buffer(request))->data :
+                     kind == USER_PIPE ? (void *)((io_pipe_operation_t *)io_request_buffer(request))->data :
+                                         (void *)((io_vfs_operation_t *)io_request_buffer(request))->data;
+        int32_t *reply = data;
+        *reply = value > INT32_MAX ? INT32_MAX : (int32_t)value;
+        value = capacity == sizeof(*reply) && user_copy_to_user(output, reply, sizeof(*reply)) ? 0 : -EFAULT;
+    }
+    else if (!result && !value && operation == SYSCALL_FILE_FLOCK)
     {
         fd_description_t *lease = NULL;
         result = io_request_take_result(request, &lease);
@@ -279,7 +303,7 @@ static int64_t user_file_finish(user_file_service_t kind, uint32_t operation,
 static int64_t user_file_open(const char *path, uint64_t flags)
 {
     uint64_t known = SYSCALL_OPEN_READ | SYSCALL_OPEN_WRITE | SYSCALL_OPEN_CREATE |
-                     SYSCALL_OPEN_TRUNCATE | SYSCALL_OPEN_EXCLUSIVE | SYSCALL_OPEN_APPEND | SYSCALL_OPEN_CLOEXEC | SYSCALL_OPEN_NONBLOCK;
+                     SYSCALL_OPEN_TRUNCATE | SYSCALL_OPEN_EXCLUSIVE | SYSCALL_OPEN_APPEND | SYSCALL_OPEN_CLOEXEC | SYSCALL_OPEN_NONBLOCK | SYSCALL_OPEN_SYNC;
     if (flags & ~known) return -EINVAL;
     spinlock_preempt_disable();
     uint32_t uid = 0, gid = 0;
@@ -340,6 +364,108 @@ static int64_t user_file_flock(uint64_t fd, uint32_t flags)
     }
     spinlock_preempt_enable();
     return result ? result : user_file_finish(USER_FLOCK, SYSCALL_FILE_FLOCK, NULL, 0, 0);
+}
+
+static int64_t user_file_ioctl(uint64_t fd, uint64_t command, void *argument, uint64_t bytes)
+{
+    if (command == SYSCALL_IOCTL_FIOCLEX || command == SYSCALL_IOCTL_FIONCLEX)
+    {
+        if (argument || bytes) return -EINVAL;
+        spinlock_preempt_disable();
+        fd_table_t *table = process_current_fd_table();
+        int result = !table ? -ESRCH : fd > INT32_MAX ? -EBADF :
+            fd_table_set_flags(table, (int)fd, command == SYSCALL_IOCTL_FIOCLEX ? FD_TABLE_CLOEXEC : 0);
+        spinlock_preempt_enable();
+        return result;
+    }
+    bool reading = command == SYSCALL_IOCTL_FIONREAD;
+    bool nonblock = command == SYSCALL_IOCTL_FIONBIO;
+    if ((reading || nonblock) && bytes != sizeof(int32_t)) return -EINVAL;
+    spinlock_preempt_disable();
+    fd_description_t *description = NULL;
+    int result = user_file_pin(fd, &description);
+    if (!result && nonblock)
+    {
+        int32_t enabled = 0;
+        if (!user_copy_from_user(&enabled, argument, sizeof(enabled))) result = -EFAULT;
+        else result = fd_description_update_status_flags(description, FD_STATUS_NONBLOCK,
+                                                           enabled ? FD_STATUS_NONBLOCK : 0);
+        fd_description_put(description);
+        spinlock_preempt_enable();
+        return result;
+    }
+    if (!reading)
+    {
+        fd_description_put(description);
+        spinlock_preempt_enable();
+        return result ? result : -ENOTTY;
+    }
+    if (!result && (!argument || !user_ptr_range_valid(argument, sizeof(int32_t)))) result = -EFAULT;
+    bool tcp = !result && io_tcp_description_valid(description);
+    bool pipe = !result && io_pipe_description_valid(description);
+    if (!result && !tcp && !pipe && !io_vfs_description_valid(description)) result = -ENOTTY;
+    user_file_service_t kind = tcp ? USER_TCP : pipe ? USER_PIPE : USER_STORAGE;
+    size_t header = tcp ? sizeof(io_tcp_operation_t) : pipe ? sizeof(io_pipe_operation_t) : sizeof(io_vfs_operation_t);
+    io_request_t *request = NULL;
+    if (!result) result = user_file_create(kind, header + sizeof(int32_t), description, NULL, &request);
+    else fd_description_put(description);
+    if (!result)
+    {
+        if (tcp) ((io_tcp_operation_t *)io_request_buffer(request))->opcode = IO_TCP_AVAILABLE;
+        else if (pipe) ((io_pipe_operation_t *)io_request_buffer(request))->opcode = IO_PIPE_AVAILABLE;
+        else ((io_vfs_operation_t *)io_request_buffer(request))->opcode = IO_VFS_AVAILABLE;
+        result = user_file_submit(kind, request);
+    }
+    spinlock_preempt_enable();
+    return result ? result : user_file_finish(kind, SYSCALL_FILE_IOCTL, argument, sizeof(int32_t), 0);
+}
+
+static int64_t user_resource_limit(bool setting, uint64_t resource, void *data, uint64_t bytes)
+{
+    if (bytes != sizeof(syscall_rlimit_t) ||
+        (resource != SYSCALL_RESOURCE_NOFILE && resource != SYSCALL_RESOURCE_AS)) return -EINVAL;
+    if (setting && resource == SYSCALL_RESOURCE_AS) return -ENOTSUP;
+    if (!data || !user_ptr_range_valid(data, sizeof(syscall_rlimit_t))) return -EFAULT;
+    spinlock_preempt_disable();
+    process_t *process = current_process_local();
+    fd_table_t *table = process_current_fd_table();
+    syscall_rlimit_t limit = { UINT64_MAX, UINT64_MAX };
+    int result = !process || !process->is_user || !table ? -ESRCH : 0;
+    if (!result && setting)
+    {
+        if (!user_copy_from_user(&limit, data, sizeof(limit))) result = -EFAULT;
+        else result = fd_table_set_limits(table, limit.current, limit.maximum, process_get_uid(process) == 0);
+    }
+    else if (!result)
+    {
+        /* No aggregate address-space quota is currently imposed. */
+        if (resource == SYSCALL_RESOURCE_NOFILE) result = fd_table_get_limits(table, &limit.current, &limit.maximum);
+        if (!result && !user_copy_to_user(data, &limit, sizeof(limit))) result = -EFAULT;
+    }
+    spinlock_preempt_enable();
+    return result;
+}
+
+static int64_t user_system_info(uint32_t operation, void *output, uint64_t capacity)
+{
+    if (operation == SYSCALL_FILE_SYSTEM_INFO && capacity != sizeof(syscall_utsname_t)) return -EINVAL;
+    if (operation == SYSCALL_FILE_HOSTNAME && !capacity) return -ENAMETOOLONG;
+    size_t shape = operation == SYSCALL_FILE_SYSTEM_INFO ? sizeof(syscall_utsname_t) : 1;
+    if (!output || !user_ptr_range_valid(output, shape)) return -EFAULT;
+    spinlock_preempt_disable();
+    uint32_t uid = 0, gid = 0;
+    fd_description_t *cwd = process_acquire_cwd_owner(current_process_local(), &uid, &gid);
+    io_request_t *request = NULL;
+    int result = cwd ? user_file_create_identity(USER_STORAGE, sizeof(io_vfs_operation_t) + sizeof(syscall_utsname_t),
+                                                  NULL, cwd, uid, gid, &request) : -ENOMEM;
+    if (!result)
+    {
+        io_vfs_operation_t *work = io_request_buffer(request);
+        work->opcode = IO_VFS_SYSTEM_INFO; work->count = sizeof(syscall_utsname_t);
+        result = user_file_submit(USER_STORAGE, request);
+    }
+    spinlock_preempt_enable();
+    return result ? result : user_file_finish(USER_STORAGE, operation, output, (size_t)capacity, 0);
 }
 
 static int64_t user_path_mutation(uint32_t operation, const char *path, const char *new_path, uint64_t flags)
@@ -949,6 +1075,14 @@ int64_t io_user_file_dispatch(uint32_t operation, uint64_t first, uint64_t secon
         case SYSCALL_FILE_FLOCK:
             if (second > UINT32_MAX || third || fourth) return -EINVAL;
             return user_file_flock(first, (uint32_t)second);
+        case SYSCALL_FILE_IOCTL:
+            return user_file_ioctl(first, second, (void *)third, fourth);
+        case SYSCALL_FILE_SYSTEM_INFO: case SYSCALL_FILE_HOSTNAME:
+            if (third || fourth) return -EINVAL;
+            return user_system_info(operation, (void *)first, second);
+        case SYSCALL_FILE_GET_LIMIT: case SYSCALL_FILE_SET_LIMIT:
+            if (fourth) return -EINVAL;
+            return user_resource_limit(operation == SYSCALL_FILE_SET_LIMIT, first, (void *)second, third);
         case SYSCALL_FILE_REMOVE: case SYSCALL_FILE_RENAME:
             return user_path_mutation(operation, (const char *)first, (const char *)second, third);
         default: break;
@@ -984,8 +1118,9 @@ int64_t io_user_file_dispatch(uint32_t operation, uint64_t first, uint64_t secon
             result = second <= UINT32_MAX ? fd_table_set_flags(table, (int)first, (uint32_t)second) : -EINVAL;
             break;
         case SYSCALL_FILE_DUP:
-            result = second <= INT32_MAX && third <= UINT32_MAX ?
-                fd_table_dup(table, (int)first, (int)second, (uint32_t)third) : -EINVAL;
+            result = second <= INT32_MAX && third <= UINT32_MAX && fourth <= SYSCALL_DUP_CHECK_MINIMUM ?
+                (fourth ? fd_table_dup_minimum(table, (int)first, (int)second, (uint32_t)third) :
+                          fd_table_dup(table, (int)first, (int)second, (uint32_t)third)) : -EINVAL;
             break;
         case SYSCALL_FILE_DUP2:
             result = second <= INT32_MAX ? fd_table_dup2(table, (int)first, (int)second) : -EBADF;

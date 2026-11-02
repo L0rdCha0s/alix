@@ -65,7 +65,9 @@ def main(cxx=False):
         if ("syscall.o" in names or names.count("syscall-owned.o") != 1 or names.count("fcntl.o") != 1 or
                 "libc.o" in names or names.count("libc-upstream.o") != 1 or
                 "socket.o" in names or names.count("socket-owned.o") != 1 or
-                "select.o" in names or names.count("select-owned.o") != 1):
+                "select.o" in names or names.count("select-owned.o") != 1 or
+                "ioctl.o" in names or names.count("ioctl-owned.o") != 1 or
+                "resource.o" in names or names.count("resource-owned.o") != 1):
             raise RuntimeError("upstream links require the owned-FD runtime; use the current make zen-* target")
         for obj in objects:
             path = Path(obj)

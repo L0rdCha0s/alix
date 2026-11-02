@@ -140,7 +140,10 @@ USER_COMMON_SOURCES := \
 	$(USER_DIR)/lib/netdb.c \
 	$(USER_DIR)/lib/pwd.c \
 	$(USER_DIR)/lib/select.c \
+	$(USER_DIR)/lib/ioctl.c \
+	$(USER_DIR)/lib/utsname.c \
 	$(USER_DIR)/lib/process_posix.c \
+	$(USER_DIR)/lib/resource.c \
 	$(USER_DIR)/lib/process_spawn.c \
 	$(USER_DIR)/lib/spawn.c \
 	$(USER_DIR)/lib/filesystem_posix.c \
@@ -463,7 +466,7 @@ $(USER_OBJDIR)/crypto/%.o: $(CRYPTO_DIR)/%.c
 $(USER_OBJDIR)/crypto/rsa.o: USER_CFLAGS += -DRSA_DEBUG_LOG=0
 
 $(KERNEL_ELF): $(C_OBJECTS) $(ASM_OBJECTS) $(KERNEL_LD)
-	$(LD) -nostdlib -z max-page-size=0x1000 -T $(KERNEL_LD) -o $@ $(C_OBJECTS) $(ASM_OBJECTS)
+	$(LD) -nostdlib --build-id=sha1 -z max-page-size=0x1000 -T $(KERNEL_LD) -o $@ $(C_OBJECTS) $(ASM_OBJECTS)
 
 $(USER_OBJDIR)/atk_demo.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/atk_demo/atk_demo.o $(USER_LD_SCRIPT)
 	@mkdir -p $(dir $@)

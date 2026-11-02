@@ -5,7 +5,7 @@
 
 #define IO_PIPE_CAPACITY 16384u
 #define IO_PIPE_ATOMIC 4096u
-typedef enum { IO_PIPE_READ, IO_PIPE_WRITE } io_pipe_opcode_t;
+typedef enum { IO_PIPE_READ, IO_PIPE_WRITE, IO_PIPE_AVAILABLE } io_pipe_opcode_t;
 typedef struct
 {
     uint32_t opcode, reserved;

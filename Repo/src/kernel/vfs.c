@@ -3290,6 +3290,31 @@ ssize_t vfs_realpath_snapshot(vfs_node_t *cwd, const char *path, char *buffer, s
     return length;
 }
 
+int vfs_file_snapshot_owned(vfs_node_t *file, size_t maximum, unsigned char **data, size_t *size)
+{
+    if (data) *data = NULL;
+    if (size) *size = 0;
+    if (!file || !data || !size || !maximum) return -EINVAL;
+    vfs_lock_node_data(file);
+    int error = file->type != VFS_NODE_FILE ? -EINVAL :
+        file->read_cb || file->write_cb ? -ENOTSUP :
+        file->size > maximum || file->size == SIZE_MAX ? -EFBIG : 0;
+    unsigned char *copy = error ? NULL : malloc(file->size + 1);
+    if (!error && !copy) error = -ENOMEM;
+    if (!error)
+    {
+        if (file->size && !file->data) error = -EIO;
+        else
+        {
+            if (file->size) memcpy(copy, file->data, file->size);
+            copy[file->size] = 0; *data = copy; *size = file->size;
+        }
+    }
+    vfs_unlock_node_data(file);
+    if (error) free(copy);
+    return error;
+}
+
 int vfs_path_stat_snapshot(vfs_node_t *cwd, const char *path, bool follow_final,
                             uint32_t uid, uint32_t gid, vfs_stat_snapshot_t *output)
 {

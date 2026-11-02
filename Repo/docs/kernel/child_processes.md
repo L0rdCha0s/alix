@@ -19,13 +19,22 @@ heap-owned. The new stack belongs to the child, including its copied environment
 and pointer vector; CRT imports that environment before preinit/constructors.
 
 `posix_spawn` and `posix_spawnp` expose this extended interface through
-`include/spawn.h`. File actions support ordered close, dup2 and open. A self-dup
+`include/spawn.h`. File actions support ordered close, dup2, open and
+`posix_spawn_file_actions_addchdir_np`. A self-dup
 clears CLOEXEC, and open preserves requested CLOEXEC. PATH lookup uses a snapshot
 of the parent's environment and applies actions only once across candidates.
 Explicit empty environments remain empty. Signal masks and default-disposition
 attributes are supported; ignored dispositions otherwise survive launch and
 caught handlers reset. RESETIDS uses Alix's existing single identity policy.
 Process groups and scheduling attributes return `ENOTSUP` during spawn.
+
+The chdir action copies its path into the action object, then the syscall copies
+it into registered launch storage before submission. The protected loader
+resolves it against the launch record's current cwd, retains a new directory
+owner and replaces only that record's owner. It never changes the caller's cwd.
+Later relative opens, directory actions, executable paths and PATH candidates
+use the updated child directory. Failed resolution and allocation release
+their node references; failed launches leave PID output untouched.
 
 The protected loader snapshots the resolved file's absolute VFS path before
 publishing the child. `alix_get_executable_path` in `unistd.h` returns that
@@ -82,6 +91,8 @@ The retained kernel-service factory regression also passes ASan/UBSan.
 ```sh
 make zen-process-spawn-qemu-test
 make zen-posix-spawn-qemu-test
+make zen-spawn-cwd-qemu-test
+make zen-nspr-spawn-qemu-test
 python3 tests/process_child_contract_test.py
 python3 tests/spawn_environment_contract_test.py
 python3 tests/process_environment_stack_test.py
@@ -95,3 +106,25 @@ and child-stack encoding also pass host sanitizer tests. The upstream shell now
 uses native spawn for its command and Wasm-worker paths, removing its fork/exec
 link requirement. A `sh` executable is still required by `os.spawn` and has not
 been installed; full shell command compatibility is not claimed.
+
+`spawn-cwd-qemu.log` additionally covers 24 children launched by eight pinned
+CPUs, ordered relative opens, owned action paths, absolute/relative executables,
+relative PATH lookup, cwd visibility before main and parent isolation through
+successful and failed launches. The production cwd action/capture code passes
+ASan/UBSan ownership and allocation-failure checks.
+
+NSPR's Alix process backend now uses native posix_spawn. Its helper snapshots
+the native environment, merges NSPR_INHERIT_FDS without changing the parent,
+and prepares all redirected sources in CLOEXEC temporaries before dup2 actions.
+This supports crossed standard descriptors and child-only cwd changes. Like
+Unix fork/exec, successful stdio redirection clears nonblocking status on the
+shared open descriptions; failed launch restores changed nonblocking bits.
+Other status and original CLOEXEC flags remain intact.
+
+The actual helper passes 25 native child launches with eight pinned callers,
+stdin/stdout/stderr pipes, crossed descriptors, inherited/explicit/empty
+environments, constructor-time state, failure restoration and descriptor leak
+checks. An ASan/UBSan host fixture faults every allocation and descriptor
+preparation step, including aliased sources. The complete upstream process
+source compiles. These are helper/component results; full NSPR initialization,
+its wait daemon and the Zen application have not been verified.

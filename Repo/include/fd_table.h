@@ -9,6 +9,7 @@
 #define FD_STATUS_WRITE (1u << 1)
 #define FD_STATUS_APPEND (1u << 16)
 #define FD_STATUS_NONBLOCK (1u << 18)
+#define FD_STATUS_SYNC (1u << 19)
 
 typedef struct fd_description fd_description_t;
 typedef struct fd_table fd_table_t;
@@ -88,6 +89,8 @@ void *fd_description_context(const fd_description_t *description);
 int fd_description_initialize_status(fd_description_t *description, uint32_t flags);
 uint32_t fd_description_status_flags(const fd_description_t *description);
 int fd_description_set_status_flags(fd_description_t *description, uint32_t flags);
+/* Change only selected mutable bits; other status/access bits remain intact. */
+int fd_description_update_status_flags(fd_description_t *description, uint32_t mask, uint32_t flags);
 /* Immutable identity query; caller holds a description reference. */
 bool fd_description_is_deferred_to(const fd_description_t *description, const fd_retirement_queue_t *queue);
 
@@ -112,6 +115,12 @@ int fd_table_reservation_commit(fd_description_t *reservation, fd_description_t 
 int fd_table_clone_deferred(fd_table_t *source, bool close_on_exec, fd_table_t **out);
 void fd_table_put(fd_table_t *table);
 size_t fd_table_capacity(const fd_table_t *table);
+/* Limits constrain new allocation, preserving access to existing high slots.
+ * Raising the hard limit requires caller authorization and cannot exceed the
+ * immutable physical capacity. An admitted OPEN reservation may still commit
+ * after a concurrent reduction. Clones inherit both limits and existing slots. */
+int fd_table_get_limits(fd_table_t *table, uint64_t *soft, uint64_t *hard);
+int fd_table_set_limits(fd_table_t *table, uint64_t soft, uint64_t hard, bool raise_allowed);
 /* Atomically prevent further lookups/mutations, then drop slot references
  * outside the lock. Idempotent. Existing operation pins remain valid. The
  * caller's reference keeps the table alive through callbacks and draining.
@@ -139,6 +148,8 @@ int fd_table_close(fd_table_t *table, int fd);
  * while pinned; a replacement slot returns -EAGAIN and remains untouched. */
 int fd_table_close_if(fd_table_t *table, int fd, fd_description_t *expected);
 int fd_table_dup(fd_table_t *table, int source, int minimum, uint32_t flags);
+/* F_DUPFD variants reject a minimum outside the current soft limit as EINVAL. */
+int fd_table_dup_minimum(fd_table_t *table, int source, int minimum, uint32_t flags);
 /* dup2(source, source) validates source and preserves its descriptor flags. */
 int fd_table_dup2(fd_table_t *table, int source, int destination);
 /* dup3 rejects identical descriptors; only FD_TABLE_CLOEXEC is supported. */

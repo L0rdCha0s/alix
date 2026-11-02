@@ -185,6 +185,23 @@ static int child_apply_actions(child_record_t *record, child_launch_work_t *work
             }
             fd_description_put(description);
         }
+        else if (action->operation == SYSCALL_SPAWN_CHDIR)
+        {
+            vfs_node_t *node = NULL;
+            error = vfs_resolve_owned(fd_description_context(record->launch.cwd), work->data + action->path_offset, &node);
+            if (!error && !vfs_is_dir(node)) { vfs_node_release_owned(node); node = NULL; error = -ENOTDIR; }
+            if (!error)
+            {
+                fd_description_t *cwd = process_cwd_description_create_owned(node);
+                if (!cwd) { vfs_node_release_owned(node); error = -ENOMEM; }
+                else
+                {
+                    fd_description_t *old = record->launch.cwd;
+                    record->launch.cwd = cwd;
+                    fd_description_put(old);
+                }
+            }
+        }
         else error = -EINVAL;
     }
     if (error) return error;
@@ -463,10 +480,12 @@ static int child_capture_actions(const syscall_spawn_t *specification, child_lau
         if (!specification->actions || specification->actions > UINTPTR_MAX - offset ||
             !user_copy_from_user(&input, (const void *)(uintptr_t)(specification->actions + offset), sizeof(input))) return -EFAULT;
         if (input.reserved || input.fd < 0 || input.fd >= (int32_t)FD_TABLE_MAX_ENTRIES) return -EBADF;
+        if (input.operation == SYSCALL_SPAWN_CHDIR &&
+            (input.fd || input.destination || input.flags || input.mode)) return -EINVAL;
         child_action_t *action = &work->actions[index];
         action->operation = input.operation; action->fd = input.fd; action->destination = input.destination;
         action->flags = input.flags; action->mode = input.mode;
-        if (input.operation == SYSCALL_SPAWN_OPEN)
+        if (input.operation == SYSCALL_SPAWN_OPEN || input.operation == SYSCALL_SPAWN_CHDIR)
         {
             if (*used >= available) return -E2BIG;
             action->path_offset = (uint32_t)*used;
@@ -481,7 +500,8 @@ static int child_capture_actions(const syscall_spawn_t *specification, child_lau
         {
             if (input.destination < 0 || input.destination >= (int32_t)FD_TABLE_MAX_ENTRIES) return -EBADF;
         }
-        else if (input.operation != SYSCALL_SPAWN_OPEN && input.operation != SYSCALL_SPAWN_CLOSE) return -EINVAL;
+        else if (input.operation != SYSCALL_SPAWN_OPEN && input.operation != SYSCALL_SPAWN_CLOSE &&
+                 input.operation != SYSCALL_SPAWN_CHDIR) return -EINVAL;
         ++work->action_count;
     }
     return 0;
@@ -588,6 +608,14 @@ static int64_t child_wait(int64_t pid, void *output, uint64_t flags)
 
 int64_t io_process_dispatch(uint32_t operation, uint64_t first, uint64_t second, uint64_t third)
 {
+    if (operation == SYSCALL_PROCESS_GETGID)
+    {
+        if (first || second || third) return -EINVAL;
+        spinlock_preempt_disable();
+        process_t *process = current_process_local();
+        int64_t result = process && process->is_user ? (int64_t)process_get_gid(process) : -ESRCH;
+        spinlock_preempt_enable(); return result;
+    }
     if (__atomic_load_n(&g_start, __ATOMIC_ACQUIRE) != 2) return -ENOSYS;
     if (operation == SYSCALL_PROCESS_EXECUTABLE_PATH)
     {

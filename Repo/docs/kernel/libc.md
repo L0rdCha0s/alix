@@ -9,6 +9,16 @@ integer types, variable arguments and the other language-support macros.
 Optional Annex K bounds-checking interfaces and the wider POSIX/GNU surface are
 outside this inventory.
 
+The additional native OS interface includes `uname`, `gethostname` and the
+real/effective user and primary-group getters. Their ABI, kernel build ID,
+hostname ownership and current single-identity semantics are documented in
+[system identity](system_identity.md).
+
+The upstream resource profile implements enforced per-process descriptor
+limits, while the ordinary runtime rejects private FD-limit operations.
+Both profiles query the current address-space quota through checked kernel
+metadata copies. See [descriptor limits](descriptor_limits.md).
+
 `user/lib/libc.c` retains the native allocator, byte streams, formatting, process
 lifecycle and blocking primitives. Additional modules provide calendar/timezone,
 locales, wide characters, strings, file management, generic atomic operations,
@@ -209,6 +219,12 @@ headers, verify matching C/Rust errno addresses and isolation, error formatting,
 and kill's identity/error results. Glean's real FD logger and kvstore's path
 module also execute against this boundary. This does not establish process
 creation or a running XPCOM process service.
+
+Owned-profile `ioctl` now supports FIONBIO, FIONREAD, FIOCLEX and FIONCLEX using
+native checked arguments and descriptor ownership. Legacy ioctl returns
+ENOTSUP. Eight-CPU pipe/file/TCP tests and the actual Rust libc ABI fixture
+pass; unknown/TTY requests still report ENOTTY. See
+[descriptor controls](ioctl.md) for snapshot, alias and copy semantics.
 
 `make zen-gecko-os-interfaces-qemu-test` runs eight pinned callers, file/alias
 and unsupported-descriptor checks, physical backing accounting, advice-content
