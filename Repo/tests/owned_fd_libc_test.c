@@ -15,7 +15,7 @@ int main(void)
     CHECK(buffer&&stat,"heap state");
     CHECK(read(0,buffer,1)==0,"standard stdin EOF");
     CHECK(fstat(1,stat)==0&&S_ISCHR(stat->st_mode),"standard stdout character");
-    int file=open("/tmp/owned-fd-libc",O_RDWR|O_CREAT|O_TRUNC|O_CLOEXEC);
+    int file=open("/tmp/owned-fd-libc",O_RDWR|O_CREAT|O_TRUNC|O_CLOEXEC, 0666);
     CHECK(file==3&&fcntl(file,F_GETFD)==FD_CLOEXEC,"standard open and flags");
     CHECK(write(file,"abcdef",6)==6&&lseek(file,0,SEEK_SET)==0,"standard write/seek");
     int copy=dup(file);
@@ -38,7 +38,7 @@ int main(void)
     CHECK(fseek(stream,0,SEEK_SET)==0&&fgets(buffer,128,stream)&&!strcmp(buffer,"stdio works\n"),"stdio input on owned descriptors");
     CHECK(fclose(stream)==0,"stdio close");
     int saved=dup(1);
-    file=open("/tmp/owned-fd-redirect",O_RDWR|O_CREAT|O_TRUNC);
+    file=open("/tmp/owned-fd-redirect",O_RDWR|O_CREAT|O_TRUNC, 0666);
     CHECK(saved>=3&&file>=3&&dup2(file,1)==1,"redirect standard stdout");
     CHECK(fputs("redirected\n",stdout)>=0&&fflush(stdout)==0,"stdout uses private replacement");
     CHECK(dup2(saved,1)==1&&close(saved)==0&&lseek(file,0,SEEK_SET)==0,"restore stdout");

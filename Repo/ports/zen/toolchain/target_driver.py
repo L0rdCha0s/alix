@@ -49,7 +49,8 @@ def native_bindgen_flags():
 
 def main(cxx=False):
     compiler, flags = compiler_configuration(cxx)
-    arguments = sys.argv[1:]
+    arguments = ["-Wl,--export-dynamic" if argument == "-rdynamic" else argument
+                 for argument in sys.argv[1:]]
     shared = "-shared" in arguments
     pic = shared or any(arg in ("-fPIC", "-fpic") for arg in arguments)
     if pic:

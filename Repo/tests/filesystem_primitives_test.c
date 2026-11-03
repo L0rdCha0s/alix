@@ -61,7 +61,7 @@ int main(void)
 {
     fixture_t *test = calloc(1, sizeof(*test)); CHECK(test, "heap fixture");
     CHECK(!mkdir(BASE, 0777), "test directory");
-    int fd = open(BASE "/regular", O_CREAT | O_EXCL | O_RDWR);
+    int fd = open(BASE "/regular", O_CREAT | O_EXCL | O_RDWR, 0666);
     CHECK(fd >= 0 && write(fd, "abcdef", 6) == 6, "test file");
     int readonly = open(BASE "/regular", O_RDONLY);
     CHECK(readonly >= 0 && ftruncate(readonly, 0) == -1 && errno == EBADF &&
@@ -102,7 +102,7 @@ int main(void)
     {
         worker_t *job = &test->jobs[i]; job->cpu = i;
         snprintf(job->path, sizeof(job->path), BASE "/cpu-%u", i);
-        job->fd = open(job->path, O_CREAT | O_EXCL | O_RDWR); job->alias = dup(job->fd);
+        job->fd = open(job->path, O_CREAT | O_EXCL | O_RDWR, 0666); job->alias = dup(job->fd);
         CHECK(job->fd >= 0 && job->alias >= 0 && !pthread_create(&job->thread, NULL, worker, job), "start resize worker");
     }
     for (unsigned i = 0; i < 8; ++i)

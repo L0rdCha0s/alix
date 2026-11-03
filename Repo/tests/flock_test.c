@@ -127,16 +127,16 @@ int main(int argc, char **argv)
     if (argc > 1 && !strcmp(argv[1], "child"))
     {
         CHECK(!sys_thread_set_affinity(6), "child CPU affinity");
-        int held = open(HELD_PATH, O_RDWR | O_CREAT | O_CLOEXEC); CHECK(held >= 0 && !flock(held, LOCK_EX), "child acquires sibling lock");
+        int held = open(HELD_PATH, O_RDWR | O_CREAT | O_CLOEXEC, 0666); CHECK(held >= 0 && !flock(held, LOCK_EX), "child acquires sibling lock");
         int wait_fd = open(MAIN_PATH, O_RDWR | O_CLOEXEC); CHECK(wait_fd >= 0, "child blocking target");
-        int ready = open(READY_PATH, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC); CHECK(ready >= 0, "child readiness file");
+        int ready = open(READY_PATH, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0666); CHECK(ready >= 0, "child readiness file");
         test->child_tid = sys_thread_self();
         CHECK(write(ready, &test->child_tid, sizeof(test->child_tid)) == sizeof(test->child_tid) && !close(ready), "publish child thread identity");
         (void)flock(wait_fd, LOCK_EX);
         serial_printf("FLOCK_NATIVE_TEST: FAIL killed child resumed its blocked lock\n"); return 1;
     }
     CHECK(!mkdir(BASE, 0777), "test directory");
-    int a = open(MAIN_PATH, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC);
+    int a = open(MAIN_PATH, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0666);
     int b = open(MAIN_PATH, O_RDWR | O_CLOEXEC); CHECK(a >= 0 && b >= 0, "independent opens");
     CHECK(!flock(a, LOCK_SH) && !flock(b, LOCK_SH), "concurrent shared owners");
     CHECK(flock(a, LOCK_EX | LOCK_NB) == -1 && errno == EWOULDBLOCK, "nonblocking upgrade conflict");
@@ -173,7 +173,7 @@ int main(int argc, char **argv)
     job->fd = open(MAIN_PATH, O_RDWR | O_CLOEXEC); CHECK(job->fd >= 0 && !flock(b, LOCK_EX), "descriptor reuse fixture");
     CHECK(!pthread_create(&job->thread, NULL, waiter, job) && !wait_blocked(job), "original description blocks");
     int original_fd = job->fd; CHECK(!close(original_fd), "close waiting descriptor number");
-    int replacement = open(BASE "/reused", O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC);
+    int replacement = open(BASE "/reused", O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0666);
     CHECK(replacement == original_fd && !flock(b, LOCK_UN) && !pthread_join(job->thread, NULL) && job->result == 0, "waiting acquisition retains original identity");
     a = open(BASE "/reused", O_RDWR | O_CLOEXEC);
     CHECK(a >= 0 && !flock(a, LOCK_EX | LOCK_NB) && !flock(a, LOCK_UN) && !close(a) && !close(replacement), "reused number never retargets lock");
@@ -182,7 +182,7 @@ int main(int argc, char **argv)
     job->fd = open(MAIN_PATH, O_RDWR | O_CLOEXEC); CHECK(job->fd >= 0 && !flock(b, LOCK_EX), "interrupt fixture");
     test->action.sa_handler = caught; CHECK(!sigemptyset(&test->action.sa_mask) && !sigaction(SIGUSR1, &test->action, NULL), "caught signal");
     CHECK(!pthread_create(&job->thread, NULL, waiter, job) && !wait_blocked(job), "lock waiter blocks");
-    int progress = open(BASE "/progress", O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC);
+    int progress = open(BASE "/progress", O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0666);
     CHECK(progress >= 0 && write(progress, "P", 1) == 1 && !close(progress), "storage progresses while lock waits");
     CHECK(!pthread_kill(job->thread, SIGUSR1) && !pthread_join(job->thread, NULL) && job->result == -1 && job->error == EINTR && caught_signals == 1, "interrupt blocked lock");
     CHECK(!flock(b, LOCK_UN) && !lock_eventually(b), "cancelled caller never acquires late lock");

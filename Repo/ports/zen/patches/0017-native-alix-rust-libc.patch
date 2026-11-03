@@ -2,7 +2,7 @@
 +++ b/third_party/rust/libc/src/lib.rs
 @@ -50,7 +50,15 @@
  pub use new::*;
- 
+
  cfg_if! {
 -    if #[cfg(windows)] {
 +    if #[cfg(target_os = "alix")] {
@@ -16,10 +16,10 @@
 +    } else if #[cfg(windows)] {
          mod primitives;
          pub use crate::primitives::*;
- 
+
 --- /dev/null
 +++ b/third_party/rust/libc/src/alix/mod.rs
-@@ -0,0 +1,503 @@
+@@ -0,0 +1,504 @@
 +//! Native Alix declarations. Values and signatures follow Alix headers;
 +//! no Unix target family or foreign operating-system ABI is selected.
 +use crate::prelude::*;
@@ -454,6 +454,7 @@
 +pub const O_EXCL: c_int = 16;
 +extern "C" {
 +    // Native open uses the uint64_t flag ABI from Alix's fcntl.h.
++    #[link_name = "alix_open_v2"]
 +    pub fn open(path: *const c_char, flags: u64, ...) -> c_int;
 +    pub fn fcntl(descriptor: c_int, command: c_int, ...) -> c_int;
 +}

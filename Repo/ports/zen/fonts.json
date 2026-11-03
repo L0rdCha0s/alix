@@ -1,0 +1,51 @@
+{
+  "source": "pinned Firefox 159.0",
+  "fonts": [
+    {
+      "path": "layout/reftests/fonts/dejavu-sans/DejaVuSans.ttf",
+      "sha256": "5e81b81b0092f82550541420c3e5f4c39a19ba983dbd472421d516a239b4cf86",
+      "family": "DejaVu Sans"
+    },
+    {
+      "path": "layout/reftests/fonts/dejavu-sans/DejaVuSans-Bold.ttf",
+      "sha256": "69c05cbf9593ae8e958b4897dfe0a04692e88368b9b0504857cb117baa3a082b",
+      "family": "DejaVu Sans"
+    },
+    {
+      "path": "layout/reftests/fonts/dejavu-sans/DejaVuSans-Oblique.ttf",
+      "sha256": "ff0529ab8994e86c8cb6b235da70e2eada47ad418e48c045fb990f87826a9413",
+      "family": "DejaVu Sans"
+    },
+    {
+      "path": "layout/reftests/fonts/dejavu-sans/DejaVuSans-BoldOblique.ttf",
+      "sha256": "94a913b88f979742fed65c8bae75af9cace3bdfbd860ed3d396903629b2a7c3c",
+      "family": "DejaVu Sans"
+    },
+    {
+      "path": "mobile/android/fonts/CharisSILCompact-R.ttf",
+      "sha256": "4ed509317f1bb441b185ea13bf1c9d19d1a0b396962efa3b5dc3190ad88f2067",
+      "family": "Charis SIL Compact"
+    },
+    {
+      "path": "mobile/android/fonts/CharisSILCompact-B.ttf",
+      "sha256": "699d958b492eda0cc2823535f8567d0393090e3842f6df3c36dbe7239cb80b6d",
+      "family": "Charis SIL Compact"
+    },
+    {
+      "path": "mobile/android/fonts/CharisSILCompact-I.ttf",
+      "sha256": "ab3ed6f2a4d4c2095b78227bd33155d7ccd05a879c107a291912640d4d64f767",
+      "family": "Charis SIL Compact"
+    },
+    {
+      "path": "mobile/android/fonts/CharisSILCompact-BI.ttf",
+      "sha256": "82465e747b4f41471dbfd942842b2ee810749217d44b55dbc43623b89f9c7d9b",
+      "family": "Charis SIL Compact"
+    },
+    {
+      "path": "gfx/wr/wrshell/res/FiraCode-Regular.ttf",
+      "sha256": "5dc1651a1143c53169d4394dfc55585860d13c158cc0bcc2e56c23a1da5dd777",
+      "family": "Fira Code"
+    }
+  ],
+  "licenses": "gfx/thebes/AlixFontLicenses.txt"
+}

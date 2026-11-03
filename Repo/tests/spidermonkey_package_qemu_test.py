@@ -66,6 +66,7 @@ def main():
         shutil.copy2(ROOT / "build/user/user-elfs.zip", http / "build/user/user-elfs.zip")
         shutil.copy2(ROOT / "build/user/runtime/unzip.elf", http / "build/user/runtime/unzip.elf")
         shutil.copy2(ROOT / "build/wasm-demo.js", http / "build/wasm-demo.js")
+        shutil.copy2(ROOT / "build/fonts.zip", http / "build/fonts.zip")
         shutil.copy2(ROOT / "tests/spidermonkey_runtime_test.js", http / "runtime.js")
         (http / "helper.js").write_text("function answer() { return 6 * 7; }\n")
         (http / "example.js").write_text(
@@ -82,8 +83,9 @@ def main():
             _, text = guest.command("/usr/bin/dl.sh", timeout=300)
             (out / "dl-install.log").write_text(text)
             require([item["path"] for item in Handler.records] == [
-                "/build/user/runtime/unzip.elf", "/build/user/user-elfs.zip", "/build/wasm-demo.js"],
-                "dl.sh did not fetch the shipped bootstrap, archive and demo")
+                "/build/user/runtime/unzip.elf", "/build/user/user-elfs.zip", "/build/wasm-demo.js",
+                "/build/fonts.zip"],
+                "dl.sh did not fetch the shipped bootstrap, archive, demo and fonts")
             _, text = guest.command(f"sha1sum {CLI}")
             require(digest in text, "installed SpiderMonkey differs from the packaged runtime ELF")
             _, text = guest.command(f"sha1sum {DEMO}")

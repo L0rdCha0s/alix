@@ -40,7 +40,7 @@ struct fixture {
 };
 static int publish(const void *bytes,size_t count)
 {
-    int fd=open(NEXT,O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC);
+    int fd=open(NEXT,O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC, 0666);
     if(fd<0)return -1;
     ssize_t wrote=count?write(fd,bytes,count):0;
     int result=wrote==(ssize_t)count?0:-1;

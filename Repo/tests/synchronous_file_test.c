@@ -70,11 +70,11 @@ int main(int argc,char **argv)
         serial_printf("SYNCHRONOUS_FILE_REMOUNT_TEST: PASS bytes=32768 records=64 explicit_fsync=0\n");
         free(test);return 0;
     }
-    int plain=open("/tmp/synchronous-plain",O_CREAT|O_EXCL|O_RDWR|O_NONBLOCK|O_CLOEXEC);
+    int plain=open("/tmp/synchronous-plain",O_CREAT|O_EXCL|O_RDWR|O_NONBLOCK|O_CLOEXEC, 0666);
     CHECK(plain>=0 && (fcntl(plain,F_GETFL)&O_NONBLOCK),"native nonblocking open flag");
     CHECK(!fcntl(plain,F_SETFL,fcntl(plain,F_GETFL)|O_SYNC) && !(fcntl(plain,F_GETFL)&O_SYNC) && !close(plain),"F_SETFL cannot enable sync");
     CHECK(!mkdir("/tmp/sync-disk/synchronous",0700),"persistent parent");
-    int fd=open(WRITE_PATH,O_CREAT|O_EXCL|O_RDWR|O_APPEND|O_SYNC|O_CLOEXEC);
+    int fd=open(WRITE_PATH,O_CREAT|O_EXCL|O_RDWR|O_APPEND|O_SYNC|O_CLOEXEC, 0666);
     CHECK(fd>=0 && (fcntl(fd,F_GETFL)&O_SYNC),"synchronous open status");
     int status=fcntl(fd,F_GETFL);
     CHECK(!fcntl(fd,F_SETFL,(status&~O_SYNC)|O_NONBLOCK) && (fcntl(fd,F_GETFL)&O_SYNC),"F_SETFL cannot clear sync");

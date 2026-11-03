@@ -247,7 +247,33 @@ owner/root authorization and captured heap requests. File-type bits are ignored;
 set-ID/sticky modes fail explicitly until their policies exist. The authorization
 matches the owner/superuser rule in the [fchmod reference](https://man.openbsd.org/chmod.2).
 The native C/Rust fixture checks mode `0640`, and the separate-boot disk fixture
-reads it back. Creation modes/umask and full path-search enforcement remain work.
+reads it back. Full path-search enforcement remains work.
+
+Owned-descriptor `open`/`creat` and `mkdir` now apply their requested basic
+permission bits and the process creation mask under the VFS tree lock. Mode
+and owner initialization complete before another lookup can observe the inode.
+An initial descriptor remains usable when its newly created inode has mode
+zero. Existing inodes retain their permissions. `chmod(path, mode)` uses an
+owned path request, so changing a mode does not require first opening the file
+for reading. Set-ID/sticky policies remain unsupported.
+
+`umask` atomically exchanges the process-wide low nine mask bits. Threads share
+that state; spawn captures it with its owned launch context, applies it to file
+actions and transfers it to the child. The initial mask remains zero. Named
+shared-memory creation applies the same mask. New C headers bind `open` to
+`alix_open_v2`, which consumes the creation mode argument. The older `open` ELF
+symbol keeps the default `0666` contract for installed binaries. New source must
+supply a third argument with `O_CREAT`; in-tree callers and native Rust bindings
+have been updated.
+
+`mkstemp`, `mkostemp`, `mkstemps`, `mkostemps` and `mkdtemp` use kernel entropy
+and exclusive creation. File/directory modes start at `0600`/`0700` and are
+restricted by the current mask. Descriptor admission precedes file creation.
+`make zen-creation-modes-qemu-test` verifies eight-CPU creation, 128 unique
+temporary inodes, mask exchanges/inheritance, spawn actions, zero permissions,
+path chmod, shared memory, the older ABI and descriptor exhaustion. Host
+sanitizer tests cover collisions, suffix/flag validation, entropy failures and
+VFS ownership/concurrent mutation.
 Native C fcntl byte-range locks and utimes have separate acceptance below.
 
 Owned-profile flock now supplies shared/exclusive whole-file advisory locks,

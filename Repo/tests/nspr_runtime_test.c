@@ -16,6 +16,7 @@
 #include "usyscall.h"
 #include "netinet/in.h"
 #include "unistd.h"
+#include "sys/stat.h"
 
 #define APIS(X) \
  X(init,PR_Init) X(cleanup,PR_Cleanup) X(version,PR_GetVersion) \
@@ -28,7 +29,7 @@
  X(create_pipe,PR_CreatePipe) X(writev,PR_Writev) X(read,PR_Read) X(write,PR_Write) X(close,PR_Close) X(poll,PR_Poll) \
  X(new_tcp,PR_NewTCPSocket) X(connect,PR_Connect) X(recv,PR_Recv) \
  X(new_event,PR_NewPollableEvent) X(set_event,PR_SetPollableEvent) X(wait_event,PR_WaitForPollableEvent) X(destroy_event,PR_DestroyPollableEvent) \
- X(open,PR_Open) X(seek,PR_Seek64) X(new_map,PR_CreateFileMap) X(map,PR_MemMap) X(sync_map,PR_SyncMemMap) X(unmap,PR_MemUnmap) X(close_map,PR_CloseFileMap) \
+ X(open,PR_Open) X(mkdir,PR_MkDir) X(rmdir,PR_RmDir) X(seek,PR_Seek64) X(new_map,PR_CreateFileMap) X(map,PR_MemMap) X(sync_map,PR_SyncMemMap) X(unmap,PR_MemUnmap) X(close_map,PR_CloseFileMap) \
  X(error,PR_GetError) X(os_error,PR_GetOSError) X(cpus,PR_GetNumberOfProcessors)
 /* Process entry points exercise the actual NSPR wait daemon as well as the
  * already verified native spawn helper. */
@@ -58,6 +59,7 @@ struct fixture {
     unsigned char bytes[8192];
     char executable[4096];char *arguments[3];
     PRProcess *child;PRInt32 child_status;
+    struct stat metadata;
 };
 static fixture_t *active;
 #define CHECK(c,label) do{if(!(c)){serial_printf("NSPR_RUNTIME_TEST: FAIL %s line=%u errno=%d pr=%d os=%d\n",label,__LINE__,errno,active&&active->api.error?active->api.error():0,active&&active->api.os_error?active->api.os_error():0);return 1;}}while(0)
@@ -155,7 +157,15 @@ int main(int argc,char **argv)
     f->poll=(PRPollDesc){.fd=f->event,.in_flags=PR_POLL_READ};
     CHECK(f->api.poll(&f->poll,1,PR_INTERVAL_NO_WAIT)==1 && (f->poll.out_flags&PR_POLL_READ) &&
         f->api.wait_event(f->event)==PR_SUCCESS && f->api.destroy_event(f->event)==PR_SUCCESS,"NSPR pollable event lifecycle");
-    f->file=f->api.open("/tmp/nspr-full-runtime",PR_RDWR|PR_CREATE_FILE|PR_TRUNCATE,0600);
+    mode_t previous_mask=umask(0027);
+    f->file=f->api.open("/tmp/nspr-full-runtime",PR_RDWR|PR_CREATE_FILE|PR_EXCL,0600);
+    CHECK(f->file && !stat("/tmp/nspr-full-runtime",&f->metadata) && (f->metadata.st_mode&0777)==0600,
+          "NSPR requested file mode reaches native open ABI");
+    CHECK(f->api.mkdir("/tmp/nspr-mode-directory",0700)==PR_SUCCESS &&
+          !stat("/tmp/nspr-mode-directory",&f->metadata) && (f->metadata.st_mode&0777)==0700 &&
+          f->api.rmdir("/tmp/nspr-mode-directory")==PR_SUCCESS && umask(previous_mask)==0027,
+          "NSPR requested directory mode and mask");
+    serial_printf("NSPR_RUNTIME_MODES: PASS open=1 mkdir=1 umask=1\n");
     CHECK(f->file && f->api.seek(f->file,8191,PR_SEEK_SET)==8191 && f->api.write(f->file,"",1)==1,"NSPR file sizing");
     f->file_map=f->api.new_map(f->file,8192,PR_PROT_READWRITE);CHECK(f->file_map,"NSPR file map creation");
     unsigned char *mapped=f->api.map(f->file_map,0,8192),*alias=f->api.map(f->file_map,4096,4096);

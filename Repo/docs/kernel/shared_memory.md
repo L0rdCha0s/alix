@@ -15,9 +15,9 @@ existence check run under the VFS tree lock.
 The public interface and lifetime rules are described in the
 [shared-memory interface reference](https://man7.org/linux/man-pages/man3/shm_open.3.html).
 
-Creation captures the caller's uid/gid and applies the low nine mode bits before
-publishing the name. The current Alix profile has no process umask interface,
-so its creation mask is zero. Existing-object access checks use the same VFS
+Creation captures the caller's uid/gid and applies the low nine mode bits,
+restricted by the process `umask`, before publishing the name. The initial mask
+is zero and is inherited by spawned children. Existing-object access checks use the same VFS
 owner/group/other policy as ordinary files. Only the current object owner or
 root can unlink its name. Shared-memory descriptors always have `FD_CLOEXEC`;
 spawn file actions can explicitly duplicate them into children.

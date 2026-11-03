@@ -180,7 +180,7 @@ int main(int argc, char **argv)
         CHECK(false, "killed select returned");
     }
     CHECK(!boundary_checks(test), "native ABI/copy boundaries");
-    int regular = open("/tmp/select-file", O_CREAT | O_TRUNC | O_RDWR);
+    int regular = open("/tmp/select-file", O_CREAT | O_TRUNC | O_RDWR, 0666);
     CHECK(regular >= 0 && dup2(regular, 255) == 255, "highest private descriptor");
     FD_ZERO(&test->read); FD_ZERO(&test->write); FD_ZERO(&test->except);
     FD_SET(255, &test->read); FD_SET(255, &test->write); FD_SET(255, &test->except);

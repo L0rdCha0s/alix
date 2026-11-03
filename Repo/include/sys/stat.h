@@ -66,6 +66,7 @@ int fstat(int fd, struct stat *st) __asm__("alix_fstat_v2");
 int stat(const char *path, struct stat *st) __asm__("alix_stat_v2");
 int lstat(const char *path, struct stat *st) __asm__("alix_lstat_v2");
 int fchmod(int fd, mode_t mode);
+int chmod(const char *path, mode_t mode);
 mode_t umask(mode_t mask);
 int mkdir(const char *path, mode_t mode);
 #ifdef __cplusplus

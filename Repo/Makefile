@@ -24,6 +24,9 @@ GENERATED_DIR := $(OBJDIR)/generated
 DL_SCRIPT_SRC := $(GENERATED_DIR)/dl_script_data.c
 DL_SCRIPT_OBJ := $(GENERATED_DIR)/dl_script_data.o
 JS_DEMO := $(OBJDIR)/wasm-demo.js
+FONT_DIR := vendor/fonts
+FONT_ARCHIVE := $(OBJDIR)/fonts.zip
+FONT_ASSETS := $(addprefix $(FONT_DIR)/,$(shell python3 $(FONT_DIR)/package.py --list))
 
 BASE_CFLAGS := -O4 -std=c11 -ffreestanding -fno-stack-protector -fno-builtin -fno-pic \
                -m64 -mno-red-zone -Wall -Wextra -g -I$(INCLUDE_DIR) -I$(ATK_DIR) \
@@ -613,7 +616,14 @@ $(JS_DEMO): demos/wasm-demo.js
 	cp $< $@.tmp
 	mv -f $@.tmp $@
 
-$(DL_SCRIPT_SRC): $(USER_ELF_ARCHIVE) $(JS_DEMO) Makefile
+$(FONT_ARCHIVE): $(FONT_DIR)/package.py $(FONT_DIR)/manifest.json $(FONT_ASSETS)
+	python3 $(FONT_DIR)/package.py --output $@
+
+.PHONY: fonts-fetch
+fonts-fetch:
+	python3 $(FONT_DIR)/package.py --fetch --output $(FONT_ARCHIVE)
+
+$(DL_SCRIPT_SRC): $(USER_ELF_ARCHIVE) $(JS_DEMO) $(FONT_ARCHIVE) Makefile
 	@mkdir -p $(GENERATED_DIR)
 	@{ \
 		echo '#include "types.h"'; \
@@ -626,6 +636,9 @@ $(DL_SCRIPT_SRC): $(USER_ELF_ARCHIVE) $(JS_DEMO) Makefile
 		printf '    "%s\\n"\n' 'wget gateway:8000/build/user/user-elfs.zip /tmp/user-elfs.zip'; \
 		printf '    "%s\\n"\n' '/tmp/dl-unzip.elf /tmp/user-elfs.zip /root/usr/bin'; \
 		printf '    "%s\\n"\n' 'wget gateway:8000/build/wasm-demo.js /usr/bin/wasm-demo.js'; \
+		printf '    "%s\\n"\n' 'wget gateway:8000/build/fonts.zip /tmp/fonts.zip'; \
+		printf '    "%s\\n"\n' '/tmp/dl-unzip.elf /tmp/fonts.zip /root/usr/share/fonts'; \
+		printf '    "%s\\n"\n' 'rm /tmp/fonts.zip'; \
 		printf '    "%s\\n"\n' 'rm /tmp/dl-unzip.elf'; \
 		printf '    "%s\\n"\n' 'rm /tmp/user-elfs.zip'; \
 		echo ';'; \

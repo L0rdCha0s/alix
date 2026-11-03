@@ -81,8 +81,9 @@ vfs_node_t *vfs_mkdir(vfs_node_t *cwd, const char *path);
 vfs_node_t *vfs_open_file(vfs_node_t *cwd, const char *path, bool create, bool truncate);
 /* Protected storage-worker APIs. cwd is explicitly retained by the caller;
  * success returns one owned node reference acquired before tree unlock. New
- * files use captured uid/gid. Existing subtree mutability rules still apply;
- * this does not invent POSIX mode/ACL enforcement absent from the VFS.
+ * files use captured uid/gid. The mode-aware entry point applies basic
+ * permissions before tree unlock. Existing subtree mutability rules apply;
+ * full path-search/ACL enforcement remains separate.
  * Callback-backed nodes return -ENOTSUP before truncate; their borrowed
  * callback contexts/current-thread semantics need a separate adapter. */
 int vfs_open_data_owned(vfs_node_t *cwd, const char *path, bool create, bool truncate,

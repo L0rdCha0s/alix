@@ -22,8 +22,10 @@ typedef enum { VFS_NODE_DIR,VFS_NODE_FILE,VFS_NODE_BLOCK,VFS_NODE_SYMLINK } vfs_
 typedef unsigned spinlock_t;
 typedef struct vfs_node vfs_node_t;
 typedef struct {vfs_node_t *mount_point;spinlock_t dirty_lock;bool needs_full_sync;} vfs_mount_t;
-struct vfs_node {vfs_node_type_t type;char *name,*data;size_t size,capacity;pthread_mutex_t data_lock;vfs_node_t *parent,*first_child,*next_sibling;vfs_mount_t *mount;bool allow_mutation,disk_name_dirty;uint32_t uid,gid,refcount;void *read_cb;ssize_t (*write_cb)(vfs_node_t *,size_t,const void *,size_t,void *);void *callback_context;};
+struct vfs_node {vfs_node_type_t type;char *name,*data;size_t size,capacity;pthread_mutex_t data_lock;vfs_node_t *parent,*first_child,*next_sibling;vfs_mount_t *mount;bool allow_mutation,disk_name_dirty;uint32_t uid,gid,refcount,permissions;void *read_cb;ssize_t (*write_cb)(vfs_node_t *,size_t,const void *,size_t,void *);void *callback_context;};
 static vfs_node_t *root;
+static void vfs_lock_node_data(vfs_node_t *n);
+static void vfs_unlock_node_data(vfs_node_t *n);
 static pthread_mutex_t tree_mutex=PTHREAD_MUTEX_INITIALIZER;
 static _Thread_local bool tree_owned;
 static void vfs_tree_lock_acquire(void){CHECK(!tree_owned);CHECK(!pthread_mutex_lock(&tree_mutex));tree_owned=true;}
@@ -61,7 +63,8 @@ static vfs_node_t *vfs_alloc_node(vfs_node_type_t type){
 }
 '''
 for signature in ['static bool split_parent_and_name_checked(', 'static bool split_parent_and_name(',
-                  'int vfs_mkdir_exclusive(',
+                  'static int vfs_node_access_locked(', 'static int vfs_mkdir_internal(',
+                  'int vfs_mkdir_exclusive(', 'int vfs_mkdir_mode_exclusive(',
                   'static int vfs_remove_path_mode(', 'int vfs_remove_path(', 'int vfs_remove_directory_path(', 'int vfs_rename_path(']:
     code+=function_definition(source,signature)+'\n'
 code+=r'''
@@ -167,7 +170,7 @@ static void resize_contract(void){
 static atomic_uint mkdir_successes;
 static void *mkdir_writer(void *unused){
     (void)unused;char *path=malloc(64);CHECK(path);
-    for(unsigned i=0;i<128;++i){snprintf(path,64,"mkdir-%u",i);int result=vfs_mkdir_exclusive(root,path,37,41);
+    for(unsigned i=0;i<128;++i){snprintf(path,64,"mkdir-%u",i);int result=vfs_mkdir_mode_exclusive(root,path,37,41,0750);
         CHECK(result==0 || result==-EEXIST);if(!result)atomic_fetch_add(&mkdir_successes,1);}
     free(path);return NULL;
 }
@@ -182,11 +185,16 @@ static void mkdir_contract(void){
     CHECK(vfs_mkdir_exclusive(root,"read-only",37,41)==-EROFS);
     vfs_tree_lock_acquire();root->allow_mutation=true;vfs_node_t *file=make_node(root,"file",VFS_NODE_FILE);vfs_tree_lock_release();
     CHECK(vfs_mkdir_exclusive(root,"file",37,41)==-EEXIST && file->parent==root);
+    root->permissions=0500;
+    CHECK(vfs_mkdir_mode_exclusive(root,"denied",37,41,0700)==-EACCES);
+    CHECK(!vfs_find_child(root,"denied"));
+    root->permissions=0777;
+    CHECK(vfs_mkdir_mode_exclusive(root,"special",37,41,04700)==-EOPNOTSUPP);
     pthread_t threads[8];for(unsigned i=0;i<8;++i)CHECK(!pthread_create(&threads[i],NULL,mkdir_writer,NULL));
     for(unsigned i=0;i<8;++i)CHECK(!pthread_join(threads[i],NULL));
     CHECK(atomic_load(&mkdir_successes)==128);char path[64];
     for(unsigned i=0;i<128;++i){snprintf(path,sizeof(path),"mkdir-%u",i);
-        vfs_tree_lock_acquire();vfs_node_t *n=vfs_find_child(root,path);CHECK(n && n->type==VFS_NODE_DIR && n->uid==37 && n->gid==41);vfs_tree_lock_release();
+        vfs_tree_lock_acquire();vfs_node_t *n=vfs_find_child(root,path);CHECK(n && n->type==VFS_NODE_DIR && n->uid==37 && n->gid==41&&n->permissions==0750);vfs_tree_lock_release();
         CHECK(!vfs_remove_directory_path(root,path));}
     CHECK(!vfs_remove_path(root,"file",false));
 }

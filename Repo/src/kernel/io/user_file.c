@@ -332,7 +332,8 @@ static int64_t user_file_open(const char *path, uint64_t flags, bool shared_memo
     uint64_t known = SYSCALL_OPEN_READ | SYSCALL_OPEN_WRITE | SYSCALL_OPEN_CREATE |
                      SYSCALL_OPEN_TRUNCATE | SYSCALL_OPEN_EXCLUSIVE | SYSCALL_OPEN_APPEND | SYSCALL_OPEN_CLOEXEC | SYSCALL_OPEN_NONBLOCK | SYSCALL_OPEN_SYNC;
     if (flags & ~known) return -EINVAL;
-    if ((flags & SYSCALL_OPEN_CREATE) && mode > 0777u) return -EOPNOTSUPP;
+    if ((flags & SYSCALL_OPEN_CREATE) && mode > UINT32_MAX) return -EINVAL;
+    if ((flags & SYSCALL_OPEN_CREATE) && (mode & 07000u)) return -EOPNOTSUPP;
     if (shared_memory)
     {
         if (!(flags & SYSCALL_OPEN_READ) || (flags & (SYSCALL_OPEN_APPEND | SYSCALL_OPEN_NONBLOCK | SYSCALL_OPEN_SYNC)) ||
@@ -685,7 +686,10 @@ static int64_t user_system_info(uint32_t operation, void *output, uint64_t capac
 static int64_t user_path_mutation(uint32_t operation, const char *path, const char *new_path, uint64_t flags,
                                   uint64_t mode)
 {
-    if (operation == SYSCALL_FILE_MKDIR_MODE && mode > 0777u) return -EOPNOTSUPP;
+    if (operation == SYSCALL_FILE_MKDIR_MODE && mode > UINT32_MAX) return -EINVAL;
+    if (operation == SYSCALL_FILE_MKDIR_MODE && (mode & 07000u)) return -EOPNOTSUPP;
+    if (operation == SYSCALL_FILE_CHMOD_PATH && mode > 0177777u) return -EINVAL;
+    if (operation == SYSCALL_FILE_CHMOD_PATH && (mode & 07000u)) return -EOPNOTSUPP;
     if (flags > SYSCALL_REMOVE_DIRECTORY_ONLY || (operation == SYSCALL_FILE_RENAME && flags)) return -EINVAL;
     spinlock_preempt_disable();
     uint32_t uid = 0, gid = 0;
@@ -698,11 +702,13 @@ static int64_t user_path_mutation(uint32_t operation, const char *path, const ch
     {
         io_vfs_operation_t *work = io_request_buffer(request);
         work->opcode = operation == SYSCALL_FILE_RENAME ? IO_VFS_RENAME :
-                       operation == SYSCALL_FILE_MKDIR ? IO_VFS_MKDIR :
-                       operation == SYSCALL_FILE_MKDIR_MODE ? IO_VFS_MKDIR_MODE : IO_VFS_REMOVE;
+                       operation == SYSCALL_FILE_CHMOD_PATH ? IO_VFS_CHMOD_PATH :
+                       (operation == SYSCALL_FILE_MKDIR || operation == SYSCALL_FILE_MKDIR_MODE) ?
+                           IO_VFS_MKDIR_MODE : IO_VFS_REMOVE;
         work->flags = (uint32_t)flags;
-        if (operation == SYSCALL_FILE_MKDIR_MODE)
-            work->whence = (int32_t)(mode & ~__atomic_load_n(&current_process_local()->creation_mask, __ATOMIC_ACQUIRE));
+        if (operation == SYSCALL_FILE_MKDIR || operation == SYSCALL_FILE_MKDIR_MODE)
+            work->whence = (int32_t)((mode & 0777u) & ~__atomic_load_n(&current_process_local()->creation_mask, __ATOMIC_ACQUIRE));
+        if (operation == SYSCALL_FILE_CHMOD_PATH) work->whence = (int32_t)mode;
         result = user_copy_cstring_from_user((char *)work->data, VFS_PATH_MAX, path, NULL);
         if (!result && paths == 2)
             result = user_copy_cstring_from_user((char *)work->data + VFS_PATH_MAX, VFS_PATH_MAX, new_path, NULL);
@@ -1731,6 +1737,9 @@ int64_t io_user_file_dispatch(uint32_t operation, uint64_t first, uint64_t secon
         case SYSCALL_FILE_MKDIR_MODE:
             if (third || fourth) return -EINVAL;
             return user_path_mutation(operation, (const char *)first, NULL, 0, second);
+        case SYSCALL_FILE_CHMOD_PATH:
+            if (third || fourth) return -EINVAL;
+            return user_path_mutation(operation, (const char *)first, NULL, 0, second);
         case SYSCALL_FILE_SOCKET_OPEN: return user_socket_open((const char *)first, 0, 0);
         case SYSCALL_FILE_NET_OPEN:
             if (fourth) return -EINVAL;
@@ -1809,7 +1818,7 @@ int64_t io_user_file_dispatch(uint32_t operation, uint64_t first, uint64_t secon
             if (fourth) return -EINVAL;
             return user_resource_limit(operation == SYSCALL_FILE_SET_LIMIT, first, (void *)second, third);
         case SYSCALL_FILE_REMOVE: case SYSCALL_FILE_RENAME:
-            return user_path_mutation(operation, (const char *)first, (const char *)second, third);
+            return user_path_mutation(operation, (const char *)first, (const char *)second, third, 0);
         default: break;
     }
     spinlock_preempt_disable();

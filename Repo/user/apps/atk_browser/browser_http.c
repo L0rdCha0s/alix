@@ -881,7 +881,7 @@ static void browser_cache_write_meta(const char *path, uint64_t timestamp_second
         free(meta_path);
         return;
     }
-    int fd = open(meta_path, SYSCALL_OPEN_WRITE | SYSCALL_OPEN_CREATE | SYSCALL_OPEN_TRUNCATE);
+    int fd = open(meta_path, SYSCALL_OPEN_WRITE | SYSCALL_OPEN_CREATE | SYSCALL_OPEN_TRUNCATE, 0666);
     if (fd >= 0)
     {
         (void)browser_write_all(fd, (const uint8_t *)buf, (size_t)len);
@@ -909,7 +909,7 @@ static void browser_cache_write(browser_app_t *app, const char *uri, const uint8
         return;
     }
 
-    int fd = open(path, SYSCALL_OPEN_WRITE | SYSCALL_OPEN_CREATE | SYSCALL_OPEN_TRUNCATE);
+    int fd = open(path, SYSCALL_OPEN_WRITE | SYSCALL_OPEN_CREATE | SYSCALL_OPEN_TRUNCATE, 0666);
     if (fd >= 0)
     {
         if (browser_write_all(fd, data, len))

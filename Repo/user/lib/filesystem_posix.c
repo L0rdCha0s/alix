@@ -25,6 +25,13 @@ int utimes(const char *path, const struct timeval times[2])
     return 0;
 }
 
+int chmod(const char *path, mode_t mode)
+{
+    int64_t result = sys_file_io(SYSCALL_FILE_CHMOD_PATH, (uintptr_t)path, mode, 0, 0);
+    if (result < 0) { errno = (int)-result; return -1; }
+    return 0;
+}
+
 static int path_stat(const char *path, struct stat *output, uint32_t flags)
 {
     if (!output) { errno = EFAULT; return -1; }

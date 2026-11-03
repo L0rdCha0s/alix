@@ -31,6 +31,13 @@ The bundle includes the native SpiderMonkey CLI as `js.elf`; after running
 See [SpiderMonkey setup and CLI](../../ports/zen/README.md#installed-javascript-cli)
 for the upstream build prerequisite and package acceptance test.
 
+The same installer downloads `build/fonts.zip` and extracts its OFL-licensed
+Public Sans and Noto families, language fonts, CJK collection, symbols, math and
+emoji into `/root/usr/share/fonts`, exposed through `/usr/share/fonts`.
+The normal build packages the vendored, hash-pinned files without network
+access. See [system font assets](../../vendor/fonts/README.md) for the inventory,
+source revisions and Gecko integration boundary.
+
 The full `build/` tree is never exported to QEMU. Its debug symbols, object
 files, ports and test output can grow beyond virtual FAT16's capacity without
 affecting boot. The staged files refresh when the kernel or loader changes.

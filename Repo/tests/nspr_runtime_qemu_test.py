@@ -21,7 +21,8 @@ if __name__=='__main__':
         thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
         try:
             run_native_elf('nspr_runtime_test.elf',
-                ('NSPR_RUNTIME_CHILD: PASS environment=1 initialized=1',
+                ('NSPR_RUNTIME_MODES: PASS open=1 mkdir=1 umask=1',
+                 'NSPR_RUNTIME_CHILD: PASS environment=1 initialized=1',
                  'NSPR_RUNTIME_TEST: PASS cpus=8 updates=512 threads=1 locks=1 condvars=1 once=1 tls_dtors=8 environment=1 writev=1 tcp=1 poll=1 events=1 maps=1 spawn=1 wait_daemon=1 cleanup=1',),
                 ROOT/'build/test-out/nspr-runtime-qemu.log','Complete native NSPR runtime',160,
                 arguments=(str(server.server_address[1]),),input_files=((library.name,library),),

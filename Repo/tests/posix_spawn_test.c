@@ -69,7 +69,7 @@ int main(int argc,char **argv)
     CHECK(signal(SIGUSR1,SIG_IGN)!=SIG_ERR&&signal(SIGUSR2,parent_handler)!=SIG_ERR,"parent dispositions");
     CHECK(sigemptyset(mask)==0&&sigaddset(mask,SIGUSR2)==0&&sigaddset(mask,SIGTERM)==0&&sigprocmask(SIG_BLOCK,mask,oldmask)==0,"parent blocked signals");
     CHECK(sys_mkdir("/tmp/spawn-actions-cwd")==0&&chdir("/tmp/spawn-actions-cwd")==0,"file action cwd");
-    int source=open("source",O_RDWR|O_CREAT|O_TRUNC|O_CLOEXEC),self=open("self",O_RDWR|O_CREAT|O_TRUNC|O_CLOEXEC);
+    int source=open("source",O_RDWR|O_CREAT|O_TRUNC|O_CLOEXEC, 0666),self=open("self",O_RDWR|O_CREAT|O_TRUNC|O_CLOEXEC, 0666);
     CHECK(source==3&&self==4&&write(source,"abcdef",6)==6&&lseek(source,0,SEEK_SET)==0,"CLOEXEC sources");
     CHECK(pipe2(pipes,O_CLOEXEC)==0&&pipes[0]==5&&pipes[1]==6,"CLOEXEC transport");
     CHECK(!posix_spawn_file_actions_init(actions)&&!posix_spawnattr_init(attributes),"spawn object init");
@@ -107,7 +107,7 @@ int main(int argc,char **argv)
     pid=-123;CHECK(posix_spawn(&pid,"/tmp/test.elf",actions,NULL,arguments,NULL)==EBADF&&pid==-123,"bad action does not publish child");
     CHECK(waitpid(-1,NULL,WNOHANG)==-1&&errno==ECHILD,"no failed-spawn child");
     CHECK(!posix_spawn_file_actions_destroy(actions)&&sigprocmask(SIG_SETMASK,oldmask,NULL)==0&&chdir(cwd)==0,"restore parent state");
-    source = open("/tmp/spawn-default", O_RDWR | O_CREAT | O_TRUNC);
+    source = open("/tmp/spawn-default", O_RDWR | O_CREAT | O_TRUNC, 0666);
     CHECK(source >= 3 && !fcntl(source, F_SETFD, 0), "ordinary non-CLOEXEC parent source");
     CHECK(!posix_spawn_file_actions_init(actions) && !posix_spawnattr_init(attributes) &&
           !posix_spawnattr_setflags(attributes, POSIX_SPAWN_CLOEXEC_DEFAULT) &&

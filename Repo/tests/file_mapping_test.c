@@ -80,7 +80,7 @@ int main(int argc,char **argv)
         if(argc>2)for(;;)sys_yield();
         CHECK(!munmap(map,4096),"child unmap");free(t);return 0;
     }
-    int fd=open(PATH,O_CREAT|O_EXCL|O_RDWR|O_CLOEXEC);
+    int fd=open(PATH,O_CREAT|O_EXCL|O_RDWR|O_CLOEXEC, 0666);
     CHECK(fd>=0 && !ftruncate(fd,FILE_BYTES),"initial file length");
     CHECK(lseek(fd,123,SEEK_SET)==123,"source position");
     t->shared=mmap(NULL,MAP_BYTES,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0);

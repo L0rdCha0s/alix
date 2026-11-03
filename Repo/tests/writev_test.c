@@ -77,7 +77,7 @@ static bool record(fixture_t *f)
 int main(void)
 {
     fixture_t *f=calloc(1,sizeof(*f));CHECK(f,"heap fixture");
-    int fd=open("/tmp/writev-errors",O_CREAT|O_TRUNC|O_RDWR|O_CLOEXEC);CHECK(fd>=0,"file fixture");
+    int fd=open("/tmp/writev-errors",O_CREAT|O_TRUNC|O_RDWR|O_CLOEXEC, 0666);CHECK(fd>=0,"file fixture");
     f->vectors[0]=(struct iovec){"safe",4};f->vectors[1]=(struct iovec){(void *)1,1};
     CHECK(writev(fd,f->vectors,2)==-1 && errno==EFAULT && lseek(fd,0,SEEK_CUR)==0,"failed later input does not write prefix");
     CHECK(writev(fd,(void *)1,1)==-1 && errno==EFAULT && writev(fd,NULL,-1)==-1 && errno==EINVAL &&
@@ -105,7 +105,7 @@ int main(void)
         CHECK(read(f->descriptors[0],&f->packet,sizeof(f->packet))==sizeof(f->packet) && record(f),"pipe vector record atomicity");
     }
     CHECK(!join_all(f) && read(f->descriptors[0],f->bytes,1)==0 && !close(f->descriptors[0]),"pipe vector EOF");
-    fd=open("/tmp/writev-append",O_CREAT|O_TRUNC|O_RDWR|O_CLOEXEC);CHECK(fd>=0,"append fixture");
+    fd=open("/tmp/writev-append",O_CREAT|O_TRUNC|O_RDWR|O_CLOEXEC, 0666);CHECK(fd>=0,"append fixture");
     CHECK(!launch(f,0,true) && !join_all(f),"atomic append vector writers");
     for(unsigned n=0;n<WORKERS*RECORDS;++n)
         CHECK(read(fd,&f->packet,sizeof(f->packet))==sizeof(f->packet) && record(f),"append vector record atomicity");

@@ -67,7 +67,7 @@ int main(void)
 {
     fixture_t *test=calloc(1,sizeof(*test));CHECK(test,"heap fixture");
     test->query=(guarded_t){0x13579bdf,-1,0x2468ace0};
-    int fd=open("/tmp/ioctl-native-file",O_CREAT|O_TRUNC|O_RDWR|O_APPEND|O_CLOEXEC);
+    int fd=open("/tmp/ioctl-native-file",O_CREAT|O_TRUNC|O_RDWR|O_APPEND|O_CLOEXEC, 0666);
     CHECK(fd>=0,"regular file");int alias=dup(fd);CHECK(alias>=0,"alias");
     CHECK(!ioctl(fd,FIONCLEX) && !fcntl(fd,F_GETFD),"clear close-on-exec");
     CHECK(!ioctl(fd,FIOCLEX) && fcntl(fd,F_GETFD)==FD_CLOEXEC && !fcntl(alias,F_GETFD),"descriptor-specific close-on-exec");

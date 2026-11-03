@@ -196,7 +196,7 @@ static void browser_debug_log_line_locked(browser_app_t *app, const char *line)
         browser_debug_log_append_locked(app, "\n", 1);
     }
 
-    int fd = open(BROWSER_DEBUG_LOG_PATH, O_WRONLY | O_CREAT);
+    int fd = open(BROWSER_DEBUG_LOG_PATH, O_WRONLY | O_CREAT, 0666);
     if (fd >= 0)
     {
         (void)lseek(fd, 0, SYSCALL_SEEK_END);
@@ -294,7 +294,7 @@ static void browser_debug_log_line(browser_app_t *app, const char *line)
     }
     browser_lock_exit(app, &app->debug_lock, "debug_lock");
 
-    int fd = open(BROWSER_DEBUG_LOG_PATH, O_WRONLY | O_CREAT);
+    int fd = open(BROWSER_DEBUG_LOG_PATH, O_WRONLY | O_CREAT, 0666);
     if (fd >= 0)
     {
         (void)lseek(fd, 0, SYSCALL_SEEK_END);
@@ -314,7 +314,7 @@ void browser_debug_log_reset_file(browser_app_t *app)
         return;
     }
 
-    int fd = open(BROWSER_DEBUG_LOG_PATH, O_WRONLY | O_CREAT | O_TRUNC);
+    int fd = open(BROWSER_DEBUG_LOG_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0666);
     if (fd >= 0)
     {
         close(fd);

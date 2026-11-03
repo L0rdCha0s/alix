@@ -8,7 +8,7 @@
 int main(void)
 {
     const char *path="/tmp/synchronous-legacy";
-    int fd=open(path,O_CREAT|O_TRUNC|O_RDWR);
+    int fd=open(path,O_CREAT|O_TRUNC|O_RDWR, 0666);
     if(fd<0 || write(fd,"persist",7)!=7 || close(fd))return 1;
     if(open(path,O_TRUNC|O_RDWR|O_SYNC)!=-1 || errno!=ENOTSUP)return 2;
     long raw;

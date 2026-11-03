@@ -69,8 +69,8 @@ int main(int argc,char **argv)
     CHECK(arguments&&buffer&&original&&pipes&&status,"parent heap");
     arguments[0]=PROGRAM;arguments[1]="check";arguments[2]="space and \xc3\xa9";
     CHECK(sys_mkdir("/tmp/process-native-cwd")==0&&chdir("/tmp/process-native-cwd")==0,"parent cwd");
-    int shared=open("shared",O_RDWR|O_CREAT|O_TRUNC);
-    int hidden=open("hidden",O_RDWR|O_CREAT|O_TRUNC|O_CLOEXEC);
+    int shared=open("shared",O_RDWR|O_CREAT|O_TRUNC, 0666);
+    int hidden=open("hidden",O_RDWR|O_CREAT|O_TRUNC|O_CLOEXEC, 0666);
     CHECK(shared==3&&hidden==4&&write(shared,"abcdef",6)==6&&lseek(shared,0,SEEK_SET)==0,"inheritance files");
     CHECK(pipe(pipes)==0&&pipes[0]==5&&pipes[1]==6&&fcntl(5,F_SETFD,FD_CLOEXEC)==0,"inheritance pipe");
     pid_t pid=alix_spawn_argv(PROGRAM,arguments);CHECK(pid>0,"native user child");

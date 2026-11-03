@@ -1,0 +1,11 @@
+--- a/widget/Theme.cpp
++++ b/widget/Theme.cpp
+@@ -1506,6 +1506,8 @@
+   return MakeUnique<ScrollbarDrawingGTK>();
+ #elif ANDROID
+   return MakeUnique<ScrollbarDrawingAndroid>();
++#elif defined(MOZ_WIDGET_ALIX)
++  return MakeUnique<ScrollbarDrawingGTK>();
+ #else
+ #  error "Unknown platform, need scrollbar implementation."
+ #endif

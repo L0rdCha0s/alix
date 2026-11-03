@@ -30,7 +30,7 @@ def main():
             raise RuntimeError(f"native compiler identity is missing {required}")
     if "#define __linux__" in macros or "#define __APPLE__" in macros:
         raise RuntimeError("target compiler inherited host/Linux OS identity")
-    dry_run = subprocess.run([str(compiler) + "++", "-###", "-x", "c++", "/dev/null"],
+    dry_run = subprocess.run([str(compiler) + "++", "-###", "-rdynamic", "-x", "c++", "/dev/null"],
                              env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                              check=True).stdout
     for required in ("-nostdlib", "--export-dynamic", "--no-dynamic-linker", "user/lib/link.ld", "crt0.o", "libc++.a"):
@@ -77,7 +77,7 @@ int main(int argc, char**) {
 '''
     with log.open("w") as stream:
         result = subprocess.run([str(compiler) + "++", "-std=c++20", "-x", "c++", "-",
-                                 "-pie", "-lm", "-o", str(output)], input=source, text=True, env=env,
+                                 "-pie", "-rdynamic", "-lm", "-o", str(output)], input=source, text=True, env=env,
                                 stdout=stream, stderr=subprocess.STDOUT)
     if result.returncode:
         raise RuntimeError("native driver failed to link:\n" + "\n".join(log.read_text().splitlines()[-40:]))

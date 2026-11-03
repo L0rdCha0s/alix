@@ -1,0 +1,27 @@
+--- a/security/nss/lib/dev/ckhelper.c
++++ b/security/nss/lib/dev/ckhelper.c
+@@ -188,13 +188,13 @@
+     NSSSlot *slot,
+     PRStatus *rvStatus)
+ {
+-    CK_BBOOL bool;
++    CK_BBOOL attributeValue;
+     CK_ATTRIBUTE_PTR attr;
+     CK_ATTRIBUTE atemplate = { 0, NULL, 0 };
+     CK_RV ckrv;
+     void *epv = nssSlot_GetCryptokiEPV(slot);
+     attr = &atemplate;
+-    NSS_CK_SET_ATTRIBUTE_VAR(attr, attribute, bool);
++    NSS_CK_SET_ATTRIBUTE_VAR(attr, attribute, attributeValue);
+     nssSession_EnterMonitor(session);
+     ckrv = CKAPI(epv)->C_GetAttributeValue(session->handle, object,
+                                            &atemplate, 1);
+@@ -204,7 +204,7 @@
+         return PR_FALSE;
+     }
+     *rvStatus = PR_SUCCESS;
+-    return (PRBool)(bool == CK_TRUE);
++    return (PRBool)(attributeValue == CK_TRUE);
+ }
+
+ NSS_IMPLEMENT PRStatus

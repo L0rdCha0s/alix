@@ -3,16 +3,16 @@
 @@ -53,7 +53,7 @@
      "components.conf",
  ]
- 
+
 -if toolkit in ("android", "cocoa", "gtk", "uikit", "windows"):
 +if toolkit in ("android", "cocoa", "gtk", "uikit", "windows", "alix"):
      DIRS += [toolkit]
- 
+
  if toolkit == "cocoa":
 @@ -338,7 +338,7 @@
          "nsBaseColorPicker.cpp",
      ]
- 
+
 -if toolkit in ("gtk", "windows", "cocoa", "uikit", "android"):
 +if toolkit in ("gtk", "windows", "cocoa", "uikit", "android", "alix"):
      UNIFIED_SOURCES += [
@@ -96,7 +96,7 @@
 +                            uint32_t, void *) override;
 +
 +private:
-+  ~AlixTextInput() override = default;
++  ~AlixTextInput() = default;
 +};
 +} // namespace mozilla::widget
 +#endif
@@ -502,7 +502,7 @@
 +FINAL_LIBRARY = "xul"
 --- /dev/null
 +++ b/widget/alix/nsAppShell.cpp
-@@ -0,0 +1,60 @@
+@@ -0,0 +1,61 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -518,6 +518,7 @@
 +using namespace mozilla;
 +using namespace mozilla::widget;
 +
++nsAppShell::nsAppShell() = default;
 +nsAppShell::~nsAppShell() = default;
 +nsresult nsAppShell::Init() {
 +  nsresult result = nsBaseAppShell::Init();
@@ -565,7 +566,7 @@
 +}
 --- /dev/null
 +++ b/widget/alix/nsAppShell.h
-@@ -0,0 +1,28 @@
+@@ -0,0 +1,29 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -580,6 +581,7 @@
 +}
 +class nsAppShell final : public nsBaseAppShell {
 +public:
++  nsAppShell();
 +  nsresult Init();
 +
 +protected:
@@ -596,12 +598,13 @@
 +#endif
 --- /dev/null
 +++ b/widget/alix/nsLookAndFeel.cpp
-@@ -0,0 +1,208 @@
+@@ -0,0 +1,209 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 +
 +#include "nsLookAndFeel.h"
++#include "gfxFont.h"
 +#include "nsStyleConsts.h"
 +
 +using namespace mozilla;
@@ -832,7 +835,7 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
-+#include "mozilla/widget/Theme.h"
++#include "Theme.h"
 +using namespace mozilla;
 +using namespace mozilla::widget;
 +already_AddRefed<Theme> do_CreateNativeThemeDoNotUseDirectly() {
@@ -1148,7 +1151,7 @@
 +}
 +nsresult nsWindow::SetTitle(const nsAString &title) {
 +  auto utf8 = NS_ConvertUTF16toUTF8(title);
-+  size_t bytes = std::min(utf8.Length(), uint32_t(sizeof(mControl.title) - 1));
++  size_t bytes = std::min<size_t>(utf8.Length(), sizeof(mControl.title) - 1);
 +  while (bytes && bytes < utf8.Length() &&
 +         (static_cast<unsigned char>(utf8[bytes]) & 0xc0) == 0x80)
 +    --bytes;

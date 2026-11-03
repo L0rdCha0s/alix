@@ -437,6 +437,16 @@ libevent object, including both backends, timers, pipe wakeups, entropy and
 interface-name lookup. These component results precede the next full build;
 there is still no linked or running Zen browser.
 
+The sixteenth full build completes Rust in 7m48s and reaches additional native
+widget, graphics and libc gates. Alix now supplies atomic process `umask`,
+creation modes for files/directories/shared memory, path `chmod`, and exclusive
+temporary-file APIs. The native eight-CPU creation fixture and rebuilt Rust std
+acceptance pass. Widget API/header/lifetime mismatches are corrected in patch
+`0015`; patch `0048` selects the portable upstream-painted scrollbar style.
+The complete Alix widget directory and the common theme unit now compile.
+Thebes platform/font integration and the remaining libc/platform diagnostics
+still precede the next full-browser link and launch attempt.
+
 `make zen-udp-core-qemu-test` verifies the native kernel UDP transport with eight
 pinned services and 256 real host exchanges, independently checked packet
 metadata/checksums and DNS/NTP port ownership. The transport lives in the shared

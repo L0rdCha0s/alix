@@ -147,7 +147,7 @@ int main(int argc, char **argv)
               !close(test->pairs[index][0]) && !close(test->pairs[index][1]), "SMP poll readiness/results");
     }
     serial_printf("POLL_TEST: SMP PASS cpus=8\n");
-    int regular = open("/tmp/poll-file", O_CREAT | O_TRUNC | O_RDWR);
+    int regular = open("/tmp/poll-file", O_CREAT | O_TRUNC | O_RDWR, 0666);
     CHECK(regular >= 0, "regular file open");
     test->entries[0] = (struct pollfd){ .fd = regular, .events = POLLIN | POLLOUT };
     CHECK(poll(test->entries, 1, -1) == 1 && test->entries[0].revents == (POLLIN | POLLOUT) &&

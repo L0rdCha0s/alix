@@ -3859,8 +3859,8 @@ int open(const char *path, uint64_t flags, ...)
     {
         mode_flags |= SYSCALL_OPEN_READ;
     }
-    uint32_t mode = 0666u;
 #ifndef TTF_HOST_BUILD
+    uint32_t mode = 0666u;
     if (flags & SYSCALL_OPEN_CREATE)
     {
         va_list arguments;
@@ -3868,8 +3868,10 @@ int open(const char *path, uint64_t flags, ...)
         mode = va_arg(arguments, uint32_t);
         va_end(arguments);
     }
-#endif
     return sys_open_mode(path, mode_flags, mode);
+#else
+    return sys_open(path, mode_flags);
+#endif
 }
 
 #ifndef TTF_HOST_BUILD
@@ -3879,7 +3881,6 @@ int __alix_open_legacy(const char *path, uint64_t flags, ...)
     if (!(flags & (SYSCALL_OPEN_READ | SYSCALL_OPEN_WRITE))) flags |= SYSCALL_OPEN_READ;
     return sys_open(path, flags);
 }
-#endif
 
 int creat(const char *path, mode_t mode)
 {
@@ -3892,6 +3893,7 @@ mode_t umask(mode_t mask)
     if (result < 0) { errno = (int)-result; return (mode_t)-1; }
     return (mode_t)result;
 }
+#endif
 
 int socket_open(const char *iface_name)
 {

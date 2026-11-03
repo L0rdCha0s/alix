@@ -28,6 +28,12 @@ attributes are supported; ignored dispositions otherwise survive launch and
 caught handlers reset. RESETIDS uses Alix's existing single identity policy.
 Process groups and scheduling attributes return `ENOTSUP` during spawn.
 
+The owned launch context also snapshots the process creation mask. Open actions
+apply their requested mode through that snapshot, and the resulting child
+inherits the same mask. Later parent or child `umask` calls cannot alter the
+other process's state. Unsupported set-ID/sticky creation requests fail before
+launch instead of silently changing their requested policy.
+
 `POSIX_SPAWN_CLOEXEC_DEFAULT` marks every descriptor in the child's private
 snapshot close-on-exec before file actions run. Explicit dup2/self-dup actions
 retain their destinations, including standard streams when requested. Sources

@@ -135,6 +135,13 @@ loader/readiness services. Its child registry is separate from public FDs.
 allow retry after bad status copyout and prevent duplicate reaping. The current
 argv launcher uses an empty environment. See
 [child_processes.md](child_processes.md) for lifetime and native acceptance.
+The extended spawn interface captures environment/actions and the process
+creation mask. Operation 5 provides `waitid`/`WNOWAIT`; operation 6 atomically
+exchanges the process-wide `umask` and returns its previous low nine bits.
+Appended `FILE_IO` operations `OPEN_MODE` and `MKDIR_MODE` carry explicit
+creation modes, while `CHMOD_PATH` updates basic permissions through an owned
+path request. Earlier operation numbers and the older `open` ELF ABI remain
+available. See [libc creation modes](libc.md) for the public API and tests.
 
 `FILE_IO` also exposes `SYSTEM_INFO` and `HOSTNAME` metadata operations,
 independent of either FD namespace. Protected workers own the hostname

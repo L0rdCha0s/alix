@@ -26,7 +26,7 @@ int main(void)
         CHECK(tcflow(fd, TCOOFF) == -1 && errno == ENOTTY, "no terminal flow");
         CHECK(tcsendbreak(fd, 0) == -1 && errno == ENOTTY, "no terminal break");
     }
-    int fd = open("/tmp/terminal-test", O_RDWR | O_CREAT | O_TRUNC);
+    int fd = open("/tmp/terminal-test", O_RDWR | O_CREAT | O_TRUNC, 0666);
     CHECK(fd >= 3 && !isatty(fd) && errno == ENOTTY, "regular file classification");
     CHECK(tcgetattr(fd, attributes) == -1 && errno == ENOTTY, "regular file terminal query");
     int alias = dup(fd);

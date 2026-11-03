@@ -96,7 +96,7 @@ impl File {
             if options.truncate { flags |= 8; }
         }
         with_path(path, |path| {
-            let fd = cvt(unsafe { ffi::open(path.as_ptr(), flags) })?;
+            let fd = cvt(unsafe { ffi::open(path.as_ptr(), flags, 0o666u32) })?;
             Ok(Self(FileDesc(unsafe { OwnedFd::from_raw_fd(fd) })))
         })
     }

@@ -106,7 +106,7 @@ int main(int argc,char **argv)
     CHECK(!posix_spawn_file_actions_addchdir_np(&test->actions,"/spawn-cwd-missing"),"missing directory action");
     test->arguments[0]=test->executable;test->pid=-77;errno=EDOM;
     CHECK(posix_spawn(&test->pid,test->executable,&test->actions,NULL,test->arguments,test->environment)==ENOENT && test->pid==-77 && errno==EDOM && !posix_spawn_file_actions_destroy(&test->actions),"missing cwd failure preserves pid and errno");
-    int fd=open("not-a-directory",O_CREAT|O_EXCL|O_WRONLY);CHECK(fd>=0 && !close(fd),"non-directory fixture");
+    int fd=open("not-a-directory",O_CREAT|O_EXCL|O_WRONLY, 0666);CHECK(fd>=0 && !close(fd),"non-directory fixture");
     CHECK(!posix_spawn_file_actions_init(&test->actions) && !posix_spawn_file_actions_addchdir_np(&test->actions,"not-a-directory") &&
         posix_spawn(&test->pid,test->executable,&test->actions,NULL,test->arguments,test->environment)==ENOTDIR && test->pid==-77 &&
         !posix_spawn_file_actions_destroy(&test->actions),"non-directory cwd rejection");

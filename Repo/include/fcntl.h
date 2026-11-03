@@ -40,7 +40,11 @@ struct flock
 #ifdef __cplusplus
 extern "C" {
 #endif
+#ifdef TTF_HOST_BUILD
+int open(const char *path, uint64_t flags, ...);
+#else
 int open(const char *path, uint64_t flags, ...) __asm__("alix_open_v2");
+#endif
 int creat(const char *path, mode_t mode);
 int fcntl(int fd, int command, ...);
 #ifdef __cplusplus

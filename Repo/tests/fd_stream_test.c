@@ -34,7 +34,7 @@ int main(void)
           read(alias, test->bytes, 2048) == 2048 &&
           write(test->pipes[1], test->bytes, 4096) == 4096, "nonblocking atomic write admission");
     CHECK(!close(alias) && !close(test->pipes[0]) && !close(test->pipes[1]), "close pipe aliases");
-    int descriptor = open("/tmp/fd-stream", O_RDWR | O_CREAT | O_TRUNC);
+    int descriptor = open("/tmp/fd-stream", O_RDWR | O_CREAT | O_TRUNC, 0666);
     CHECK(descriptor >= 0 && write(descriptor, "abcd", 4) == 4 && lseek(descriptor, 1, SEEK_SET) == 1,
           "initial descriptor content/position");
     test->stream = fdopen(descriptor, "w+");

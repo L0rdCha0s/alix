@@ -103,11 +103,11 @@ int main(int argc, char **argv)
     CHECK(sysconf(_SC_AVPHYS_PAGES) > used, "unmapping releases physical backing");
 
     CHECK(!mkdir("/tmp/fsync-disk/gecko-os", 0700), "persistent parent directory");
-    int fd = open(WRITE_PATH, O_RDWR | O_CREAT | O_EXCL);
+    int fd = open(WRITE_PATH, O_RDWR | O_CREAT | O_EXCL, 0666);
     CHECK(fd >= 0, "persistent file creation");
     unsigned char *bytes = malloc(LENGTH);
     CHECK(bytes, "write buffer");
-    int resized = open("/tmp/fsync-disk/gecko-os/resize.bin", O_CREAT | O_EXCL | O_RDWR);
+    int resized = open("/tmp/fsync-disk/gecko-os/resize.bin", O_CREAT | O_EXCL | O_RDWR, 0666);
     CHECK(resized >= 0 && write(resized, "abcdef", 6) == 6 && lseek(resized, 1234, SEEK_SET) == 1234 &&
           !ftruncate(resized, 3) && !ftruncate(resized, 8192) && lseek(resized, 0, SEEK_CUR) == 1234 &&
           ftruncate(resized, (off_t)1 << 40) == -1 && errno == EFBIG && !fsync(resized) && !close(resized),

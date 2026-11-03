@@ -50,6 +50,7 @@ unsafe extern "C" {
     pub fn getuid() -> u32;
     pub fn getpwuid_r(uid: u32, entry: *mut Passwd, buffer: *mut c_char,
                       capacity: usize, result: *mut *mut Passwd) -> c_int;
+    #[link_name = "alix_open_v2"]
     pub fn open(path: *const c_char, flags: u64, ...) -> c_int;
     pub fn close(fd: c_int) -> c_int;
     pub fn fcntl(fd: c_int, command: c_int, ...) -> c_int;

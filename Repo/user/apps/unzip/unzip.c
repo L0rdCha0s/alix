@@ -1259,7 +1259,7 @@ static bool zip_extract_entry(const uint8_t *zip_data,
         return false;
     }
 
-    int fd = open(out_path, SYSCALL_OPEN_WRITE | SYSCALL_OPEN_CREATE | SYSCALL_OPEN_TRUNCATE);
+    int fd = open(out_path, SYSCALL_OPEN_WRITE | SYSCALL_OPEN_CREATE | SYSCALL_OPEN_TRUNCATE, 0666);
     if (fd < 0)
     {
         printf("unzip: unable to create %s\n", out_path);

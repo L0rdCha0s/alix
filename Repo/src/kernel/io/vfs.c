@@ -578,6 +578,19 @@ void io_vfs_execute(io_request_t *request, io_service_result_t *result,
         result->result = vfs_path_snapshot(io_request_cwd(request), (char *)operation->data, (size_t)operation->count);
         return;
     }
+    if (operation->opcode == IO_VFS_CHMOD_PATH)
+    {
+        if (description || !io_request_cwd(request) || operation->flags || available < VFS_PATH_MAX ||
+            operation->whence < 0 || operation->whence > 0177777) return;
+        if (strnlen((const char *)operation->data, VFS_PATH_MAX) == VFS_PATH_MAX)
+        { result->result = -ENAMETOOLONG; return; }
+        vfs_node_t *node = NULL;
+        int error = vfs_resolve_owned(io_request_cwd(request), (const char *)operation->data, &node);
+        if (!error) error = vfs_chmod_owned(node, io_request_uid(request), (uint32_t)operation->whence);
+        vfs_node_release_owned(node);
+        result->result = error;
+        return;
+    }
     if (operation->opcode == IO_VFS_MKDIR || operation->opcode == IO_VFS_MKDIR_MODE)
     {
         if (description || !io_request_cwd(request) || operation->flags || available < VFS_PATH_MAX) return;

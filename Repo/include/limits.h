@@ -24,6 +24,7 @@
 #define MB_LEN_MAX 1
 /* Maximum native VFS path buffer size, including the terminating NUL. */
 #define PATH_MAX 4096
+#define NAME_MAX (PATH_MAX - 1)
 #define INT_MAX 2147483647
 #define INT_MIN (-INT_MAX - 1)
 #define UINT_MAX 0xFFFFFFFFu

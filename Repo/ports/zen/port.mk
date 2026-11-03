@@ -172,6 +172,15 @@ $(USER_OBJDIR)/random_test.elf: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests
 zen-random-qemu-test: all $(USER_OBJDIR)/random_test.elf
 	python3 tests/random_qemu_test.py
 
+$(USER_OBJDIR)/tests/creation_modes_test.o: tests/creation_modes_test.c
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+$(USER_OBJDIR)/creation_modes_test.elf: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/creation_modes_test.o $(USER_LD_SCRIPT)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/creation_modes_test.o
+.PHONY: zen-creation-modes-qemu-test
+zen-creation-modes-qemu-test: all $(USER_OBJDIR)/creation_modes_test.elf
+	python3 tests/creation_modes_qemu_test.py
+
 .PHONY: zen-libevent-qemu-test
 zen-libevent-qemu-test: all $(ZEN_USER_RUNTIME_OBJECTS) zen-ssp-runtime
 	python3 ports/zen/build_libevent_runtime_test.py

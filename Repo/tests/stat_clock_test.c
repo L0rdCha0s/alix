@@ -53,7 +53,7 @@ int main(void)
     CHECK(stat("/tmp/stat-clock-absent",metadata)==-1&&errno==ENOENT&&!memcmp(metadata,before,sizeof(*before)),"stat preserves output on failure");
     CHECK(stat((const char*)1,metadata)==-1&&errno==EFAULT&&!memcmp(metadata,before,sizeof(*before)),"bad path copy");
     CHECK(stat("/tmp",NULL)==-1&&errno==EFAULT,"null stat output");
-    int fd=open("/tmp/stat-clock-file",O_RDWR|O_CREAT|O_TRUNC),output=dup(STDOUT_FILENO);
+    int fd=open("/tmp/stat-clock-file",O_RDWR|O_CREAT|O_TRUNC, 0666),output=dup(STDOUT_FILENO);
     CHECK(fd>=3&&output>=3&&dup2(fd,STDOUT_FILENO)==STDOUT_FILENO,"redirect putchar");
     CHECK(putchar(0x1ff)==0xff&&putc('X',stdout)=='X'&&fflush(stdout)==0,"standard character output");
     CHECK(dup2(output,STDOUT_FILENO)==STDOUT_FILENO&&close(output)==0,"restore stdout");
@@ -71,7 +71,7 @@ int main(void)
     CHECK(getcwd(buffer,0)==NULL&&errno==EINVAL,"zero cwd capacity");
     CHECK(chdir("/tmp/stat-clock-file")==-1&&errno==ENOTDIR&&getcwd(buffer,PATH_MAX)==buffer&&
           !strcmp(buffer,"/tmp/stat-clock-directory"),"failed chdir preserves cwd");
-    fd=open("relative",O_RDWR|O_CREAT|O_TRUNC);
+    fd=open("relative",O_RDWR|O_CREAT|O_TRUNC, 0666);
     CHECK(fd>=3&&write(fd,"cwd",3)==3&&close(fd)==0&&stat("relative",metadata)==0&&metadata->st_size==3,"relative stat uses new cwd");
     CHECK(chdir(saved)==0,"restore initial cwd");
     int *aliases=calloc(253,sizeof(*aliases));CHECK(aliases,"capacity heap");

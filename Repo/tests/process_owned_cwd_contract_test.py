@@ -55,7 +55,7 @@ enum { PROCESS_LIFETIME_ALIVE,PROCESS_LIFETIME_FREED };
 enum { PROCESS_STATE_READY,PROCESS_STATE_ZOMBIE };
 typedef struct vfs_node { uint32_t refs; bool directory; } vfs_node_t;
 typedef struct process {
-    spinlock_t context_lock; uint32_t uid,gid; vfs_node_t *cwd; fd_description_t *cwd_owner;
+    spinlock_t context_lock; uint32_t uid,gid,creation_mask; vfs_node_t *cwd; fd_description_t *cwd_owner;
     int state,lifetime_state;
 } process_t;
 static vfs_node_t *root;

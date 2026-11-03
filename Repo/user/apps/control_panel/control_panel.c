@@ -788,7 +788,7 @@ static bool cp_write_background_path(const char *path)
     {
         return false;
     }
-    int fd = open("/etc/display/background", O_WRONLY | O_CREAT | O_TRUNC);
+    int fd = open("/etc/display/background", O_WRONLY | O_CREAT | O_TRUNC, 0666);
     if (fd < 0)
     {
         return false;

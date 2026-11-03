@@ -587,7 +587,7 @@ The remaining acceptance order is:
 
 Zen import preparation has separate receipts under `build/ports/zen`.
 `zen-overlay-composition-preflight.json` records all 273 source patches
-composing with the 47 Alix patches preserved. `zen-release-preferences/receipt.json`
+composing with the 49 Alix patches preserved. `zen-release-preferences/receipt.json`
 records repeatable output from the pinned release preference generator.
 `zen-release-resources/receipt.json` records the pinned search-settings merge
 and 571 localization overlays across 42 locales, all parsed by Gecko's Fluent

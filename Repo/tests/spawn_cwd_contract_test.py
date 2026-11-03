@@ -36,6 +36,7 @@ static char *owned_strdup(const char *s){size_t n=strlen(s)+1;char*p=owned_mallo
 #define VFS_PATH_MAX 4096u
 #define FD_TABLE_MAX_ENTRIES 256u
 #define SYSCALL_OPEN_CLOEXEC (1u<<17)
+#define SYSCALL_OPEN_CREATE 4u
 #define FD_TABLE_CLOEXEC 1u
 '''
 for name in ('CLOSE','DUP2','OPEN','CHDIR'):
@@ -50,7 +51,7 @@ code+=r'''
 typedef struct {unsigned refs,id;bool directory;} vfs_node_t;
 typedef struct {vfs_node_t *node;unsigned refs;} fd_description_t;
 typedef struct {unsigned marker;} fd_table_t;
-typedef struct {struct {fd_description_t *cwd;fd_table_t *files;uint32_t uid,gid;} launch;} child_record_t;
+typedef struct {struct {fd_description_t *cwd;fd_table_t *files;uint32_t uid,gid,creation_mask;} launch;} child_record_t;
 static vfs_node_t nodes[4]={{1,0,true},{1,1,true},{1,2,true},{1,3,false}};
 static bool fail_cwd,fail_clone;
 static unsigned guards;
@@ -76,7 +77,7 @@ static int fd_table_set_flags(fd_table_t *t,int fd,uint32_t f){(void)t;(void)fd;
 static int fd_table_dup2(fd_table_t*t,int a,int b){(void)t;(void)a;(void)b;abort();}
 static int fd_table_install_at(fd_table_t*t,int a,fd_description_t*d,uint32_t f){(void)t;(void)a;(void)d;(void)f;abort();}
 static void *process_fd_retirement_queue(void){abort();}
-static int io_vfs_open_owned(void*a,const char*b,uint32_t c,uint32_t d,uint32_t e,void*f,fd_description_t**g){(void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)g;abort();}
+static int io_vfs_open_mode_owned(void*a,const char*b,uint32_t c,uint32_t mode,uint32_t d,uint32_t e,void*f,fd_description_t**g){(void)a;(void)b;(void)c;(void)mode;(void)d;(void)e;(void)f;(void)g;abort();}
 static bool user_copy_from_user(void *out,const void *in,size_t n){if(!in)return false;memcpy(out,in,n);return true;}
 static int user_copy_cstring_from_user(char*out,size_t n,const char*in,size_t*length){if(!in)return -EFAULT;size_t count=strlen(in);if(count>=n)return -ENAMETOOLONG;memcpy(out,in,count+1);if(length)*length=count;return 0;}
 '''

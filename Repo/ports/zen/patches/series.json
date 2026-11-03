@@ -228,7 +228,7 @@
     },
     {
       "file": "0015-native-alix-widget-backend.patch",
-      "sha256": "b1245acb6e9d246441734c2b37fb17c259feb7dc642f5955ed378d3e23b6bc69",
+      "sha256": "c0c06fe31228fb7dad58975b77e3eb4fd2ede284ec28d2bdd56b375bc07fadb6",
       "files": [
         {
           "path": "widget/moz.build",
@@ -243,7 +243,7 @@
         {
           "path": "widget/alix/AlixTextInput.h",
           "before": null,
-          "after": "7d4e0db259d7fee11f9ff499dd5603b1fc8c802a2ab151ff89448fb7d987cd85"
+          "after": "a31c8d895264e1e2b7e86c43c0fbcb2f239b03cd96c4597519a90ac2032af90e"
         },
         {
           "path": "widget/alix/GfxInfo.cpp",
@@ -273,17 +273,17 @@
         {
           "path": "widget/alix/nsAppShell.cpp",
           "before": null,
-          "after": "1079badc0d4ae1ce594d1e4ec0af9acb2f5fac0d95b46e415f380bf7165617ec"
+          "after": "9c8e33833422ff01e79bec800b37836fc95a7f2100c1ac36c928a3fc4bf3acbd"
         },
         {
           "path": "widget/alix/nsAppShell.h",
           "before": null,
-          "after": "34d7da9ffdb2771368cab96e72fd6305d459debd00ee6cf4ee531fbc1b6ca9fd"
+          "after": "15b4d890a9c2f4a765297a1ccdb417b70b7c6664ab36096326aae0487724493a"
         },
         {
           "path": "widget/alix/nsLookAndFeel.cpp",
           "before": null,
-          "after": "406774bb2825f0dae24bd0cfab665238a2b1f0df2fc8ada88a5d5fef22c98292"
+          "after": "7aff71946bffcf823d3a963ea9dbc7fe06d3f1fc276d02daf02597d4b9511388"
         },
         {
           "path": "widget/alix/nsLookAndFeel.h",
@@ -293,7 +293,7 @@
         {
           "path": "widget/alix/nsNativeThemeAlix.cpp",
           "before": null,
-          "after": "9a06a19a52d56766567e74601b6e2b3fa55c0fc58c9edb6c695036b112027abb"
+          "after": "708e62ebefa70ffe227e86bcd1bef8f14a8caf43075c09a009842351b82fad3d"
         },
         {
           "path": "widget/alix/nsWidgetFactory.cpp",
@@ -308,7 +308,7 @@
         {
           "path": "widget/alix/nsWindow.cpp",
           "before": null,
-          "after": "25a5f6ac68fd7f14cc065e8c1af6950c133fdbaf370b8d0e951c56fab35c6d55"
+          "after": "45edc1f3081c64b15b14c7b9a453c661acec9d8c8909f7d30dfd33ed779d49d7"
         },
         {
           "path": "widget/alix/nsWindow.h",
@@ -330,7 +330,7 @@
     },
     {
       "file": "0017-native-alix-rust-libc.patch",
-      "sha256": "ff39b9e3f19d5369cf6b8f9a8ce805227c6b060e2e8dea871ea0402a0ebf4032",
+      "sha256": "16098c65218f1816597d65305d2c1d82cb8ece9df60187f44b71d215e8aac1d2",
       "files": [
         {
           "path": "third_party/rust/libc/src/lib.rs",
@@ -340,7 +340,7 @@
         {
           "path": "third_party/rust/libc/src/alix/mod.rs",
           "before": null,
-          "after": "25dcfae19c0628937869c9125850d2353c7eb59ee3741dfa8249900ee1eaad8a"
+          "after": "a2f25b99caa4a5bd0210f8f235b611f8ff4eaf151d4d61905d9a138eea60ef43"
         },
         {
           "path": "third_party/rust/libc/.cargo-checksum.json",
@@ -981,6 +981,99 @@
           "path": "layout/base/nsLayoutUtils.cpp",
           "before": "0b57e04efeffb6ad97fd57bcaeb1dd167fd30542c1b61db015f9081cc5ca30f3",
           "after": "dd516b1e762f4592ed089665cf95b0aae609f82a5c094918546d5fd676af1a4b"
+        }
+      ]
+    },
+    {
+      "file": "0048-native-alix-scrollbar-style.patch",
+      "sha256": "9cb5cac295a3064b3e684897ce65e3f16889eec38f8da17fee3ed833cb23799a",
+      "files": [
+        {
+          "path": "widget/Theme.cpp",
+          "before": "7fd0338f48a498ca5a51edeb2460920f8e798fb8b05bbc7a46a4a6fef74979b6",
+          "after": "51955b3679de67d69fbfcaf6a3437823026be1fd908028be1652216d0d6a40a7"
+        }
+      ]
+    },
+    {
+      "file": "0049-native-alix-nss-boolean-identifier.patch",
+      "sha256": "37bd3aa414cd668deffe123c5ed75a1f4fbad6100aae1a875005bc6268ba9b15",
+      "files": [
+        {
+          "path": "security/nss/lib/dev/ckhelper.c",
+          "before": "57c0f5d7b3af10666e5cf047c47ee77991cb150b56c2e9287608f177396ef5cf",
+          "after": "23dd84f80ef7d856f58ce0c72e2a938d4898f8e1811bd970ed8f7c81624c4a60"
+        }
+      ]
+    },
+    {
+      "file": "0050-native-alix-thebes-platform.patch",
+      "sha256": "643a96a7423363f1f853dff8a6b0fc66865c8285103e1521b4471312402a11f8",
+      "files": [
+        {
+          "path": "gfx/thebes/gfxAlixPlatform.h",
+          "before": null,
+          "after": "6eaba7fc7195696183135634a4889cc6cb155697d35f7ba7cb67f74c12a8ee93"
+        },
+        {
+          "path": "gfx/thebes/gfxAlixPlatform.cpp",
+          "before": null,
+          "after": "7a32d25d1e052bb8bedb05628a2a3b282956e16aaa0a4460588cf82b8f28ef76"
+        },
+        {
+          "path": "gfx/thebes/AlixFontFiles.h",
+          "before": null,
+          "after": "c53d39421efa3e50b87c9bc687c3b1841772fcb10a62704439216d6cf8ab8c24"
+        },
+        {
+          "path": "gfx/thebes/AlixFontFiles.cpp",
+          "before": null,
+          "after": "701f8c13ee322d1cbb5647e084ffe49bcf7c5dc3a09f39b09469479080f23f0b"
+        },
+        {
+          "path": "gfx/thebes/StandardFonts-alix.inc",
+          "before": null,
+          "after": "b85a92d87817d7a8138bc5a04e2ddcb4ab105734a64e5482e9a5ff39ab10bf0f"
+        },
+        {
+          "path": "gfx/thebes/gfxPlatform.cpp",
+          "before": "6248839fa06852b3b7bfc6a1517cd4a9ca8297a2aea8cb83ca48521c45d4dbea",
+          "after": "1fa545ba7c6b14d25bcd643801af85d16ef71f273d9ef739c724a34459131736"
+        },
+        {
+          "path": "gfx/thebes/gfxFT2FontList.cpp",
+          "before": "baf17ccee179096726bbb9641d540c6cd49be6926b91277d7378dd727bc622c2",
+          "after": "10145e080d7c1e7ec8b1ae5d75673cf73675fc5c083e19dfa459464fd19e8c92"
+        },
+        {
+          "path": "gfx/thebes/gfxFT2Fonts.cpp",
+          "before": "693389a41d2464a547e2d9c10894d11b0a721e4e5aad26355e548aa5df0c7ed5",
+          "after": "a3b5e9f1986309a9a93757d045c9462e97227fd80a447b6c8209dd87205a248b"
+        },
+        {
+          "path": "dom/ipc/PContent.ipdl",
+          "before": "0e9fe52ced0b384bae9262abaae7bf82724192891e101e5d638e474def988c2d",
+          "after": "6a3fe9e2162819362ceb2f8fc0e359751e3527ae18b875833becc50590cc24fa"
+        },
+        {
+          "path": "gfx/thebes/moz.build",
+          "before": "90db655feb7ceafa1cdd328739572f9f2d4d5e7f494e435d8b0343a10006b1c3",
+          "after": "c172a0938f46086f191b713a6eb70b2c9f0089e3960b2a09219fc7e1730ac666"
+        },
+        {
+          "path": "browser/installer/package-manifest.in",
+          "before": "3802cdb774d97b682a6d770d586e4b90a97def908191851f8c3ea0c552b06984",
+          "after": "94616ccdc84a3a83b0f8d7d9d00cf86430274db07f975815b9b901c7d546d85f"
+        },
+        {
+          "path": "modules/libpref/init/all.js",
+          "before": "c917e43e4faa3731fdb091bf779b78bb730f336649e6137c5f82be0c2f0c313f",
+          "after": "5e3efd3dc1388b33ce21f3fea89d031b9c04aa0803f04c081f9ee50aff00018d"
+        },
+        {
+          "path": "gfx/thebes/AlixFontLicenses.txt",
+          "before": null,
+          "after": "a32d832754e90437454c7821cd909986fbbc15e9c8690de0c65b7e812c9a08e8"
         }
       ]
     }

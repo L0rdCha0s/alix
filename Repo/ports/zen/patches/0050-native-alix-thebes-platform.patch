@@ -1,0 +1,1161 @@
+--- /dev/null
++++ b/gfx/thebes/gfxAlixPlatform.h
+@@ -0,0 +1,32 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#ifndef GFX_ALIX_PLATFORM_H
++#define GFX_ALIX_PLATFORM_H
++#include "gfxPlatform.h"
++struct FT_LibraryRec_;
++
++class gfxAlixPlatform final : public gfxPlatform {
++ public:
++  gfxAlixPlatform();
++  ~gfxAlixPlatform() override;
++  already_AddRefed<gfxASurface> CreateOffscreenSurface(
++      const IntSize& aSize, gfxImageFormat aFormat) override;
++  gfxImageFormat GetOffscreenFormat() override {
++    return mozilla::gfx::SurfaceFormat::X8R8G8B8_UINT32;
++  }
++  bool CreatePlatformFontList() override;
++  void ReadSystemFontList(mozilla::dom::SystemFontList*) override;
++  void GetCommonFallbackFonts(uint32_t aCh, Script aScript,
++                              FontPresentation aPresentation,
++                              nsTArray<const char*>& aFonts) override;
++  already_AddRefed<mozilla::gfx::VsyncSource>
++  CreateGlobalHardwareVsyncSource() override;
++  bool AccelerateLayersByDefault() override { return false; }
++  static bool CheckVariationFontSupport() { return true; }
++
++ private:
++  FT_LibraryRec_* mFTLibrary = nullptr;
++};
++#endif
+--- /dev/null
++++ b/gfx/thebes/gfxAlixPlatform.cpp
+@@ -0,0 +1,55 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#include "gfxAlixPlatform.h"
++#include "gfxFT2FontList.h"
++#include "gfxImageSurface.h"
++#include "mozilla/gfx/2D.h"
++#include "VsyncSource.h"
++
++using namespace mozilla;
++using namespace mozilla::gfx;
++
++gfxAlixPlatform::gfxAlixPlatform() {
++  mFTLibrary = Factory::NewFTLibrary();
++  MOZ_RELEASE_ASSERT(mFTLibrary);
++  Factory::SetFTLibrary(mFTLibrary);
++  InitBackendPrefs(GetBackendPrefs());
++}
++
++gfxAlixPlatform::~gfxAlixPlatform() {
++  Factory::ReleaseFTLibrary(mFTLibrary);
++}
++
++already_AddRefed<gfxASurface> gfxAlixPlatform::CreateOffscreenSurface(
++    const IntSize& aSize, gfxImageFormat aFormat) {
++  if (!Factory::AllowedSurfaceSize(aSize)) return nullptr;
++  RefPtr<gfxASurface> surface = new gfxImageSurface(aSize, aFormat);
++  return surface.forget();
++}
++
++bool gfxAlixPlatform::CreatePlatformFontList() {
++  return gfxPlatformFontList::Initialize(new gfxFT2FontList);
++}
++
++void gfxAlixPlatform::ReadSystemFontList(dom::SystemFontList* aList) {
++  gfxFT2FontList::PlatformFontList()->ReadSystemFontList(aList);
++}
++
++void gfxAlixPlatform::GetCommonFallbackFonts(
++    uint32_t aCh, Script aScript, FontPresentation aPresentation,
++    nsTArray<const char*>& aFonts) {
++  if (PrefersColor(aPresentation)) {
++    aFonts.AppendElement("Twemoji Mozilla");
++    aFonts.AppendElement("Noto Color Emoji");
++  }
++  aFonts.AppendElement("DejaVu Sans");
++  aFonts.AppendElement("Charis SIL Compact");
++  aFonts.AppendElement("Fira Code");
++}
++
++already_AddRefed<VsyncSource>
++gfxAlixPlatform::CreateGlobalHardwareVsyncSource() {
++  return GetSoftwareVsyncSource();
++}
+--- /dev/null
++++ b/gfx/thebes/AlixFontFiles.h
+@@ -0,0 +1,13 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#ifndef GFX_ALIX_FONT_FILES_H
++#define GFX_ALIX_FONT_FILES_H
++#include <cstddef>
++namespace mozilla::gfx {
++using AlixFontFileCallback = void (*)(const char* aPath, void* aContext);
++size_t EnumerateAlixFontFiles(const char* aRoot, AlixFontFileCallback aCallback,
++                              void* aContext);
++}
++#endif
+--- /dev/null
++++ b/gfx/thebes/AlixFontFiles.cpp
+@@ -0,0 +1,59 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#include "AlixFontFiles.h"
++#include <dirent.h>
++#include <cstring>
++#include <limits.h>
++#include <memory>
++#include <string>
++#include <strings.h>
++#include <sys/stat.h>
++#include <vector>
++
++namespace mozilla::gfx {
++size_t EnumerateAlixFontFiles(const char* aRoot, AlixFontFileCallback aCallback,
++                              void* aContext) {
++  if (!aRoot || !*aRoot || !aCallback) return 0;
++  std::vector<std::string> pending{aRoot};
++  size_t count = 0;
++  auto info = std::make_unique<struct stat>();
++  while (!pending.empty()) {
++    std::string path = std::move(pending.back());
++    pending.pop_back();
++    if (path.size() >= PATH_MAX) continue;
++    std::unique_ptr<DIR, decltype(&closedir)> directory(opendir(path.c_str()),
++                                                       closedir);
++    if (!directory) continue;
++    while (dirent* entry = readdir(directory.get())) {
++      if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
++      std::string child = path + "/" + entry->d_name;
++      if (child.size() >= PATH_MAX) continue;
++      unsigned type = entry->d_type;
++      if (type == DT_UNKNOWN) {
++        if (lstat(child.c_str(), info.get())) continue;
++        type = S_ISDIR(info->st_mode) ? DT_DIR : S_ISREG(info->st_mode) ? DT_REG :
++               S_ISLNK(info->st_mode) ? DT_LNK : DT_UNKNOWN;
++      }
++      if (type == DT_DIR) {
++        pending.push_back(std::move(child));
++        continue;
++      }
++      if (type == DT_LNK) {
++        if (stat(child.c_str(), info.get()) || !S_ISREG(info->st_mode)) continue;
++      } else if (type != DT_REG) {
++        continue;
++      }
++      std::string::size_type extension = child.rfind('.');
++      if (extension == std::string::npos) continue;
++      const char* suffix = child.c_str() + extension;
++      if (strcasecmp(suffix, ".ttf") && strcasecmp(suffix, ".otf") &&
++          strcasecmp(suffix, ".ttc") && strcasecmp(suffix, ".woff")) continue;
++      aCallback(child.c_str(), aContext);
++      ++count;
++    }
++  }
++  return count;
++}
++}
+--- /dev/null
++++ b/gfx/thebes/StandardFonts-alix.inc
+@@ -0,0 +1,8 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#ifdef StandardFonts
++static const char* kBaseFonts_Alix[] = {
++    "Charis SIL Compact", "DejaVu Sans", "Fira Code"};
++#endif
+--- a/gfx/thebes/gfxPlatform.cpp
++++ b/gfx/thebes/gfxPlatform.cpp
+@@ -3,6 +3,9 @@
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ #include "gfxPlatform.h"
++#ifdef MOZ_WIDGET_ALIX
++#  include "gfxAlixPlatform.h"
++#endif
+ 
+ #include "GfxDriverInfo.h"
+ #include "VRProcessManager.h"
+@@ -782,6 +785,8 @@
+     sHasVariationFontSupport = gfxPlatformMac::CheckVariationFontSupport();
+ #elif defined(MOZ_WIDGET_GTK)
+     sHasVariationFontSupport = gfxPlatformGtk::CheckVariationFontSupport();
++#elif defined(MOZ_WIDGET_ALIX)
++    sHasVariationFontSupport = gfxAlixPlatform::CheckVariationFontSupport();
+ #elif defined(ANDROID)
+     sHasVariationFontSupport = gfxAndroidPlatform::CheckVariationFontSupport();
+ #else
+@@ -921,6 +926,8 @@
+   gPlatform = new gfxPlatformMac;
+ #elif defined(MOZ_WIDGET_GTK)
+   gPlatform = new gfxPlatformGtk;
++#elif defined(MOZ_WIDGET_ALIX)
++  gPlatform = new gfxAlixPlatform;
+ #elif defined(ANDROID)
+   gPlatform = new gfxAndroidPlatform;
+ #else
+--- a/gfx/thebes/gfxFT2FontList.cpp
++++ b/gfx/thebes/gfxFT2FontList.cpp
+@@ -2,10 +2,16 @@
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+-#include <android/log.h>
++#ifdef MOZ_WIDGET_ANDROID
++#  include <android/log.h>
++#endif
+ #include <dirent.h>
+ 
+-#include "gfxAndroidPlatform.h"
++#ifdef MOZ_WIDGET_ANDROID
++#  include "gfxAndroidPlatform.h"
++#elif defined(MOZ_WIDGET_ALIX)
++#  include "AlixFontFiles.h"
++#endif
+ #include "mozilla/Base64.h"
+ #include "mozilla/EndianUtils.h"
+ #include "mozilla/MemoryReporting.h"
+@@ -15,7 +21,9 @@
+ #include "mozilla/dom/ContentChild.h"
+ #include "nsReadableUtils.h"
+ #include "nsXULAppAPI.h"
+-#define ALOG(args...) __android_log_print(ANDROID_LOG_INFO, "Gecko", ##args)
++#ifdef MOZ_WIDGET_ANDROID
++#  define ALOG(args...) __android_log_print(ANDROID_LOG_INFO, "Gecko", ##args)
++#endif
+ 
+ #include "ft2build.h"
+ #include FT_FREETYPE_H
+@@ -30,7 +38,11 @@
+ #include "gfxFontUtils.h"
+ #include "gfxUserFontSet.h"
+ #define StandardFonts
+-#include "StandardFonts-android.inc"
++#ifdef MOZ_WIDGET_ALIX
++#  include "StandardFonts-alix.inc"
++#else
++#  include "StandardFonts-android.inc"
++#endif
+ #undef StandardFonts
+ #include <fcntl.h>
+ #include <sys/mman.h>
+@@ -1258,6 +1270,10 @@
+ using Device = nsIGfxInfo::FontVisibilityDeviceDetermination;
+ FontVisibility gfxFT2FontList::GetVisibilityForFamily(
+     const nsACString& aName) const {
++#ifdef MOZ_WIDGET_ALIX
++  return FamilyInList(aName, kBaseFonts_Alix) ? FontVisibility::Base
++                                               : FontVisibility::User;
++#else
+   static Device fontVisibilityDevice = Device::Unassigned;
+   if (fontVisibilityDevice == Device::Unassigned) {
+     nsCOMPtr<nsIGfxInfo> gfxInfo = components::GfxInfo::Service();
+@@ -1311,10 +1327,16 @@
+   }
+ 
+   return FontVisibility::User;
++#endif
+ }
+ 
+ nsTArray<std::pair<const char**, uint32_t>>
+ gfxFT2FontList::GetFilteredPlatformFontLists() {
++#ifdef MOZ_WIDGET_ALIX
++  nsTArray<std::pair<const char**, uint32_t>> fontLists;
++  fontLists.AppendElement(std::make_pair(kBaseFonts_Alix, std::size(kBaseFonts_Alix)));
++  return fontLists;
++#else
+   static Device fontVisibilityDevice = Device::Unassigned;
+   if (fontVisibilityDevice == Device::Unassigned) {
+     nsCOMPtr<nsIGfxInfo> gfxInfo = components::GfxInfo::Service();
+@@ -1362,6 +1384,7 @@
+   }
+ 
+   return fontLists;
++#endif
+ }
+ 
+ static void GetName(hb_face_t* aFace, hb_ot_name_id_t aNameID,
+@@ -1541,6 +1564,10 @@
+   }
+   mFontNameCache->Init();
+ 
++#if defined(MOZ_WIDGET_ALIX)
++  FindFontsInDir("/usr/share/fonts"_ns, mFontNameCache.get());
++  FindFontsInDir("/usr/local/share/fonts"_ns, mFontNameCache.get());
++#else
+ #if defined(MOZ_WIDGET_ANDROID)
+   // Android API 29+ provides system font and font matcher API for native code.
+ 
+@@ -1584,6 +1611,7 @@
+   {
+     FindFontsInDir(androidFontsRoot, mFontNameCache.get());
+   }
++#endif
+ 
+   // Look for fonts stored in omnijar, unless we're on a low-memory
+   // device where we don't want to spend the RAM to decompress them.
+@@ -1653,6 +1681,19 @@
+ 
+ void gfxFT2FontList::FindFontsInDir(const nsCString& aDir,
+                                     FontNameCache* aFNC) {
++#ifdef MOZ_WIDGET_ALIX
++  struct ScanContext {
++    gfxFT2FontList* list;
++    FontNameCache* cache;
++  };
++  auto context = MakeUnique<ScanContext>(ScanContext{this, aFNC});
++  EnumerateAlixFontFiles(aDir.get(), [](const char* aPath, void* aContext) {
++    auto* context = static_cast<ScanContext*>(aContext);
++    context->list->mLock.AssertCurrentThreadIn();
++    context->list->AppendFacesFromFontFile(nsDependentCString(aPath),
++                                           context->cache, kUnknown);
++  }, context.get());
++#else
+   static const char* sStandardFonts[] = {"DroidSans.ttf",
+                                          "DroidSans-Bold.ttf",
+                                          "DroidSerif-Regular.ttf",
+@@ -1704,6 +1745,7 @@
+   }
+ 
+   closedir(d);
++#endif
+ }
+ 
+ void gfxFT2FontList::AppendFaceFromFontListEntry(const FontListEntry& aFLE,
+@@ -1906,7 +1948,11 @@
+     FontVisibilityProvider* aFontVisibilityProvider, const gfxFontStyle* aStyle,
+     nsAtom* aLanguage) {
+   FontFamily ff;
+-#if defined(MOZ_WIDGET_ANDROID)
++#if defined(MOZ_WIDGET_ALIX)
++  ff = FindFamily(aFontVisibilityProvider, "DejaVu Sans"_ns);
++  if (ff.IsNull()) ff = FindFamily(aFontVisibilityProvider, "Charis SIL Compact"_ns);
++  if (ff.IsNull()) ff = FindFamily(aFontVisibilityProvider, "Fira Code"_ns);
++#elif defined(MOZ_WIDGET_ANDROID)
+   ff = FindFamily(aFontVisibilityProvider, "Roboto"_ns);
+   if (ff.IsNull()) {
+     ff = FindFamily(aFontVisibilityProvider, "Droid Sans"_ns);
+--- a/gfx/thebes/gfxFT2Fonts.cpp
++++ b/gfx/thebes/gfxFT2Fonts.cpp
+@@ -8,6 +8,9 @@
+ #elif defined(XP_WIN)
+ #  include "gfxWindowsPlatform.h"
+ #  define gfxToolkitPlatform gfxWindowsPlatform
++#elif defined(MOZ_WIDGET_ALIX)
++#  include "gfxAlixPlatform.h"
++#  define gfxToolkitPlatform gfxAlixPlatform
+ #elif defined(ANDROID)
+ #  include "gfxAndroidPlatform.h"
+ #  define gfxToolkitPlatform gfxAndroidPlatform
+--- a/dom/ipc/PContent.ipdl
++++ b/dom/ipc/PContent.ipdl
+@@ -206,8 +206,8 @@
+ // SetXPCOMProcessAttributes passes an array of font data to the child,
+ // but each platform needs different details so we have platform-specific
+ // versions of the SystemFontListEntry type:
+-#if defined(ANDROID)
+-// Used on Android to pass the list of fonts on the device
++#if defined(ANDROID) || defined(MOZ_WIDGET_ALIX)
++// Used on FreeType platforms to pass the list of fonts on the device
+ // to the child process
+ struct SystemFontListEntry {
+     nsCString familyName;
+--- a/gfx/thebes/moz.build
++++ b/gfx/thebes/moz.build
+@@ -147,6 +147,31 @@
+             "XlibDisplay.cpp",
+         ]
+ 
++elif CONFIG["MOZ_WIDGET_TOOLKIT"] == "alix":
++    EXPORTS += ["gfxAlixPlatform.h", "gfxFT2FontBase.h", "gfxFT2Fonts.h"]
++    SOURCES += [
++        "AlixFontFiles.cpp",
++        "gfxAlixPlatform.cpp",
++        "gfxFT2FontBase.cpp",
++        "gfxFT2FontList.cpp",
++        "gfxFT2Fonts.cpp",
++        "gfxFT2Utils.cpp",
++        "PrintTargetPDF.cpp",
++    ]
++    EXPORTS.mozilla.gfx += ["PrintTargetPDF.h"]
++    FINAL_TARGET_FILES.fonts += [
++        "/gfx/wr/wrshell/res/FiraCode-Regular.ttf",
++        "/layout/reftests/fonts/dejavu-sans/DejaVuSans-Bold.ttf",
++        "/layout/reftests/fonts/dejavu-sans/DejaVuSans-BoldOblique.ttf",
++        "/layout/reftests/fonts/dejavu-sans/DejaVuSans-Oblique.ttf",
++        "/layout/reftests/fonts/dejavu-sans/DejaVuSans.ttf",
++        "/mobile/android/fonts/CharisSILCompact-B.ttf",
++        "/mobile/android/fonts/CharisSILCompact-BI.ttf",
++        "/mobile/android/fonts/CharisSILCompact-I.ttf",
++        "/mobile/android/fonts/CharisSILCompact-R.ttf",
++        "AlixFontLicenses.txt",
++    ]
++
+ elif CONFIG["MOZ_WIDGET_TOOLKIT"] == "windows":
+     EXPORTS += [
+         "gfxDWriteCommon.h",
+@@ -256,10 +281,10 @@
+     "/widget/gtk",
+ ]
+ 
+-if CONFIG["MOZ_WIDGET_TOOLKIT"] in ("android", "gtk"):
++if CONFIG["MOZ_WIDGET_TOOLKIT"] in ("android", "gtk", "alix"):
+     DEFINES["MOZ_ENABLE_FREETYPE"] = True
+ 
+-if CONFIG["MOZ_WIDGET_TOOLKIT"] in ("android"):
++if CONFIG["MOZ_WIDGET_TOOLKIT"] in ("android", "alix"):
+     CXXFLAGS += CONFIG["CAIRO_FT_CFLAGS"]
+ 
+ if CONFIG["MOZ_WIDGET_TOOLKIT"] == "gtk":
+--- a/browser/installer/package-manifest.in
++++ b/browser/installer/package-manifest.in
+@@ -50,7 +50,7 @@
+ @RESPATH@/dictionaries/*
+ @RESPATH@/browser/localization/*
+ @RESPATH@/localization/*
+-#if defined(XP_WIN) || defined(MOZ_WIDGET_GTK)
++#if defined(XP_WIN) || defined(MOZ_WIDGET_GTK) || defined(MOZ_WIDGET_ALIX)
+ @RESPATH@/fonts/*
+ #endif
+ @RESPATH@/hyphenation/*
+--- a/modules/libpref/init/all.js
++++ b/modules/libpref/init/all.js
+@@ -4259,3 +4259,12 @@
+ #if defined(MOZ_ARTIFACT_BUILDS) && defined(XP_MACOSX)
+   pref("dom.ipc.processLaunch.useMacPlists", true);
+ #endif
++
++#ifdef MOZ_WIDGET_ALIX
++pref("font.name-list.serif.x-western", "Charis SIL Compact");
++pref("font.name-list.sans-serif.x-western", "DejaVu Sans");
++pref("font.name-list.monospace.x-western", "Fira Code");
++pref("font.name-list.serif.x-unicode", "Charis SIL Compact");
++pref("font.name-list.sans-serif.x-unicode", "DejaVu Sans");
++pref("font.name-list.monospace.x-unicode", "Fira Code");
++#endif
+--- /dev/null
++++ b/gfx/thebes/AlixFontLicenses.txt
+@@ -0,0 +1,707 @@
++layout/reftests/fonts/dejavu-sans/DejaVuSans.ttf
++Copyright (c) 2003 by Bitstream, Inc. All Rights Reserved.
++Copyright (c) 2006 by Tavmjong Bah. All Rights Reserved.
++DejaVu changes are in public domain
++
++Fonts are (c) Bitstream (see below). DejaVu changes are in public domain. Glyphs imported from Arev fonts are (c) Tavmjung Bah (see below)
++
++Bitstream Vera Fonts Copyright
++------------------------------
++
++Copyright (c) 2003 by Bitstream, Inc. All Rights Reserved. Bitstream Vera is
++a trademark of Bitstream, Inc.
++
++Permission is hereby granted, free of charge, to any person obtaining a copy
++of the fonts accompanying this license ("Fonts") and associated
++documentation files (the "Font Software"), to reproduce and distribute the
++Font Software, including without limitation the rights to use, copy, merge,
++publish, distribute, and/or sell copies of the Font Software, and to permit
++persons to whom the Font Software is furnished to do so, subject to the
++following conditions:
++
++The above copyright and trademark notices and this permission notice shall
++be included in all copies of one or more of the Font Software typefaces.
++
++The Font Software may be modified, altered, or added to, and in particular
++the designs of glyphs or characters in the Fonts may be modified and
++additional glyphs or characters may be added to the Fonts, only if the fonts
++are renamed to names not containing either the words "Bitstream" or the word
++"Vera".
++
++This License becomes null and void to the extent applicable to Fonts or Font
++Software that has been modified and is distributed under the "Bitstream
++Vera" names.
++
++The Font Software may be sold as part of a larger software package but no
++copy of one or more of the Font Software typefaces may be sold by itself.
++
++THE FONT SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
++OR IMPLIED, INCLUDING BUT NOT LIMITED TO ANY WARRANTIES OF MERCHANTABILITY,
++FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF COPYRIGHT, PATENT,
++TRADEMARK, OR OTHER RIGHT. IN NO EVENT SHALL BITSTREAM OR THE GNOME
++FOUNDATION BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, INCLUDING
++ANY GENERAL, SPECIAL, INDIRECT, INCIDENTAL, OR CONSEQUENTIAL DAMAGES,
++WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF
++THE USE OR INABILITY TO USE THE FONT SOFTWARE OR FROM OTHER DEALINGS IN THE
++FONT SOFTWARE.
++
++Except as contained in this notice, the names of Gnome, the Gnome
++Foundation, and Bitstream Inc., shall not be used in advertising or
++otherwise to promote the sale, use or other dealings in this Font Software
++without prior written authorization from the Gnome Foundation or Bitstream
++Inc., respectively. For further information, contact: fonts at gnome dot
++org.
++
++Arev Fonts Copyright
++------------------------------
++
++Copyright (c) 2006 by Tavmjong Bah. All Rights Reserved.
++
++Permission is hereby granted, free of charge, to any person obtaining
++a copy of the fonts accompanying this license ("Fonts") and
++associated documentation files (the "Font Software"), to reproduce
++and distribute the modifications to the Bitstream Vera Font Software,
++including without limitation the rights to use, copy, merge, publish,
++distribute, and/or sell copies of the Font Software, and to permit
++persons to whom the Font Software is furnished to do so, subject to
++the following conditions:
++
++The above copyright and trademark notices and this permission notice
++shall be included in all copies of one or more of the Font Software
++typefaces.
++
++The Font Software may be modified, altered, or added to, and in
++particular the designs of glyphs or characters in the Fonts may be
++modified and additional glyphs or characters may be added to the
++Fonts, only if the fonts are renamed to names not containing either
++the words "Tavmjong Bah" or the word "Arev".
++
++This License becomes null and void to the extent applicable to Fonts
++or Font Software that has been modified and is distributed under the
++"Tavmjong Bah Arev" names.
++
++The Font Software may be sold as part of a larger software package but
++no copy of one or more of the Font Software typefaces may be sold by
++itself.
++
++THE FONT SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
++EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO ANY WARRANTIES OF
++MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT
++OF COPYRIGHT, PATENT, TRADEMARK, OR OTHER RIGHT. IN NO EVENT SHALL
++TAVMJONG BAH BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
++INCLUDING ANY GENERAL, SPECIAL, INDIRECT, INCIDENTAL, OR CONSEQUENTIAL
++DAMAGES, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++FROM, OUT OF THE USE OR INABILITY TO USE THE FONT SOFTWARE OR FROM
++OTHER DEALINGS IN THE FONT SOFTWARE.
++
++Except as contained in this notice, the name of Tavmjong Bah shall not
++be used in advertising or otherwise to promote the sale, use or other
++dealings in this Font Software without prior written authorization
++from Tavmjong Bah. For further information, contact: tavmjong @ free
++. fr.
++http://dejavu.sourceforge.net/wiki/index.php/License
++
++layout/reftests/fonts/dejavu-sans/DejaVuSans-Bold.ttf
++Copyright (c) 2003 by Bitstream, Inc. All Rights Reserved.
++Copyright (c) 2006 by Tavmjong Bah. All Rights Reserved.
++DejaVu changes are in public domain
++
++Fonts are (c) Bitstream (see below). DejaVu changes are in public domain. Glyphs imported from Arev fonts are (c) Tavmjung Bah (see below)
++
++Bitstream Vera Fonts Copyright
++------------------------------
++
++Copyright (c) 2003 by Bitstream, Inc. All Rights Reserved. Bitstream Vera is
++a trademark of Bitstream, Inc.
++
++Permission is hereby granted, free of charge, to any person obtaining a copy
++of the fonts accompanying this license ("Fonts") and associated
++documentation files (the "Font Software"), to reproduce and distribute the
++Font Software, including without limitation the rights to use, copy, merge,
++publish, distribute, and/or sell copies of the Font Software, and to permit
++persons to whom the Font Software is furnished to do so, subject to the
++following conditions:
++
++The above copyright and trademark notices and this permission notice shall
++be included in all copies of one or more of the Font Software typefaces.
++
++The Font Software may be modified, altered, or added to, and in particular
++the designs of glyphs or characters in the Fonts may be modified and
++additional glyphs or characters may be added to the Fonts, only if the fonts
++are renamed to names not containing either the words "Bitstream" or the word
++"Vera".
++
++This License becomes null and void to the extent applicable to Fonts or Font
++Software that has been modified and is distributed under the "Bitstream
++Vera" names.
++
++The Font Software may be sold as part of a larger software package but no
++copy of one or more of the Font Software typefaces may be sold by itself.
++
++THE FONT SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
++OR IMPLIED, INCLUDING BUT NOT LIMITED TO ANY WARRANTIES OF MERCHANTABILITY,
++FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF COPYRIGHT, PATENT,
++TRADEMARK, OR OTHER RIGHT. IN NO EVENT SHALL BITSTREAM OR THE GNOME
++FOUNDATION BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, INCLUDING
++ANY GENERAL, SPECIAL, INDIRECT, INCIDENTAL, OR CONSEQUENTIAL DAMAGES,
++WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF
++THE USE OR INABILITY TO USE THE FONT SOFTWARE OR FROM OTHER DEALINGS IN THE
++FONT SOFTWARE.
++
++Except as contained in this notice, the names of Gnome, the Gnome
++Foundation, and Bitstream Inc., shall not be used in advertising or
++otherwise to promote the sale, use or other dealings in this Font Software
++without prior written authorization from the Gnome Foundation or Bitstream
++Inc., respectively. For further information, contact: fonts at gnome dot
++org.
++
++Arev Fonts Copyright
++------------------------------
++
++Copyright (c) 2006 by Tavmjong Bah. All Rights Reserved.
++
++Permission is hereby granted, free of charge, to any person obtaining
++a copy of the fonts accompanying this license ("Fonts") and
++associated documentation files (the "Font Software"), to reproduce
++and distribute the modifications to the Bitstream Vera Font Software,
++including without limitation the rights to use, copy, merge, publish,
++distribute, and/or sell copies of the Font Software, and to permit
++persons to whom the Font Software is furnished to do so, subject to
++the following conditions:
++
++The above copyright and trademark notices and this permission notice
++shall be included in all copies of one or more of the Font Software
++typefaces.
++
++The Font Software may be modified, altered, or added to, and in
++particular the designs of glyphs or characters in the Fonts may be
++modified and additional glyphs or characters may be added to the
++Fonts, only if the fonts are renamed to names not containing either
++the words "Tavmjong Bah" or the word "Arev".
++
++This License becomes null and void to the extent applicable to Fonts
++or Font Software that has been modified and is distributed under the
++"Tavmjong Bah Arev" names.
++
++The Font Software may be sold as part of a larger software package but
++no copy of one or more of the Font Software typefaces may be sold by
++itself.
++
++THE FONT SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
++EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO ANY WARRANTIES OF
++MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT
++OF COPYRIGHT, PATENT, TRADEMARK, OR OTHER RIGHT. IN NO EVENT SHALL
++TAVMJONG BAH BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
++INCLUDING ANY GENERAL, SPECIAL, INDIRECT, INCIDENTAL, OR CONSEQUENTIAL
++DAMAGES, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++FROM, OUT OF THE USE OR INABILITY TO USE THE FONT SOFTWARE OR FROM
++OTHER DEALINGS IN THE FONT SOFTWARE.
++
++Except as contained in this notice, the name of Tavmjong Bah shall not
++be used in advertising or otherwise to promote the sale, use or other
++dealings in this Font Software without prior written authorization
++from Tavmjong Bah. For further information, contact: tavmjong @ free
++. fr.
++http://dejavu.sourceforge.net/wiki/index.php/License
++
++layout/reftests/fonts/dejavu-sans/DejaVuSans-Oblique.ttf
++Copyright (c) 2003 by Bitstream, Inc. All Rights Reserved.
++Copyright (c) 2006 by Tavmjong Bah. All Rights Reserved.
++DejaVu changes are in public domain
++
++Fonts are (c) Bitstream (see below). DejaVu changes are in public domain. Glyphs imported from Arev fonts are (c) Tavmjung Bah (see below)
++
++Bitstream Vera Fonts Copyright
++------------------------------
++
++Copyright (c) 2003 by Bitstream, Inc. All Rights Reserved. Bitstream Vera is
++a trademark of Bitstream, Inc.
++
++Permission is hereby granted, free of charge, to any person obtaining a copy
++of the fonts accompanying this license ("Fonts") and associated
++documentation files (the "Font Software"), to reproduce and distribute the
++Font Software, including without limitation the rights to use, copy, merge,
++publish, distribute, and/or sell copies of the Font Software, and to permit
++persons to whom the Font Software is furnished to do so, subject to the
++following conditions:
++
++The above copyright and trademark notices and this permission notice shall
++be included in all copies of one or more of the Font Software typefaces.
++
++The Font Software may be modified, altered, or added to, and in particular
++the designs of glyphs or characters in the Fonts may be modified and
++additional glyphs or characters may be added to the Fonts, only if the fonts
++are renamed to names not containing either the words "Bitstream" or the word
++"Vera".
++
++This License becomes null and void to the extent applicable to Fonts or Font
++Software that has been modified and is distributed under the "Bitstream
++Vera" names.
++
++The Font Software may be sold as part of a larger software package but no
++copy of one or more of the Font Software typefaces may be sold by itself.
++
++THE FONT SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
++OR IMPLIED, INCLUDING BUT NOT LIMITED TO ANY WARRANTIES OF MERCHANTABILITY,
++FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF COPYRIGHT, PATENT,
++TRADEMARK, OR OTHER RIGHT. IN NO EVENT SHALL BITSTREAM OR THE GNOME
++FOUNDATION BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, INCLUDING
++ANY GENERAL, SPECIAL, INDIRECT, INCIDENTAL, OR CONSEQUENTIAL DAMAGES,
++WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF
++THE USE OR INABILITY TO USE THE FONT SOFTWARE OR FROM OTHER DEALINGS IN THE
++FONT SOFTWARE.
++
++Except as contained in this notice, the names of Gnome, the Gnome
++Foundation, and Bitstream Inc., shall not be used in advertising or
++otherwise to promote the sale, use or other dealings in this Font Software
++without prior written authorization from the Gnome Foundation or Bitstream
++Inc., respectively. For further information, contact: fonts at gnome dot
++org.
++
++Arev Fonts Copyright
++------------------------------
++
++Copyright (c) 2006 by Tavmjong Bah. All Rights Reserved.
++
++Permission is hereby granted, free of charge, to any person obtaining
++a copy of the fonts accompanying this license ("Fonts") and
++associated documentation files (the "Font Software"), to reproduce
++and distribute the modifications to the Bitstream Vera Font Software,
++including without limitation the rights to use, copy, merge, publish,
++distribute, and/or sell copies of the Font Software, and to permit
++persons to whom the Font Software is furnished to do so, subject to
++the following conditions:
++
++The above copyright and trademark notices and this permission notice
++shall be included in all copies of one or more of the Font Software
++typefaces.
++
++The Font Software may be modified, altered, or added to, and in
++particular the designs of glyphs or characters in the Fonts may be
++modified and additional glyphs or characters may be added to the
++Fonts, only if the fonts are renamed to names not containing either
++the words "Tavmjong Bah" or the word "Arev".
++
++This License becomes null and void to the extent applicable to Fonts
++or Font Software that has been modified and is distributed under the
++"Tavmjong Bah Arev" names.
++
++The Font Software may be sold as part of a larger software package but
++no copy of one or more of the Font Software typefaces may be sold by
++itself.
++
++THE FONT SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
++EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO ANY WARRANTIES OF
++MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT
++OF COPYRIGHT, PATENT, TRADEMARK, OR OTHER RIGHT. IN NO EVENT SHALL
++TAVMJONG BAH BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
++INCLUDING ANY GENERAL, SPECIAL, INDIRECT, INCIDENTAL, OR CONSEQUENTIAL
++DAMAGES, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++FROM, OUT OF THE USE OR INABILITY TO USE THE FONT SOFTWARE OR FROM
++OTHER DEALINGS IN THE FONT SOFTWARE.
++
++Except as contained in this notice, the name of Tavmjong Bah shall not
++be used in advertising or otherwise to promote the sale, use or other
++dealings in this Font Software without prior written authorization
++from Tavmjong Bah. For further information, contact: tavmjong @ free
++. fr.
++http://dejavu.sourceforge.net/wiki/index.php/License
++
++layout/reftests/fonts/dejavu-sans/DejaVuSans-BoldOblique.ttf
++Copyright (c) 2003 by Bitstream, Inc. All Rights Reserved.
++Copyright (c) 2006 by Tavmjong Bah. All Rights Reserved.
++DejaVu changes are in public domain
++
++Fonts are (c) Bitstream (see below). DejaVu changes are in public domain. Glyphs imported from Arev fonts are (c) Tavmjung Bah (see below)
++
++Bitstream Vera Fonts Copyright
++------------------------------
++
++Copyright (c) 2003 by Bitstream, Inc. All Rights Reserved. Bitstream Vera is
++a trademark of Bitstream, Inc.
++
++Permission is hereby granted, free of charge, to any person obtaining a copy
++of the fonts accompanying this license ("Fonts") and associated
++documentation files (the "Font Software"), to reproduce and distribute the
++Font Software, including without limitation the rights to use, copy, merge,
++publish, distribute, and/or sell copies of the Font Software, and to permit
++persons to whom the Font Software is furnished to do so, subject to the
++following conditions:
++
++The above copyright and trademark notices and this permission notice shall
++be included in all copies of one or more of the Font Software typefaces.
++
++The Font Software may be modified, altered, or added to, and in particular
++the designs of glyphs or characters in the Fonts may be modified and
++additional glyphs or characters may be added to the Fonts, only if the fonts
++are renamed to names not containing either the words "Bitstream" or the word
++"Vera".
++
++This License becomes null and void to the extent applicable to Fonts or Font
++Software that has been modified and is distributed under the "Bitstream
++Vera" names.
++
++The Font Software may be sold as part of a larger software package but no
++copy of one or more of the Font Software typefaces may be sold by itself.
++
++THE FONT SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
++OR IMPLIED, INCLUDING BUT NOT LIMITED TO ANY WARRANTIES OF MERCHANTABILITY,
++FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF COPYRIGHT, PATENT,
++TRADEMARK, OR OTHER RIGHT. IN NO EVENT SHALL BITSTREAM OR THE GNOME
++FOUNDATION BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, INCLUDING
++ANY GENERAL, SPECIAL, INDIRECT, INCIDENTAL, OR CONSEQUENTIAL DAMAGES,
++WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF
++THE USE OR INABILITY TO USE THE FONT SOFTWARE OR FROM OTHER DEALINGS IN THE
++FONT SOFTWARE.
++
++Except as contained in this notice, the names of Gnome, the Gnome
++Foundation, and Bitstream Inc., shall not be used in advertising or
++otherwise to promote the sale, use or other dealings in this Font Software
++without prior written authorization from the Gnome Foundation or Bitstream
++Inc., respectively. For further information, contact: fonts at gnome dot
++org.
++
++Arev Fonts Copyright
++------------------------------
++
++Copyright (c) 2006 by Tavmjong Bah. All Rights Reserved.
++
++Permission is hereby granted, free of charge, to any person obtaining
++a copy of the fonts accompanying this license ("Fonts") and
++associated documentation files (the "Font Software"), to reproduce
++and distribute the modifications to the Bitstream Vera Font Software,
++including without limitation the rights to use, copy, merge, publish,
++distribute, and/or sell copies of the Font Software, and to permit
++persons to whom the Font Software is furnished to do so, subject to
++the following conditions:
++
++The above copyright and trademark notices and this permission notice
++shall be included in all copies of one or more of the Font Software
++typefaces.
++
++The Font Software may be modified, altered, or added to, and in
++particular the designs of glyphs or characters in the Fonts may be
++modified and additional glyphs or characters may be added to the
++Fonts, only if the fonts are renamed to names not containing either
++the words "Tavmjong Bah" or the word "Arev".
++
++This License becomes null and void to the extent applicable to Fonts
++or Font Software that has been modified and is distributed under the
++"Tavmjong Bah Arev" names.
++
++The Font Software may be sold as part of a larger software package but
++no copy of one or more of the Font Software typefaces may be sold by
++itself.
++
++THE FONT SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
++EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO ANY WARRANTIES OF
++MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT
++OF COPYRIGHT, PATENT, TRADEMARK, OR OTHER RIGHT. IN NO EVENT SHALL
++TAVMJONG BAH BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
++INCLUDING ANY GENERAL, SPECIAL, INDIRECT, INCIDENTAL, OR CONSEQUENTIAL
++DAMAGES, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++FROM, OUT OF THE USE OR INABILITY TO USE THE FONT SOFTWARE OR FROM
++OTHER DEALINGS IN THE FONT SOFTWARE.
++
++Except as contained in this notice, the name of Tavmjong Bah shall not
++be used in advertising or otherwise to promote the sale, use or other
++dealings in this Font Software without prior written authorization
++from Tavmjong Bah. For further information, contact: tavmjong @ free
++. fr.
++http://dejavu.sourceforge.net/wiki/index.php/License
++
++mobile/android/fonts/CharisSILCompact-R.ttf
++Copyright (c) 1997-2013, SIL International (http://scripts.sil.org/)
++Copyright (c) 1997-2012, SIL International (http://www.sil.org/) with Reserved Font Names "Charis" and "SIL".
++
++This Font Software is licensed under the SIL Open Font License, Version 1.1. This license is copied below, and is also available with a FAQ at: http://scripts.sil.org/OFL
++
++
++-----------------------------------------------------------
++SIL OPEN FONT LICENSE Version 1.1 - 26 February 2007
++-----------------------------------------------------------
++
++PREAMBLE
++The goals of the Open Font License (OFL) are to stimulate worldwide development of collaborative font projects, to support the font creation efforts of academic and linguistic communities, and to provide a free and open framework in which fonts may be shared and improved in partnership with others.
++
++The OFL allows the licensed fonts to be used, studied, modified and redistributed freely as long as they are not sold by themselves. The fonts, including any derivative works, can be bundled, embedded, redistributed and/or sold with any software provided that any reserved names are not used by derivative works. The fonts and derivatives, however, cannot be released under any other type of license. The requirement for fonts to remain under this license does not apply to any document created using the fonts or their derivatives.
++
++DEFINITIONS
++"Font Software" refers to the set of files released by the Copyright Holder(s) under this license and clearly marked as such. This may include source files, build scripts and documentation.
++
++"Reserved Font Name" refers to any names specified as such after the copyright statement(s).
++
++"Original Version" refers to the collection of Font Software components as distributed by the Copyright Holder(s).
++
++"Modified Version" refers to any derivative made by adding to, deleting, or substituting -- in part or in whole -- any of the components of the Original Version, by changing formats or by porting the Font Software to a new environment.
++
++"Author" refers to any designer, engineer, programmer, technical writer or other person who contributed to the Font Software.
++
++PERMISSION & CONDITIONS
++Permission is hereby granted, free of charge, to any person obtaining a copy of the Font Software, to use, study, copy, merge, embed, modify, redistribute, and sell modified and unmodified copies of the Font Software, subject to the following conditions:
++
++1) Neither the Font Software nor any of its individual components, in Original or Modified Versions, may be sold by itself.
++
++2) Original or Modified Versions of the Font Software may be bundled, redistributed and/or sold with any software, provided that each copy contains the above copyright notice and this license. These can be included either as stand-alone text files, human-readable headers or in the appropriate machine-readable metadata fields within text or binary files as long as those fields can be easily viewed by the user.
++
++3) No Modified Version of the Font Software may use the Reserved Font Name(s) unless explicit written permission is granted by the corresponding Copyright Holder. This restriction only applies to the primary font name as presented to the users.
++
++4) The name(s) of the Copyright Holder(s) or the Author(s) of the Font Software shall not be used to promote, endorse or advertise any Modified Version, except to acknowledge the contribution(s) of the Copyright Holder(s) and the Author(s) or with their explicit written permission.
++
++5) The Font Software, modified or unmodified, in part or in whole, must be distributed entirely under this license, and must not be distributed under any other license. The requirement for fonts to remain under this license does not apply to any document created using the Font Software.
++
++TERMINATION
++This license becomes null and void if any of the above conditions are not met.
++
++DISCLAIMER
++THE FONT SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO ANY WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF COPYRIGHT, PATENT, TRADEMARK, OR OTHER RIGHT. IN NO EVENT SHALL THE COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, INCLUDING ANY GENERAL, SPECIAL, INDIRECT, INCIDENTAL, OR CONSEQUENTIAL DAMAGES, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF THE USE OR INABILITY TO USE THE FONT SOFTWARE OR FROM OTHER DEALINGS IN THE FONT SOFTWARE.
++
++
++http://scripts.sil.org/OFL
++
++mobile/android/fonts/CharisSILCompact-B.ttf
++Copyright (c) 1997-2013, SIL International (http://scripts.sil.org/)
++Copyright (c) 1997-2012, SIL International (http://www.sil.org/) with Reserved Font Names "Charis" and "SIL".
++
++This Font Software is licensed under the SIL Open Font License, Version 1.1. This license is copied below, and is also available with a FAQ at: http://scripts.sil.org/OFL
++
++
++-----------------------------------------------------------
++SIL OPEN FONT LICENSE Version 1.1 - 26 February 2007
++-----------------------------------------------------------
++
++PREAMBLE
++The goals of the Open Font License (OFL) are to stimulate worldwide development of collaborative font projects, to support the font creation efforts of academic and linguistic communities, and to provide a free and open framework in which fonts may be shared and improved in partnership with others.
++
++The OFL allows the licensed fonts to be used, studied, modified and redistributed freely as long as they are not sold by themselves. The fonts, including any derivative works, can be bundled, embedded, redistributed and/or sold with any software provided that any reserved names are not used by derivative works. The fonts and derivatives, however, cannot be released under any other type of license. The requirement for fonts to remain under this license does not apply to any document created using the fonts or their derivatives.
++
++DEFINITIONS
++"Font Software" refers to the set of files released by the Copyright Holder(s) under this license and clearly marked as such. This may include source files, build scripts and documentation.
++
++"Reserved Font Name" refers to any names specified as such after the copyright statement(s).
++
++"Original Version" refers to the collection of Font Software components as distributed by the Copyright Holder(s).
++
++"Modified Version" refers to any derivative made by adding to, deleting, or substituting -- in part or in whole -- any of the components of the Original Version, by changing formats or by porting the Font Software to a new environment.
++
++"Author" refers to any designer, engineer, programmer, technical writer or other person who contributed to the Font Software.
++
++PERMISSION & CONDITIONS
++Permission is hereby granted, free of charge, to any person obtaining a copy of the Font Software, to use, study, copy, merge, embed, modify, redistribute, and sell modified and unmodified copies of the Font Software, subject to the following conditions:
++
++1) Neither the Font Software nor any of its individual components, in Original or Modified Versions, may be sold by itself.
++
++2) Original or Modified Versions of the Font Software may be bundled, redistributed and/or sold with any software, provided that each copy contains the above copyright notice and this license. These can be included either as stand-alone text files, human-readable headers or in the appropriate machine-readable metadata fields within text or binary files as long as those fields can be easily viewed by the user.
++
++3) No Modified Version of the Font Software may use the Reserved Font Name(s) unless explicit written permission is granted by the corresponding Copyright Holder. This restriction only applies to the primary font name as presented to the users.
++
++4) The name(s) of the Copyright Holder(s) or the Author(s) of the Font Software shall not be used to promote, endorse or advertise any Modified Version, except to acknowledge the contribution(s) of the Copyright Holder(s) and the Author(s) or with their explicit written permission.
++
++5) The Font Software, modified or unmodified, in part or in whole, must be distributed entirely under this license, and must not be distributed under any other license. The requirement for fonts to remain under this license does not apply to any document created using the Font Software.
++
++TERMINATION
++This license becomes null and void if any of the above conditions are not met.
++
++DISCLAIMER
++THE FONT SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO ANY WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF COPYRIGHT, PATENT, TRADEMARK, OR OTHER RIGHT. IN NO EVENT SHALL THE COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, INCLUDING ANY GENERAL, SPECIAL, INDIRECT, INCIDENTAL, OR CONSEQUENTIAL DAMAGES, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF THE USE OR INABILITY TO USE THE FONT SOFTWARE OR FROM OTHER DEALINGS IN THE FONT SOFTWARE.
++
++
++http://scripts.sil.org/OFL
++
++mobile/android/fonts/CharisSILCompact-I.ttf
++Copyright (c) 1997-2013, SIL International (http://scripts.sil.org/)
++Copyright (c) 1997-2012, SIL International (http://www.sil.org/) with Reserved Font Names "Charis" and "SIL".
++
++This Font Software is licensed under the SIL Open Font License, Version 1.1. This license is copied below, and is also available with a FAQ at: http://scripts.sil.org/OFL
++
++
++-----------------------------------------------------------
++SIL OPEN FONT LICENSE Version 1.1 - 26 February 2007
++-----------------------------------------------------------
++
++PREAMBLE
++The goals of the Open Font License (OFL) are to stimulate worldwide development of collaborative font projects, to support the font creation efforts of academic and linguistic communities, and to provide a free and open framework in which fonts may be shared and improved in partnership with others.
++
++The OFL allows the licensed fonts to be used, studied, modified and redistributed freely as long as they are not sold by themselves. The fonts, including any derivative works, can be bundled, embedded, redistributed and/or sold with any software provided that any reserved names are not used by derivative works. The fonts and derivatives, however, cannot be released under any other type of license. The requirement for fonts to remain under this license does not apply to any document created using the fonts or their derivatives.
++
++DEFINITIONS
++"Font Software" refers to the set of files released by the Copyright Holder(s) under this license and clearly marked as such. This may include source files, build scripts and documentation.
++
++"Reserved Font Name" refers to any names specified as such after the copyright statement(s).
++
++"Original Version" refers to the collection of Font Software components as distributed by the Copyright Holder(s).
++
++"Modified Version" refers to any derivative made by adding to, deleting, or substituting -- in part or in whole -- any of the components of the Original Version, by changing formats or by porting the Font Software to a new environment.
++
++"Author" refers to any designer, engineer, programmer, technical writer or other person who contributed to the Font Software.
++
++PERMISSION & CONDITIONS
++Permission is hereby granted, free of charge, to any person obtaining a copy of the Font Software, to use, study, copy, merge, embed, modify, redistribute, and sell modified and unmodified copies of the Font Software, subject to the following conditions:
++
++1) Neither the Font Software nor any of its individual components, in Original or Modified Versions, may be sold by itself.
++
++2) Original or Modified Versions of the Font Software may be bundled, redistributed and/or sold with any software, provided that each copy contains the above copyright notice and this license. These can be included either as stand-alone text files, human-readable headers or in the appropriate machine-readable metadata fields within text or binary files as long as those fields can be easily viewed by the user.
++
++3) No Modified Version of the Font Software may use the Reserved Font Name(s) unless explicit written permission is granted by the corresponding Copyright Holder. This restriction only applies to the primary font name as presented to the users.
++
++4) The name(s) of the Copyright Holder(s) or the Author(s) of the Font Software shall not be used to promote, endorse or advertise any Modified Version, except to acknowledge the contribution(s) of the Copyright Holder(s) and the Author(s) or with their explicit written permission.
++
++5) The Font Software, modified or unmodified, in part or in whole, must be distributed entirely under this license, and must not be distributed under any other license. The requirement for fonts to remain under this license does not apply to any document created using the Font Software.
++
++TERMINATION
++This license becomes null and void if any of the above conditions are not met.
++
++DISCLAIMER
++THE FONT SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO ANY WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF COPYRIGHT, PATENT, TRADEMARK, OR OTHER RIGHT. IN NO EVENT SHALL THE COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, INCLUDING ANY GENERAL, SPECIAL, INDIRECT, INCIDENTAL, OR CONSEQUENTIAL DAMAGES, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF THE USE OR INABILITY TO USE THE FONT SOFTWARE OR FROM OTHER DEALINGS IN THE FONT SOFTWARE.
++
++
++http://scripts.sil.org/OFL
++
++mobile/android/fonts/CharisSILCompact-BI.ttf
++Copyright (c) 1997-2013, SIL International (http://scripts.sil.org/)
++Copyright (c) 1997-2012, SIL International (http://www.sil.org/) with Reserved Font Names "Charis" and "SIL".
++
++This Font Software is licensed under the SIL Open Font License, Version 1.1. This license is copied below, and is also available with a FAQ at: http://scripts.sil.org/OFL
++
++
++-----------------------------------------------------------
++SIL OPEN FONT LICENSE Version 1.1 - 26 February 2007
++-----------------------------------------------------------
++
++PREAMBLE
++The goals of the Open Font License (OFL) are to stimulate worldwide development of collaborative font projects, to support the font creation efforts of academic and linguistic communities, and to provide a free and open framework in which fonts may be shared and improved in partnership with others.
++
++The OFL allows the licensed fonts to be used, studied, modified and redistributed freely as long as they are not sold by themselves. The fonts, including any derivative works, can be bundled, embedded, redistributed and/or sold with any software provided that any reserved names are not used by derivative works. The fonts and derivatives, however, cannot be released under any other type of license. The requirement for fonts to remain under this license does not apply to any document created using the fonts or their derivatives.
++
++DEFINITIONS
++"Font Software" refers to the set of files released by the Copyright Holder(s) under this license and clearly marked as such. This may include source files, build scripts and documentation.
++
++"Reserved Font Name" refers to any names specified as such after the copyright statement(s).
++
++"Original Version" refers to the collection of Font Software components as distributed by the Copyright Holder(s).
++
++"Modified Version" refers to any derivative made by adding to, deleting, or substituting -- in part or in whole -- any of the components of the Original Version, by changing formats or by porting the Font Software to a new environment.
++
++"Author" refers to any designer, engineer, programmer, technical writer or other person who contributed to the Font Software.
++
++PERMISSION & CONDITIONS
++Permission is hereby granted, free of charge, to any person obtaining a copy of the Font Software, to use, study, copy, merge, embed, modify, redistribute, and sell modified and unmodified copies of the Font Software, subject to the following conditions:
++
++1) Neither the Font Software nor any of its individual components, in Original or Modified Versions, may be sold by itself.
++
++2) Original or Modified Versions of the Font Software may be bundled, redistributed and/or sold with any software, provided that each copy contains the above copyright notice and this license. These can be included either as stand-alone text files, human-readable headers or in the appropriate machine-readable metadata fields within text or binary files as long as those fields can be easily viewed by the user.
++
++3) No Modified Version of the Font Software may use the Reserved Font Name(s) unless explicit written permission is granted by the corresponding Copyright Holder. This restriction only applies to the primary font name as presented to the users.
++
++4) The name(s) of the Copyright Holder(s) or the Author(s) of the Font Software shall not be used to promote, endorse or advertise any Modified Version, except to acknowledge the contribution(s) of the Copyright Holder(s) and the Author(s) or with their explicit written permission.
++
++5) The Font Software, modified or unmodified, in part or in whole, must be distributed entirely under this license, and must not be distributed under any other license. The requirement for fonts to remain under this license does not apply to any document created using the Font Software.
++
++TERMINATION
++This license becomes null and void if any of the above conditions are not met.
++
++DISCLAIMER
++THE FONT SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO ANY WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF COPYRIGHT, PATENT, TRADEMARK, OR OTHER RIGHT. IN NO EVENT SHALL THE COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, INCLUDING ANY GENERAL, SPECIAL, INDIRECT, INCIDENTAL, OR CONSEQUENTIAL DAMAGES, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF THE USE OR INABILITY TO USE THE FONT SOFTWARE OR FROM OTHER DEALINGS IN THE FONT SOFTWARE.
++
++
++http://scripts.sil.org/OFL
++
++gfx/wr/wrshell/res/FiraCode-Regular.ttf
++Copyright 2014-2020 The Fira Code Project Authors (https://github.com/tonsky/FiraCode)
++This Font Software is licensed under the SIL Open Font License, Version 1.1. This license is available with a FAQ at: http://scripts.sil.org/OFL
++http://scripts.sil.org/OFL
++
++Fira Code SIL Open Font License
++Copyright 2014-2020 The Fira Code Project Authors (https://github.com/tonsky/FiraCode)
++
++This Font Software is licensed under the SIL Open Font License, Version 1.1.
++This license is copied below, and is also available with a FAQ at:
++https://openfontlicense.org
++
++
++-----------------------------------------------------------
++SIL OPEN FONT LICENSE Version 1.1 - 26 February 2007
++-----------------------------------------------------------
++
++PREAMBLE
++The goals of the Open Font License (OFL) are to stimulate worldwide
++development of collaborative font projects, to support the font creation
++efforts of academic and linguistic communities, and to provide a free and
++open framework in which fonts may be shared and improved in partnership
++with others.
++
++The OFL allows the licensed fonts to be used, studied, modified and
++redistributed freely as long as they are not sold by themselves. The
++fonts, including any derivative works, can be bundled, embedded,
++redistributed and/or sold with any software provided that any reserved
++names are not used by derivative works. The fonts and derivatives,
++however, cannot be released under any other type of license. The
++requirement for fonts to remain under this license does not apply
++to any document created using the fonts or their derivatives.
++
++DEFINITIONS
++"Font Software" refers to the set of files released by the Copyright
++Holder(s) under this license and clearly marked as such. This may
++include source files, build scripts and documentation.
++
++"Reserved Font Name" refers to any names specified as such after the
++copyright statement(s).
++
++"Original Version" refers to the collection of Font Software components as
++distributed by the Copyright Holder(s).
++
++"Modified Version" refers to any derivative made by adding to, deleting,
++or substituting -- in part or in whole -- any of the components of the
++Original Version, by changing formats or by porting the Font Software to a
++new environment.
++
++"Author" refers to any designer, engineer, programmer, technical
++writer or other person who contributed to the Font Software.
++
++PERMISSION & CONDITIONS
++Permission is hereby granted, free of charge, to any person obtaining
++a copy of the Font Software, to use, study, copy, merge, embed, modify,
++redistribute, and sell modified and unmodified copies of the Font
++Software, subject to the following conditions:
++
++1) Neither the Font Software nor any of its individual components,
++in Original or Modified Versions, may be sold by itself.
++
++2) Original or Modified Versions of the Font Software may be bundled,
++redistributed and/or sold with any software, provided that each copy
++contains the above copyright notice and this license. These can be
++included either as stand-alone text files, human-readable headers or
++in the appropriate machine-readable metadata fields within text or
++binary files as long as those fields can be easily viewed by the user.
++
++3) No Modified Version of the Font Software may use the Reserved Font
++Name(s) unless explicit written permission is granted by the corresponding
++Copyright Holder. This restriction only applies to the primary font name as
++presented to the users.
++
++4) The name(s) of the Copyright Holder(s) or the Author(s) of the Font
++Software shall not be used to promote, endorse or advertise any
++Modified Version, except to acknowledge the contribution(s) of the
++Copyright Holder(s) and the Author(s) or with their explicit written
++permission.
++
++5) The Font Software, modified or unmodified, in part or in whole,
++must be distributed entirely under this license, and must not be
++distributed under any other license. The requirement for fonts to
++remain under this license does not apply to any document created
++using the Font Software.
++
++TERMINATION
++This license becomes null and void if any of the above conditions are
++not met.
++
++DISCLAIMER
++THE FONT SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
++EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO ANY WARRANTIES OF
++MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT
++OF COPYRIGHT, PATENT, TRADEMARK, OR OTHER RIGHT. IN NO EVENT SHALL THE
++COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
++INCLUDING ANY GENERAL, SPECIAL, INDIRECT, INCIDENTAL, OR CONSEQUENTIAL
++DAMAGES, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++FROM, OUT OF THE USE OR INABILITY TO USE THE FONT SOFTWARE OR FROM
++OTHER DEALINGS IN THE FONT SOFTWARE.

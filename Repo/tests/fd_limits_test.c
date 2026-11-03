@@ -95,7 +95,7 @@ int main(int argc,char **argv)
     *((uint64_t *)(pages+4088))=0;
     CHECK(setrlimit(RLIMIT_NOFILE,(void *)(pages+4088))==-1 && errno==EFAULT &&
         !getrlimit(RLIMIT_NOFILE,&test->actual) && !memcmp(&test->actual,&test->initial,sizeof(test->actual)) && !munmap(pages,8192),"partial input copy cannot mutate limits");
-    int source=open("/tmp/fd-limits-file",O_CREAT|O_EXCL|O_RDWR|O_CLOEXEC);
+    int source=open("/tmp/fd-limits-file",O_CREAT|O_EXCL|O_RDWR|O_CLOEXEC, 0666);
     CHECK(source==3 && write(source,"data",4)==4 && lseek(source,0,SEEK_SET)==0 && dup2(source,HIGH_FD)==HIGH_FD && !close(source),"high descriptor setup");
     test->limit=(struct rlimit){3,256};CHECK(!setrlimit(RLIMIT_NOFILE,&test->limit),"reduce below existing high slot");
     CHECK(open("/tmp/fd-limits-file",O_TRUNC|O_RDWR)==-1 && errno==EMFILE &&

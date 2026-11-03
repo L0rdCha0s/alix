@@ -182,7 +182,7 @@ static int child_apply_actions(child_record_t *record, child_launch_work_t *work
             if (error == -EBADF) error = 0;
             fd_description_t *description = NULL;
             if (!error) error = io_vfs_open_mode_owned(fd_description_context(record->launch.cwd), work->data + action->path_offset,
-                                                   action->flags & ~SYSCALL_OPEN_CLOEXEC, action->mode & ~record->launch.creation_mask,
+                                                   action->flags & ~SYSCALL_OPEN_CLOEXEC, (action->mode & 0777u) & ~record->launch.creation_mask,
                                                    record->launch.uid, record->launch.gid,
                                                    process_fd_retirement_queue(), &description);
             if (!error)
@@ -526,6 +526,8 @@ static int child_capture_actions(const syscall_spawn_t *specification, child_lau
         if (input.reserved || input.fd < 0 || input.fd >= (int32_t)FD_TABLE_MAX_ENTRIES) return -EBADF;
         if (input.operation == SYSCALL_SPAWN_CHDIR &&
             (input.fd || input.destination || input.flags || input.mode)) return -EINVAL;
+        if (input.operation == SYSCALL_SPAWN_OPEN && (input.flags & SYSCALL_OPEN_CREATE) &&
+            (input.mode & 07000u)) return -EOPNOTSUPP;
         child_action_t *action = &work->actions[index];
         action->operation = input.operation; action->fd = input.fd; action->destination = input.destination;
         action->flags = input.flags; action->mode = input.mode;

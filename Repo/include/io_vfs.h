@@ -38,7 +38,8 @@ typedef enum
     IO_VFS_SHM_OPEN,
     IO_VFS_SHM_UNLINK,
     IO_VFS_OPEN_MODE,
-    IO_VFS_MKDIR_MODE
+    IO_VFS_MKDIR_MODE,
+    IO_VFS_CHMOD_PATH
 } io_vfs_opcode_t;
 
 /* The complete object lives in io_request_buffer(). All data/path bytes are

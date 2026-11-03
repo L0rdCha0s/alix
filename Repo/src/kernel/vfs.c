@@ -1558,9 +1558,9 @@ static int vfs_mkdir_internal(vfs_node_t *cwd, const char *path, uint32_t uid, u
             else
             {
                 dir->name = name; name = NULL;
-                dir->uid = uid; dir->gid = gid;
                 dir->permissions = mode;
                 vfs_attach_child(parent, dir);
+                dir->uid = uid; dir->gid = gid;
                 vfs_mark_meta_dirty(parent); vfs_mark_meta_dirty(dir);
                 error = 0;
             }
@@ -1844,14 +1844,14 @@ static vfs_node_t *vfs_open_file_internal(vfs_node_t *cwd, const char *path, boo
         file->capacity = 0;
         file->data = NULL;
         vfs_inherit_mutability(parent, file);
+        if (owned_data) file->permissions = create_mode;
+        vfs_attach_child(parent, file);
         if (owned_data)
         {
             /* Caller credentials are explicit; never inherit service root. */
             file->uid = uid;
             file->gid = gid;
-            file->permissions = create_mode;
         }
-        vfs_attach_child(parent, file);
         created = true;
         vfs_mark_meta_dirty(parent);
         vfs_mark_meta_dirty(file);
