@@ -45,6 +45,7 @@ time_t mktime(struct tm *value);
 char *ctime_r(const time_t *value, char *output);
 char *ctime(const time_t *value);
 size_t strftime(char *output, size_t size, const char *format, const struct tm *value);
+char *strptime(const char *input, const char *format, struct tm *value);
 void tzset(void);
 extern long timezone;
 extern int daylight;

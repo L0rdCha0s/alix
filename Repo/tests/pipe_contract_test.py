@@ -23,8 +23,18 @@ def main():
         base.compile_and_run = original
     code = captured[0].replace("int main(void)", "static int baseline(void)", 1)
     code += r'''
-struct syscall_stat { uint32_t type; };
+struct syscall_stat { uint32_t type; uint64_t atime,mtime,ctime; };
 #define SYSCALL_NODE_TYPE_FIFO 6
+#define SYSCALL_OPEN_READ FD_STATUS_READ
+#define SYSCALL_OPEN_WRITE FD_STATUS_WRITE
+#define SYSCALL_OPEN_NONBLOCK FD_STATUS_NONBLOCK
+struct io_pipe;
+typedef struct vfs_node { struct io_pipe *pipe; unsigned refs; } vfs_node_t;
+static void vfs_node_release_owned(vfs_node_t *node);
+static struct io_pipe *vfs_fifo_state(vfs_node_t *node);
+static bool vfs_stat(vfs_node_t *node,void *size,void *type,uint64_t *at,uint64_t *mt,uint64_t *ct) {
+    (void)node;(void)size;(void)type; *at=*mt=*ct=0;return true;
+}
 typedef struct { void *buffer; size_t size; fd_description_t *description; } io_request_t;
 typedef struct { int64_t result; fd_description_t *description_owned; } io_service_result_t;
 static void *io_request_buffer(io_request_t *request) { return request->buffer; }
@@ -42,6 +52,8 @@ static void *pipe_calloc(size_t n,size_t bytes) {
         code += "\n".join(line for line in (ROOT / name).read_text().splitlines()
                            if not line.startswith("#include ")) + "\n"
     code += r'''
+static struct io_pipe *vfs_fifo_state(vfs_node_t *node) { return node->pipe; }
+static void vfs_node_release_owned(vfs_node_t *node) { CHECK(node && node->refs); if(!--node->refs) {io_pipe_named_destroy(node->pipe);free(node);} }
 #undef calloc
 #define calloc owned_calloc
 static int64_t step(fd_description_t *description,unsigned opcode,void *bytes,size_t count,bool expected) {

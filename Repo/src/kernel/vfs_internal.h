@@ -41,6 +41,7 @@ struct vfs_node
     spinlock_t data_lock;
     struct vfs_mapped_page *mapped_pages;
     struct vfs_file_mapping *mappings;
+    struct io_pipe *fifo;
 
     uint32_t disk_id;
     bool disk_meta_dirty;

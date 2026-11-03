@@ -1,5 +1,7 @@
 # Agent Notes
 
+- Prioritize getting the requested software running. Do not add new tests or test harnesses unless the user explicitly asks. For the Zen/Gecko port, focus on the actual Gecko build, link, launch, and browser runtime; use existing checks when needed to resolve an observed blocker.
+
 - To run the OS in QEMU, use ./run-via-agent.sh in the root folder (this script runs and kills the process after 40 seconds - it's good for detecting boot hangs)
 - Standard build remains `make` (produces `os.img` and `hdd.img`).
 - We have our own libc implementation (src/kernel/libc.c), and memory/heap management (malloc, calloc, realloc, free) in src/kernel/heap.c.  Use heap operations rather than trying to use stack unless absolutely necessary.

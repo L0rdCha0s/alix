@@ -51,6 +51,9 @@ def main(cxx=False):
     compiler, flags = compiler_configuration(cxx)
     arguments = ["-Wl,--export-dynamic" if argument == "-rdynamic" else argument
                  for argument in sys.argv[1:]]
+    # These providers share the executable's native runtime state. DSOs import
+    # that exported ABI instead of linking a second libc/thread/loader instance.
+    arguments = [argument for argument in arguments if argument not in ("-lm", "-lpthread", "-lc", "-ldl", "-lrt")]
     shared = "-shared" in arguments
     pic = shared or any(arg in ("-fPIC", "-fpic") for arg in arguments)
     if pic:

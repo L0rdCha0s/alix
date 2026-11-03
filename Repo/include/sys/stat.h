@@ -8,6 +8,7 @@
 #include_next <sys/stat.h>
 typedef struct stat stat_t;
 #else
+#include "time.h"
 #define S_IFMT   0170000u
 #define S_IFREG  0100000u
 #define S_IFDIR  0040000u
@@ -54,21 +55,29 @@ typedef struct stat
     uint32_t st_gid;
     int64_t st_blksize;
     int64_t st_blocks;
+    struct timespec st_atim, st_mtim, st_ctim;
 } stat_t;
+
+/* The native record and file offsets are already 64 bit. These source aliases
+ * also select the versioned full-record ABI declared below. */
+#define stat64 stat
+#define fstat64 fstat
+#define lstat64 lstat
 
 #ifndef KERNEL_BUILD
 #ifdef __cplusplus
 extern "C" {
 #endif
-/* The unsuffixed ELF symbols retain the original 40-byte ABI for installed
- * programs and the existing Rust std runtime. New callers use the full record. */
-int fstat(int fd, struct stat *st) __asm__("alix_fstat_v2");
-int stat(const char *path, struct stat *st) __asm__("alix_stat_v2");
-int lstat(const char *path, struct stat *st) __asm__("alix_lstat_v2");
+/* Original ELF symbols retain their 40-byte record and v2 symbols retain their
+ * 88-byte record. New callers also receive the three timespec timestamps. */
+int fstat(int fd, struct stat *st) __asm__("alix_fstat_v3");
+int stat(const char *path, struct stat *st) __asm__("alix_stat_v3");
+int lstat(const char *path, struct stat *st) __asm__("alix_lstat_v3");
 int fchmod(int fd, mode_t mode);
 int chmod(const char *path, mode_t mode);
 mode_t umask(mode_t mask);
 int mkdir(const char *path, mode_t mode);
+int mkfifo(const char *path, mode_t mode);
 #ifdef __cplusplus
 }
 #endif

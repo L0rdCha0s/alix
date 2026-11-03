@@ -186,6 +186,17 @@ zen-libevent-qemu-test: all $(ZEN_USER_RUNTIME_OBJECTS) zen-ssp-runtime
 	python3 ports/zen/build_libevent_runtime_test.py
 	python3 tests/libevent_runtime_qemu_test.py
 
+.PHONY: zen-alix-font-files-qemu-test
+zen-alix-font-files-qemu-test:
+	$(MAKE) all zen-rust-runtime
+	$(MAKE) zen-gecko-configure
+	$(MAKE) -C "$(ZEN_ENGINE_DIR)/../obj-gecko-alix" -j2 pre-export export
+	$(MAKE) -C "$(ZEN_ENGINE_DIR)/../obj-gecko-alix/gfx/thebes" -j2 compile
+	$(MAKE) -C "$(ZEN_ENGINE_DIR)/../obj-gecko-alix/gfx/2d" -j2 compile
+	python3 ports/zen/stage_fonts.py
+	python3 ports/zen/build_alix_font_files_test.py
+	python3 tests/alix_font_files_qemu_test.py
+
 $(USER_OBJDIR)/tests/posix_spawn_test.o: tests/posix_spawn_test.c
 	@mkdir -p $(@D)
 	$(CC) $(USER_CFLAGS) -c -o $@ $<
@@ -245,6 +256,57 @@ $(USER_OBJDIR)/sleep_test.elf: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/
 .PHONY: zen-sleep-qemu-test
 zen-sleep-qemu-test: all $(USER_OBJDIR)/sleep_test.elf
 	python3 tests/sleep_qemu_test.py
+
+$(USER_OBJDIR)/tests/syslog_usleep_test.o: tests/syslog_usleep_test.c
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+$(USER_OBJDIR)/syslog_usleep_test.elf: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/syslog_usleep_test.o $(USER_LD_SCRIPT)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/syslog_usleep_test.o
+.PHONY: zen-syslog-usleep-qemu-test
+zen-syslog-usleep-qemu-test: all $(USER_OBJDIR)/syslog_usleep_test.elf
+	python3 tests/syslog_usleep_qemu_test.py
+
+$(USER_OBJDIR)/tests/base_accounts_inet_test.o: tests/base_accounts_inet_test.c
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+$(USER_OBJDIR)/base_accounts_inet_test.elf: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/base_accounts_inet_test.o $(USER_LD_SCRIPT)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/base_accounts_inet_test.o
+.PHONY: zen-base-accounts-inet-qemu-test
+zen-base-accounts-inet-qemu-test: all $(USER_OBJDIR)/base_accounts_inet_test.elf
+	python3 tests/base_accounts_inet_qemu_test.py
+
+$(USER_OBJDIR)/tests/base_calendar_alarm_test.o: tests/base_calendar_alarm_test.c tests/calendar_parse_cases.h
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -Itests -c -o $@ $<
+$(USER_OBJDIR)/base_calendar_alarm_test.elf: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/base_calendar_alarm_test.o $(USER_LD_SCRIPT)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/base_calendar_alarm_test.o
+.PHONY: zen-base-calendar-alarm-qemu-test
+zen-base-calendar-alarm-qemu-test: all $(USER_OBJDIR)/base_calendar_alarm_test.elf
+	python3 tests/base_calendar_alarm_qemu_test.py
+
+$(USER_OBJDIR)/tests/base_symlink_test.o: tests/base_symlink_test.c
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+$(USER_OBJDIR)/base_symlink_test.elf: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/base_symlink_test.o $(USER_LD_SCRIPT)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/base_symlink_test.o
+.PHONY: zen-base-symlink-qemu-test
+zen-base-symlink-qemu-test: all $(USER_OBJDIR)/base_symlink_test.elf
+	python3 tests/base_symlink_qemu_test.py
+
+$(USER_OBJDIR)/tests/named_fifo_test.o: tests/named_fifo_test.c
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+$(USER_OBJDIR)/named_fifo_test.elf: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/named_fifo_test.o $(USER_LD_SCRIPT)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/named_fifo_test.o
+.PHONY: zen-named-fifo-qemu-test
+zen-named-fifo-qemu-test: all $(USER_OBJDIR)/named_fifo_test.elf
+	python3 tests/named_fifo_qemu_test.py
+
+.PHONY: zen-base-elf-rss-test zen-base-elf-rss-qemu-test
+zen-base-elf-rss-test: zen-toolchain-test zen-dso-runtime
+	python3 ports/zen/build_elf_metadata_test.py
+zen-base-elf-rss-qemu-test: all zen-base-elf-rss-test
+	python3 tests/base_elf_rss_qemu_test.py
 
 $(USER_OBJDIR)/tests/shared_memory_test.o: tests/shared_memory_test.c
 	@mkdir -p $(@D)

@@ -16,6 +16,12 @@ uint64_t process_get_pid(const process_t *process)
     return 0;
 }
 
+bool process_set_elf_metadata(process_t *process, const void *headers, size_t count, uintptr_t entry)
+{
+    (void)process; (void)headers; (void)count; (void)entry;
+    return false; /* The validation-only fixture never loads an image. */
+}
+
 bool process_set_user_tls_template(process_t *process, const uint8_t *image,
                                    size_t file_size, size_t memory_size,
                                    size_t alignment, uintptr_t image_address)

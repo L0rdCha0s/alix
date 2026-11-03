@@ -628,6 +628,69 @@ static thread_t *signal_process_target_locked(process_t *process, uint64_t bit)
     return target;
 }
 
+/* Process-owned nodes never retain a caller stack or another thread's borrowed
+ * process pointer. The termination transaction unlinks before reclaiming. */
+static process_t *signal_alarms;
+
+void process_alarm_cancel_locked(process_t *process)
+{
+    if (!process->alarm_deadline) return;
+    process_t **cursor = &signal_alarms;
+    while (*cursor && *cursor != process) cursor = &(*cursor)->alarm_next;
+    if (*cursor) *cursor = process->alarm_next;
+    process->alarm_next = NULL;
+    process->alarm_deadline = 0;
+}
+
+int64_t process_alarm(unsigned seconds)
+{
+    thread_t *self = current_thread_local();
+    if (!signal_user_thread(self)) return -EPERM;
+    uint64_t lock = scheduler_lock_acquire("alarm_replace");
+    process_t *process = self->process;
+    uint64_t now = timer_ticks(), frequency = timer_frequency();
+    if (!frequency) frequency = 1000;
+    uint64_t remaining = process->alarm_deadline > now ? process->alarm_deadline - now : 0;
+    remaining = remaining / frequency + (remaining % frequency != 0);
+    process_alarm_cancel_locked(process);
+    if (seconds && process->state != PROCESS_STATE_ZOMBIE)
+    {
+        uint64_t ticks = (uint64_t)seconds * frequency;
+        process->alarm_deadline = ticks > UINT64_MAX - now ? UINT64_MAX : now + ticks;
+        process->alarm_next = signal_alarms;
+        signal_alarms = process;
+    }
+    scheduler_lock_release(lock);
+    return (int64_t)remaining;
+}
+
+void process_alarm_tick(uint64_t now)
+{
+    uint64_t lock = scheduler_lock_acquire("alarm_expire");
+    process_t **cursor = &signal_alarms;
+    while (*cursor)
+    {
+        process_t *process = *cursor;
+        if (process->alarm_deadline > now) { cursor = &process->alarm_next; continue; }
+        *cursor = process->alarm_next;
+        process->alarm_next = NULL; process->alarm_deadline = 0;
+        if (process->state == PROCESS_STATE_ZOMBIE ||
+            signal_ignored(&process->signal_actions[ALIX_SIGALRM], ALIX_SIGALRM)) continue;
+        uint64_t bit = signal_bit(ALIX_SIGALRM);
+        alix_siginfo_t info = {.si_signo = ALIX_SIGALRM, .si_code = ALIX_SI_KERNEL};
+        spinlock_lock(&process->threads_lock);
+        thread_t *target = signal_process_target_locked(process, bit);
+        if (target) signal_queue_thread_locked(target, ALIX_SIGALRM, &info);
+        else
+        {
+            if (!(process->signal_pending & bit)) process->signal_info[ALIX_SIGALRM] = info;
+            process->signal_pending |= bit;
+        }
+        spinlock_unlock(&process->threads_lock);
+    }
+    scheduler_lock_release(lock);
+}
+
 int process_signal_raise(int number, uint64_t tid)
 {
     thread_t *self = current_thread_local();

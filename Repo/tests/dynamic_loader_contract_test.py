@@ -18,7 +18,7 @@ source=source.replace(body,'static bool dl_call(uintptr_t address) { if (!dl_cal
 source=source.replace('static bool dl_startup_done;','')
 source=source.replace('__asm__ volatile("movq %%fs:8,%0" : "=r"(base));','base=(uintptr_t)model_static_tls;')
 assert '__asm__' not in source
-for name in ('dlopen','dlclose','dlsym','dlvsym','dlerror','dladdr','__tls_get_addr'):
+for name in ('dlopen','dlclose','dlsym','dlvsym','dlerror','dladdr','__tls_get_addr','dl_iterate_phdr'):
     source=re.sub(r'\b'+name+r'\b','model_'+name,source)
 
 code=r'''
@@ -38,6 +38,7 @@ code=r'''
 #define CHECK(c) do {if(!(c)){fprintf(stderr,"loader contract %d: %s\n",__LINE__,#c);abort();}}while(0)
 '''
 code+='#include "'+str(ROOT/'include/dlfcn.h')+'"\n#include "'+str(ROOT/'user/lib/dynamic_elf.h')+'"\n'
+code+='#define TTF_HOST_BUILD 1\n#include "'+str(ROOT/'include/link.h')+'"\n'
 code+=r'''
 typedef struct {atomic_uint state;} alix_mutex_t;
 static void alix_mutex_lock(alix_mutex_t *m){while(atomic_exchange_explicit(&m->state,1,memory_order_acquire))sched_yield();}
@@ -118,7 +119,7 @@ static void metadata_mutations(const char *path){
     }
     memcpy((void*)baseline.reservation,image,baseline.reservation_bytes);*m=baseline;dl_pending=false;CHECK(dl_meta(m));
     for(size_t i=0;i<m->dynamic_count;++i)if(m->dynamic[i].tag==DL_SYMTAB){m->dynamic[i].value++;dl_pending=false;CHECK(!dl_meta(m));break;}
-    free(image);model_munmap((void*)baseline.reservation,baseline.reservation_bytes);free(baseline.segments);free(m);CHECK(!allocations&&!live_maps);
+    free(image);model_munmap((void*)baseline.reservation,baseline.reservation_bytes);free(baseline.segments);free((void*)baseline.program_headers);free(m);CHECK(!allocations&&!live_maps);
 }
 int main(void){initialize_model();
 '''

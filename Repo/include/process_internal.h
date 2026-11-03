@@ -381,6 +381,8 @@ struct process
     uint32_t uid;
     uint32_t gid;
     uint32_t creation_mask;
+    uint64_t alarm_deadline;
+    process_t *alarm_next; /* Scheduler-owned list; removed before termination. */
     uint64_t runtime_ticks;
     bool is_user;
     spinlock_t usage_lock;
@@ -397,6 +399,8 @@ struct process
     struct process_vm_area *vm_areas;
     struct process_vm_transaction *vm_pending;
     uintptr_t user_entry_point;
+    void *user_elf_metadata;
+    size_t user_elf_metadata_size;
     uintptr_t user_stack_top;
     size_t user_stack_size;
     uintptr_t user_stack_committed;
@@ -901,6 +905,10 @@ void thread_registry_add(thread_t *thread);
 void procfs_register_process_priority(process_t *process);
 void procfs_unregister_process(process_t *process);
 void process_destroy_marked(process_t *process);
+int64_t process_alarm(unsigned seconds);
+void process_alarm_tick(uint64_t ticks);
+/* Caller holds scheduler_lock, before the process can become reclaimable. */
+void process_alarm_cancel_locked(process_t *process);
 void process_exit_signal(int number) __attribute__((noreturn));
 bool process_kill_signal(process_t *process, int number);
 /* Caller owns a retained process; output is written only after terminal state

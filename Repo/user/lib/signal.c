@@ -111,6 +111,13 @@ int kill(pid_t pid, int number)
 {
     return signal_result(sys_kill(pid, number));
 }
+
+unsigned alarm(unsigned seconds)
+{
+    int64_t result = sys_process(SYSCALL_PROCESS_ALARM, seconds, 0, 0);
+    if (result < 0) { errno = (int)-result; return 0; }
+    return (unsigned)result;
+}
 int pthread_sigmask(int how, const sigset_t *set, sigset_t *old)
 {
     int result = sys_sigprocmask(how, set, old);

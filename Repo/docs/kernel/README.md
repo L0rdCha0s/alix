@@ -30,6 +30,7 @@ This folder documents how the kernel boots, schedules work, manages memory, expo
 - Terminal classification and current non-TTY streams: `docs/kernel/termios.md`
 - Native window controls, surfaces and ownership: `docs/kernel/windows.md`
 - WebRender's native FreeType glyph rasterizer: `docs/kernel/glyph_rasterization.md`
+- Gecko's Thebes platform, font discovery and bundled fonts: `docs/kernel/gecko_graphics.md`
 - Networking (drivers + protocols): `docs/kernel/network.md`
 - Owned IPv4 UDP transport and shared port leases: `docs/kernel/udp_transport.md`
 - Outgoing route snapshots and native MTU discovery: `docs/kernel/network_routes.md`

@@ -13,7 +13,7 @@ static bool logger_ensure_directory(const char *path);
 
 bool logger_init(void)
 {
-    if (logger_ready)
+    if (__atomic_load_n(&logger_ready, __ATOMIC_ACQUIRE))
     {
         return true;
     }
@@ -26,20 +26,29 @@ bool logger_init(void)
         return false;
     }
 
-    logger_file = vfs_open_file(vfs_root(), LOGGER_FILE_PATH, true, true);
-    if (!logger_file)
+    if (vfs_open_legacy_handle(vfs_root(), LOGGER_FILE_PATH, true, true, false, &logger_file))
     {
         return false;
     }
+    if (vfs_chmod_owned(logger_file, 0, 0644u))
+    {
+        vfs_node_release_owned(logger_file); logger_file = NULL;
+        return false;
+    }
 
-    logger_ready = true;
+    __atomic_store_n(&logger_ready, true, __ATOMIC_RELEASE);
     logger_log("logger: initialized");
     return true;
 }
 
 bool logger_is_ready(void)
 {
-    return logger_ready && logger_file;
+    return __atomic_load_n(&logger_ready, __ATOMIC_ACQUIRE) && logger_file;
+}
+
+void logger_enable_writes(void)
+{
+    if (logger_is_ready()) vfs_set_subtree_mutable(logger_file, true);
 }
 
 bool logger_write_len(const char *text, size_t len)

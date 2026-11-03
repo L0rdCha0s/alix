@@ -8,6 +8,7 @@
 #define DT_REG 8
 #define DT_LNK 10
 #define DT_BLK 6
+#define DT_FIFO 1
 #define _DIRENT_HAVE_D_TYPE 1
 
 typedef struct alix_directory DIR;
@@ -23,6 +24,7 @@ extern "C" {
 #endif
 DIR *opendir(const char *path);
 struct dirent *readdir(DIR *directory);
+int readdir_r(DIR *directory, struct dirent *entry, struct dirent **result);
 int closedir(DIR *directory);
 void rewinddir(DIR *directory);
 #ifdef __cplusplus

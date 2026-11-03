@@ -1,4 +1,5 @@
 #include "elf.h"
+#include "process.h"
 
 #include "libc.h"
 #include "serial.h"
@@ -259,6 +260,7 @@ bool elf_load_process(process_t *process, const uint8_t *image, size_t size, uin
         }
     }
 
+    if (!process_set_elf_metadata(process, phdr, ehdr->phnum, validated_entry)) return false;
     if (entry_out)
     {
         *entry_out = validated_entry;

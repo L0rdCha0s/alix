@@ -1,0 +1,52 @@
+--- a/gfx/2d/NativeFontResourceFreeType.h
++++ b/gfx/2d/NativeFontResourceFreeType.h
+@@ -16,7 +16,7 @@
+  public:
+   MOZ_DECLARE_REFCOUNTED_VIRTUAL_TYPENAME(NativeFontResourceFreeType, override)
+
+-#ifdef MOZ_WIDGET_ANDROID
++#if defined(MOZ_WIDGET_ANDROID) || defined(MOZ_WIDGET_ALIX)
+   static already_AddRefed<NativeFontResourceFreeType> Create(
+       const uint8_t* aFontData, uint32_t aDataLength);
+
+--- a/gfx/2d/NativeFontResourceFreeType.cpp
++++ b/gfx/2d/NativeFontResourceFreeType.cpp
+@@ -32,7 +32,7 @@
+   return resource.forget();
+ }
+
+-#ifdef MOZ_WIDGET_ANDROID
++#if defined(MOZ_WIDGET_ANDROID) || defined(MOZ_WIDGET_ALIX)
+ already_AddRefed<NativeFontResourceFreeType> NativeFontResourceFreeType::Create(
+     const uint8_t* aFontData, uint32_t aDataLength) {
+   return CreateInternal<NativeFontResourceFreeType>(aFontData, aDataLength);
+--- a/gfx/2d/UnscaledFontFreeType.h
++++ b/gfx/2d/UnscaledFontFreeType.h
+@@ -39,7 +39,7 @@
+
+   RefPtr<SharedFTFace> InitFace();
+
+-#ifdef MOZ_WIDGET_ANDROID
++#if defined(MOZ_WIDGET_ANDROID) || defined(MOZ_WIDGET_ALIX)
+   static already_AddRefed<UnscaledFont> CreateFromFontDescriptor(
+       const uint8_t* aData, uint32_t aDataLength, uint32_t aIndex);
+
+--- a/gfx/2d/UnscaledFontFreeType.cpp
++++ b/gfx/2d/UnscaledFontFreeType.cpp
+@@ -180,7 +180,7 @@
+   }
+ }
+
+-#ifdef MOZ_WIDGET_ANDROID
++#if defined(MOZ_WIDGET_ANDROID) || defined(MOZ_WIDGET_ALIX)
+
+ already_AddRefed<ScaledFont> UnscaledFontFreeType::CreateScaledFont(
+     Float aGlyphSize, const uint8_t* aInstanceData,
+@@ -237,6 +237,6 @@
+   return unscaledFont.forget();
+ }
+
+-#endif  // MOZ_WIDGET_ANDROID
++#endif  // MOZ_WIDGET_ANDROID || MOZ_WIDGET_ALIX
+
+ }  // namespace mozilla::gfx

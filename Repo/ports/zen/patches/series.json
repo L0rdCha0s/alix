@@ -330,7 +330,7 @@
     },
     {
       "file": "0017-native-alix-rust-libc.patch",
-      "sha256": "16098c65218f1816597d65305d2c1d82cb8ece9df60187f44b71d215e8aac1d2",
+      "sha256": "eee7e9330e5baeaa06313c24079aacdbed529620418dd4f1fdc61b988817487e",
       "files": [
         {
           "path": "third_party/rust/libc/src/lib.rs",
@@ -345,7 +345,7 @@
         {
           "path": "third_party/rust/libc/.cargo-checksum.json",
           "before": "3ede211a3962476250d3e11d268aedd1bcfa53c6c1a1e701d04d2d4da6d20ccc",
-          "after": "917723227766fceb98b65b778a02013a975bcfc7ff21f86b4fc7cd95fa9344c9"
+          "after": "848359a93b6d8f5605fc219f990b42ec34b0a96096acb5625cbc967bc469b521"
         },
         {
           "path": "third_party/rust/libc/src/alix/sdk.rs",
@@ -1008,7 +1008,7 @@
     },
     {
       "file": "0050-native-alix-thebes-platform.patch",
-      "sha256": "643a96a7423363f1f853dff8a6b0fc66865c8285103e1521b4471312402a11f8",
+      "sha256": "ede5b88cb59fdaf32ec78fb3bd51046ad61c2d877c7dbfa563e07f55c1086676",
       "files": [
         {
           "path": "gfx/thebes/gfxAlixPlatform.h",
@@ -1043,7 +1043,7 @@
         {
           "path": "gfx/thebes/gfxFT2FontList.cpp",
           "before": "baf17ccee179096726bbb9641d540c6cd49be6926b91277d7378dd727bc622c2",
-          "after": "10145e080d7c1e7ec8b1ae5d75673cf73675fc5c083e19dfa459464fd19e8c92"
+          "after": "361ffb539113f2be401760f5fdf2b34d39eb8296874ac85f05b9c4606f931d2f"
         },
         {
           "path": "gfx/thebes/gfxFT2Fonts.cpp",
@@ -1074,6 +1074,104 @@
           "path": "gfx/thebes/AlixFontLicenses.txt",
           "before": null,
           "after": "a32d832754e90437454c7821cd909986fbbc15e9c8690de0c65b7e812c9a08e8"
+        }
+      ]
+    },
+    {
+      "file": "0051-native-alix-freetype-font-factory.patch",
+      "sha256": "8c92fc1e41bab9e1f6526e81bcc620ed17c728e30862f557a73ce182e98983c0",
+      "files": [
+        {
+          "path": "gfx/2d/2D.h",
+          "before": "f297d532911905137bf0e6998d590a9803d10721a189bbccb5f772b892f67b3b",
+          "after": "2f193d7902d95536b26ba94ebd40d511af76281d9954b2c77306d6be0aacea61"
+        },
+        {
+          "path": "gfx/2d/Factory.cpp",
+          "before": "0113247d23c81d17e0765e1c2768e0246370d7d791f16f98b382945739de49a2",
+          "after": "f08bea166aa1aee9ef582d087f16a04cafa41610b6eeb621478b7ebc4f06a82a"
+        }
+      ]
+    },
+    {
+      "file": "0052-native-alix-freetype-font-resources.patch",
+      "sha256": "28dcd9267ec5f729fe95cc778c29b7666f50f02d24434437b6d2f56bf62baee9",
+      "files": [
+        {
+          "path": "gfx/2d/NativeFontResourceFreeType.h",
+          "before": "b10d49910b17939b7e4c29319bd0a34e5daadf5205d87e80bd29a927665d2956",
+          "after": "1e1170e3c62d4cebf05d8b1a2d64816a34a7914ad53a9f617e0fc32ecc5270ac"
+        },
+        {
+          "path": "gfx/2d/NativeFontResourceFreeType.cpp",
+          "before": "1c93616d17f59d95d8ecfca8bac98a8cd18f5da420f348feca464303348e4cb8",
+          "after": "f1443727091291f2bcf40f6cf7d15016adb4dbb11a1ae6c86a2c0d2b12027ba7"
+        },
+        {
+          "path": "gfx/2d/UnscaledFontFreeType.h",
+          "before": "7cd7c5dde0b4843b99f216129b71deab6e2aa72b28bd6ece7b12bab63f6b57b1",
+          "after": "a676f53b9c917eebd956dfb19f4abaf8ae3ffe81d43240c7585f34d417c117ce"
+        },
+        {
+          "path": "gfx/2d/UnscaledFontFreeType.cpp",
+          "before": "a50d99025c14d4585e0562006d25f0ee7ffd9ea413f5f18b3153936df88c0e62",
+          "after": "c489a925734762c40047d776104739d8a3e4e49dd847790f5d817e662add5285"
+        }
+      ]
+    },
+    {
+      "file": "0053-native-alix-browser-platforms.patch",
+      "sha256": "39bf2aa6a65e7a5dfdeb7f33f471f2718d43c9c7816ff1d7497de8a025321c72",
+      "files": [
+        {
+          "path": "toolkit/xre/nsXREDirProvider.h",
+          "before": "87d60881a53c52a43af773f8778f3242bddf33484da406b66537ff82ae57cb8d",
+          "after": "0a328548deb73d60832e084b1906203f0dd04322159e1623f6818cd8d1b2a003"
+        },
+        {
+          "path": "toolkit/xre/nsXREDirProvider.cpp",
+          "before": "b0ae99e017919bf37d140b2a951eda87cbced172f0cd087b31ad80bf35ed6a1c",
+          "after": "0e05f58eef827b6099324f6356e1b3dcdddc7175c5d48183a2ed30dca5d1adf5"
+        },
+        {
+          "path": "servo/components/style/gecko/media_features.rs",
+          "before": "00997cd1d32d64a12c28d1609cbf6cd79db9b4af6e0032cb293d51f89081b439",
+          "after": "acd440fcf9aed943305e8b055fcccf97bfc9052bc8924452bf56812ac387e675"
+        },
+        {
+          "path": "layout/style/nsMediaFeatures.cpp",
+          "before": "75bf8455af03ee84ca0bc26eb1958348e9af14257e91665186f9a1f70f761867",
+          "after": "13775accf1fc93054ed036a8c281fb1aff1dbbe19f3f2a498ee6efc4485ad0f5"
+        },
+        {
+          "path": "toolkit/crashreporter/google-breakpad/src/third_party/curl/curl.h",
+          "before": "f66aa716e2fde8cb6b3fee2ae2944772d6fca0642ea9c203c1ec905c5a2ed72d",
+          "after": "6b4f88d9cbe83120c62e0337e470dff415a2b3c9fe69ac4153b979b88eb19f09"
+        },
+        {
+          "path": "image/decoders/moz.build",
+          "before": "42f6cc9a2376ae2d78c1704c768d17975b4b5046815a7248e0e693cb6508beaa",
+          "after": "f347655edeb8dc98adcb44abc18de00ddfccba358c24b7bfdfc69eb1dcb8da68"
+        },
+        {
+          "path": "image/decoders/icon/moz.build",
+          "before": "0b5cc8ce6f772d2cf755c093b482fcdff28e84ce777dc180e0d3c9fb2be1e69e",
+          "after": "2ea4e5bd35d88237af66ed88bb45318363621f87d083226aedd72cd0ffd5c4e3"
+        },
+        {
+          "path": "image/decoders/icon/alix/nsIconChannel.h",
+          "before": null,
+          "after": "1159b96078dc2157c69cee8b18ef0c5b14d75f6708eb13567e192f5ba1c6a487"
+        },
+        {
+          "path": "image/decoders/icon/alix/nsIconChannel.cpp",
+          "before": null,
+          "after": "a2f3de9cd968eff898078e5d8f94513b89aec342d590cfa0e3dfa16a5c97da51"
+        },
+        {
+          "path": "image/decoders/icon/alix/moz.build",
+          "before": null,
+          "after": "c36f76b29d2957f3f93c1e4ebb26aa5c298aa325c1f1f21b5ee1c469f94c0d66"
         }
       ]
     }

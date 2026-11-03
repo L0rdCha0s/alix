@@ -223,6 +223,8 @@ ssize_t process_stdout_write(const char *data, size_t len);
 void process_detach_parent(process_t *process);
 
 void process_on_timer_tick(interrupt_frame_t *frame);
+/* Capture immutable headers before publishing a newly loaded process. */
+bool process_set_elf_metadata(process_t *process, const void *headers, size_t count, uintptr_t entry);
 void process_preempt_hook(void);
 void process_destroy(process_t *process);
 size_t process_snapshot(process_info_t *buffer, size_t capacity);

@@ -1,0 +1,160 @@
+--- a/toolkit/xre/nsXREDirProvider.h
++++ b/toolkit/xre/nsXREDirProvider.h
+@@ -68,7 +68,7 @@
+
+   static nsresult GetUserDataDirectory(nsIFile** aFile, bool aLocal);
+
+-#if defined(MOZ_WIDGET_GTK)
++#if defined(MOZ_WIDGET_GTK) || defined(__ALIX__)
+   static nsresult GetLegacyOrXDGEnvValue(const char* aHomeDir,
+                                          const char* aEnvName,
+                                          nsCString aSubdir, nsIFile** aFile,
+--- a/toolkit/xre/nsXREDirProvider.cpp
++++ b/toolkit/xre/nsXREDirProvider.cpp
+@@ -101,7 +101,7 @@
+ constinit nsCOMPtr<nsIFile> gDataDirProfileLocal{};
+ constinit nsCOMPtr<nsIFile> gDataDirProfile{};
+
+-#if defined(MOZ_WIDGET_GTK)
++#if defined(MOZ_WIDGET_GTK) || defined(__ALIX__)
+ nsXREDirProvider::legacyOrXDGHomeTelemetry gXdgTelemetry =
+     nsXREDirProvider::legacyOrXDGHomeTelemetry::empty;
+ #endif  // defined(MOZ_WIDGET_GTK)
+@@ -251,7 +251,7 @@
+       rv = tmp;
+     }
+
+-#if defined(MOZ_WIDGET_GTK)
++#if defined(MOZ_WIDGET_GTK) || defined(__ALIX__)
+     switch (gXdgTelemetry) {
+       case legacyOrXDGHomeTelemetry::legacyExists:
+         mozilla::glean::profiles::creation_place.Get("legacy_existing"_ns)
+@@ -1307,7 +1307,7 @@
+   return NS_OK;
+ }
+
+-#if defined(MOZ_WIDGET_GTK)
++#if defined(MOZ_WIDGET_GTK) || defined(__ALIX__)
+ /*
+  * Return whether MOZ_LEGACY_HOME == 1, via environment or at build time
+  */
+--- a/servo/components/style/gecko/media_features.rs
++++ b/servo/components/style/gecko/media_features.rs
+@@ -557,6 +557,8 @@
+     Macos,
+     /// Matches any Windows version.
+     Windows,
++    /// Matches the native Alix toolkit.
++    Alix,
+ }
+
+ fn eval_moz_platform(_: &Context, query_value: Option<Platform>) -> bool {
+--- a/layout/style/nsMediaFeatures.cpp
++++ b/layout/style/nsMediaFeatures.cpp
+@@ -265,6 +265,9 @@
+ #elif defined(XP_IOS)
+     case StylePlatform::Ios:
+       return true;
++#elif defined(__ALIX__)
++    case StylePlatform::Alix:
++      return true;
+ #else
+ #  error "Unknown platform?"
+ #endif
+--- a/toolkit/crashreporter/google-breakpad/src/third_party/curl/curl.h
++++ b/toolkit/crashreporter/google-breakpad/src/third_party/curl/curl.h
+@@ -74,7 +74,7 @@
+ #if defined(_AIX) || defined(__NOVELL_LIBC__) || defined(__NetBSD__) || \
+     defined(__minix) || defined(__SYMBIAN32__) || defined(__INTEGRITY) || \
+     defined(ANDROID) || defined(__ANDROID__) || defined(__OpenBSD__) || \
+-    defined(__CYGWIN__) || \
++    defined(__CYGWIN__) || defined(__ALIX__) || \
+    (defined(__FreeBSD_version) && (__FreeBSD_version < 800000))
+ #include <sys/select.h>
+ #endif
+--- a/image/decoders/moz.build
++++ b/image/decoders/moz.build
+@@ -16,6 +16,8 @@
+     DIRS += ["icon/mac", "icon"]
+ elif toolkit == "android":
+     DIRS += ["icon/android", "icon"]
++elif toolkit == "alix":
++    DIRS += ["icon/alix", "icon"]
+
+ UNIFIED_SOURCES += [
+     "EXIF.cpp",
+--- a/image/decoders/icon/moz.build
++++ b/image/decoders/icon/moz.build
+@@ -33,6 +33,9 @@
+ if CONFIG["OS_TARGET"] == "Android":
+     platform = "android"
+
++if CONFIG["MOZ_WIDGET_TOOLKIT"] == "alix":
++    platform = "alix"
++
+ if platform:
+     LOCAL_INCLUDES += [platform]
+
+--- /dev/null
++++ b/image/decoders/icon/alix/nsIconChannel.h
+@@ -0,0 +1,19 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#ifndef mozilla_image_decoders_icon_alix_nsIconChannel_h
++#define mozilla_image_decoders_icon_alix_nsIconChannel_h
++#include "nsCOMPtr.h"
++#include "nsIChannel.h"
++class nsIconChannel final : public nsIChannel {
++ public:
++  NS_DECL_ISUPPORTS
++  NS_FORWARD_NSIREQUEST(mRealChannel->)
++  NS_FORWARD_NSICHANNEL(mRealChannel->)
++  nsresult Init(nsIURI* aURI, nsILoadInfo* aLoadInfo);
++ private:
++  ~nsIconChannel() = default;
++  nsCOMPtr<nsIChannel> mRealChannel;
++};
++#endif
+--- /dev/null
++++ b/image/decoders/icon/alix/nsIconChannel.cpp
+@@ -0,0 +1,28 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#include "nsIconChannel.h"
++#include "nsIIconURI.h"
++#include "nsStringStream.h"
++#include "nsNetUtil.h"
++#include "nsString.h"
++
++NS_IMPL_ISUPPORTS(nsIconChannel, nsIRequest, nsIChannel)
++
++nsresult nsIconChannel::Init(nsIURI* aURI, nsILoadInfo* aLoadInfo) {
++  nsCOMPtr<nsIMozIconURI> icon = do_QueryInterface(aURI);
++  NS_ENSURE_TRUE(icon, NS_ERROR_MALFORMED_URI);
++  uint32_t size = 16;
++  MOZ_TRY(icon->GetImageSize(&size));
++  NS_ENSURE_TRUE(size > 0 && size < 256, NS_ERROR_INVALID_ARG);
++  nsAutoCString svg("<svg xmlns='http://www.w3.org/2000/svg' width='");
++  svg.AppendInt(size);
++  svg.AppendLiteral("' height='");
++  svg.AppendInt(size);
++  svg.AppendLiteral("' viewBox='0 0 24 24'><path fill='#e1e5eb' stroke='#607080' d='M5 2h9l5 5v15H5z'/><path fill='none' stroke='#607080' d='M14 2v6h5M8 12h8M8 16h8'/></svg>");
++  nsCOMPtr<nsIInputStream> stream;
++  MOZ_TRY(NS_NewCStringInputStream(getter_AddRefs(stream), svg));
++  return NS_NewInputStreamChannelInternal(getter_AddRefs(mRealChannel), aURI,
++      stream.forget(), "image/svg+xml"_ns, ""_ns, aLoadInfo);
++}
+--- /dev/null
++++ b/image/decoders/icon/alix/moz.build
+@@ -0,0 +1,7 @@
++# This Source Code Form is subject to the terms of the Mozilla Public
++# License, v. 2.0. If a copy of the MPL was not distributed with this
++# file, You can obtain one at http://mozilla.org/MPL/2.0/.
++SOURCES += ["nsIconChannel.cpp"]
++EXPORTS += ["nsIconChannel.h"]
++FINAL_LIBRARY = "xul"
++include("/ipc/chromium/chromium-config.mozbuild")

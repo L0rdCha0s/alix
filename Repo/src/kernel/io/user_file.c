@@ -39,6 +39,8 @@ static uint32_t g_user_file_start;
 
 static bool user_tcp_handler(io_request_t *request, io_service_result_t *result)
 {
+    if (io_pipe_open_lease_valid(io_request_description(request)))
+        return io_pipe_open_execute(request, result);
     if (io_record_lock_description_valid(io_request_description(request)))
         return io_record_lock_execute(request, result);
     if (io_flock_description_valid(io_request_description(request)))
@@ -198,8 +200,9 @@ static int user_file_pin(uint64_t fd, fd_description_t **out)
 static int64_t user_file_finish(user_file_service_t kind, uint32_t operation,
                                  void *output, size_t capacity, uint32_t slot_flags)
 {
+wait_again:;
     io_request_status_t status;
-    int result = kind == USER_POLL || kind == USER_FLOCK ? process_io_wait_current_interruptible(&status) :
+    int result = kind == USER_POLL || kind == USER_FLOCK || (kind == USER_PIPE && operation == SYSCALL_FILE_OPEN) ? process_io_wait_current_interruptible(&status) :
                                      process_io_wait_current(&status);
     spinlock_preempt_disable();
     io_request_t *request = NULL;
@@ -257,7 +260,36 @@ static int64_t user_file_finish(user_file_service_t kind, uint32_t operation,
         value = io_request_take_result(request, &description);
         if (!value)
         {
-            value = fd_table_reservation_commit(io_request_description(request), description, slot_flags);
+            if (operation == SYSCALL_FILE_OPEN && io_pipe_open_pending(description))
+            {
+                fd_description_t *reservation = io_request_description(request);
+                if (!fd_description_get(reservation)) value = -EOVERFLOW;
+                else
+                {
+                    /* The preparation guard covers the complete handoff: old
+                     * waiter -> owned lease -> newly registered event waiter. */
+                    (void)process_io_finish_current(false);
+                    request = NULL;
+                    fd_description_t *lease = NULL;
+                    result = io_pipe_open_lease_create(description, reservation, process_fd_retirement_queue(), &lease);
+                    if (!result) result = user_file_create(USER_PIPE, sizeof(io_pipe_operation_t), lease, NULL, &request);
+                    if (!result)
+                    {
+                        ((io_pipe_operation_t *)io_request_buffer(request))->opcode = IO_PIPE_OPEN_WAIT;
+                        result = user_file_submit(USER_PIPE, request);
+                    }
+                    spinlock_preempt_enable();
+                    if (result) return result;
+                    kind = USER_PIPE;
+                    goto wait_again;
+                }
+            }
+            if (!value)
+            {
+                fd_description_t *reservation = io_pipe_open_lease_valid(io_request_description(request)) ?
+                    io_pipe_open_reservation(io_request_description(request)) : io_request_description(request);
+                value = fd_table_reservation_commit(reservation, description, slot_flags);
+            }
             fd_description_put(description);
         }
     }
@@ -287,10 +319,13 @@ static int64_t user_file_finish(user_file_service_t kind, uint32_t operation,
         if ((uint64_t)value > capacity) value = -EIO;
         else if (!user_copy_to_user(output, data, (size_t)value)) value = -EFAULT;
     }
-    else if (!result && !value && (operation == SYSCALL_FILE_STAT_INFO || operation == SYSCALL_FILE_PATH_INFO))
+    else if (!result && !value && (operation == SYSCALL_FILE_STAT_INFO || operation == SYSCALL_FILE_PATH_INFO ||
+                                  operation == SYSCALL_FILE_STAT_TIMES || operation == SYSCALL_FILE_PATH_TIMES))
     {
         io_vfs_operation_t *work = io_request_buffer(request);
-        if (!user_copy_to_user(output, work->data, sizeof(syscall_stat_info_t))) value = -EFAULT;
+        size_t bytes = operation == SYSCALL_FILE_STAT_TIMES || operation == SYSCALL_FILE_PATH_TIMES ?
+            sizeof(syscall_stat_times_t) : sizeof(syscall_stat_info_t);
+        if (!user_copy_to_user(output, work->data, bytes)) value = -EFAULT;
     }
     else if (!result && !value && (operation == SYSCALL_FILE_STAT || operation == SYSCALL_FILE_STAT_PATH))
     {
@@ -327,10 +362,29 @@ static int64_t user_file_finish(user_file_service_t kind, uint32_t operation,
     return value;
 }
 
+static int64_t user_log_write(const void *message, uint64_t length)
+{
+    if (!length || length > SYSCALL_LOG_MAX_BYTES) return -EINVAL;
+    spinlock_preempt_disable();
+    io_request_t *request = NULL;
+    int error = user_file_create(USER_STORAGE, sizeof(io_vfs_operation_t) + (size_t)length,
+                                  NULL, NULL, &request);
+    if (!error)
+    {
+        io_vfs_operation_t *work = io_request_buffer(request);
+        work->opcode = IO_VFS_LOG; work->count = length;
+        error = user_copy_from_user(work->data, message, (size_t)length) ? 0 : -EFAULT;
+        if (!error) error = user_file_submit(USER_STORAGE, request);
+        else user_file_abort(request);
+    }
+    spinlock_preempt_enable();
+    return error ? error : user_file_finish(USER_STORAGE, SYSCALL_FILE_LOG, NULL, 0, 0);
+}
+
 static int64_t user_file_open(const char *path, uint64_t flags, bool shared_memory, uint64_t mode)
 {
     uint64_t known = SYSCALL_OPEN_READ | SYSCALL_OPEN_WRITE | SYSCALL_OPEN_CREATE |
-                     SYSCALL_OPEN_TRUNCATE | SYSCALL_OPEN_EXCLUSIVE | SYSCALL_OPEN_APPEND | SYSCALL_OPEN_CLOEXEC | SYSCALL_OPEN_NONBLOCK | SYSCALL_OPEN_SYNC;
+                     SYSCALL_OPEN_TRUNCATE | SYSCALL_OPEN_EXCLUSIVE | SYSCALL_OPEN_APPEND | SYSCALL_OPEN_CLOEXEC | SYSCALL_OPEN_NONBLOCK | SYSCALL_OPEN_SYNC | SYSCALL_OPEN_NOFOLLOW;
     if (flags & ~known) return -EINVAL;
     if ((flags & SYSCALL_OPEN_CREATE) && mode > UINT32_MAX) return -EINVAL;
     if ((flags & SYSCALL_OPEN_CREATE) && (mode & 07000u)) return -EOPNOTSUPP;
@@ -686,8 +740,8 @@ static int64_t user_system_info(uint32_t operation, void *output, uint64_t capac
 static int64_t user_path_mutation(uint32_t operation, const char *path, const char *new_path, uint64_t flags,
                                   uint64_t mode)
 {
-    if (operation == SYSCALL_FILE_MKDIR_MODE && mode > UINT32_MAX) return -EINVAL;
-    if (operation == SYSCALL_FILE_MKDIR_MODE && (mode & 07000u)) return -EOPNOTSUPP;
+    if ((operation == SYSCALL_FILE_MKDIR_MODE || operation == SYSCALL_FILE_MKFIFO) && mode > UINT32_MAX) return -EINVAL;
+    if ((operation == SYSCALL_FILE_MKDIR_MODE || operation == SYSCALL_FILE_MKFIFO) && (mode & 07000u)) return -EOPNOTSUPP;
     if (operation == SYSCALL_FILE_CHMOD_PATH && mode > 0177777u) return -EINVAL;
     if (operation == SYSCALL_FILE_CHMOD_PATH && (mode & 07000u)) return -EOPNOTSUPP;
     if (flags > SYSCALL_REMOVE_DIRECTORY_ONLY || (operation == SYSCALL_FILE_RENAME && flags)) return -EINVAL;
@@ -695,20 +749,24 @@ static int64_t user_path_mutation(uint32_t operation, const char *path, const ch
     uint32_t uid = 0, gid = 0;
     fd_description_t *cwd = process_acquire_cwd_owner(current_process_local(), &uid, &gid);
     io_request_t *request = NULL;
-    size_t paths = operation == SYSCALL_FILE_RENAME ? 2 : 1;
+    size_t paths = operation == SYSCALL_FILE_RENAME || operation == SYSCALL_FILE_SYMLINK ? 2 : 1;
     int result = cwd ? user_file_create_identity(USER_STORAGE,
         sizeof(io_vfs_operation_t) + paths * VFS_PATH_MAX, NULL, cwd, uid, gid, &request) : -ENOMEM;
     if (!result)
     {
         io_vfs_operation_t *work = io_request_buffer(request);
         work->opcode = operation == SYSCALL_FILE_RENAME ? IO_VFS_RENAME :
+                       operation == SYSCALL_FILE_TRUNCATE_PATH ? IO_VFS_TRUNCATE_PATH :
+                       operation == SYSCALL_FILE_MKFIFO ? IO_VFS_MKFIFO :
+                       operation == SYSCALL_FILE_SYMLINK ? IO_VFS_SYMLINK :
                        operation == SYSCALL_FILE_CHMOD_PATH ? IO_VFS_CHMOD_PATH :
                        (operation == SYSCALL_FILE_MKDIR || operation == SYSCALL_FILE_MKDIR_MODE) ?
                            IO_VFS_MKDIR_MODE : IO_VFS_REMOVE;
         work->flags = (uint32_t)flags;
-        if (operation == SYSCALL_FILE_MKDIR || operation == SYSCALL_FILE_MKDIR_MODE)
+        if (operation == SYSCALL_FILE_MKDIR || operation == SYSCALL_FILE_MKDIR_MODE || operation == SYSCALL_FILE_MKFIFO)
             work->whence = (int32_t)((mode & 0777u) & ~__atomic_load_n(&current_process_local()->creation_mask, __ATOMIC_ACQUIRE));
         if (operation == SYSCALL_FILE_CHMOD_PATH) work->whence = (int32_t)mode;
+        if (operation == SYSCALL_FILE_TRUNCATE_PATH) work->offset = (int64_t)mode;
         result = user_copy_cstring_from_user((char *)work->data, VFS_PATH_MAX, path, NULL);
         if (!result && paths == 2)
             result = user_copy_cstring_from_user((char *)work->data + VFS_PATH_MAX, VFS_PATH_MAX, new_path, NULL);
@@ -719,10 +777,43 @@ static int64_t user_path_mutation(uint32_t operation, const char *path, const ch
     return result ? result : user_file_finish(USER_STORAGE, operation, NULL, 0, 0);
 }
 
+static int64_t user_path_access(const char *path, uint64_t mode, uint64_t flags, int64_t directory)
+{
+    if (mode & ~7u || flags & ~(uint64_t)(SYSCALL_ACCESS_EFFECTIVE | SYSCALL_ACCESS_NOFOLLOW)) return -EINVAL;
+    spinlock_preempt_disable();
+    uint32_t uid = 0, gid = 0;
+    fd_description_t *cwd = process_acquire_cwd_owner(current_process_local(), &uid, &gid);
+    io_request_t *request = NULL;
+    int error = cwd ? user_file_create_identity(USER_STORAGE, sizeof(io_vfs_operation_t) + VFS_PATH_MAX,
+                                                NULL, cwd, uid, gid, &request) : -ENOMEM;
+    if (!error)
+    {
+        io_vfs_operation_t *work = io_request_buffer(request);
+        work->opcode = IO_VFS_ACCESS; work->flags = (uint32_t)flags; work->whence = (int32_t)mode;
+        error = user_copy_cstring_from_user((char *)work->data, VFS_PATH_MAX, path, NULL);
+        if (!error && work->data[0] != '/' && directory != -100)
+        {
+            /* Current open FDs are files, streams or sockets; directory streams
+             * use a separate opaque-handle table, never interchangeable FDs. */
+            fd_description_t *description = NULL;
+            error = directory >= 0 && directory <= INT32_MAX ?
+                fd_table_pin(process_current_fd_table(), (int)directory, &description, NULL) : -EBADF;
+            if (!error) error = -ENOTDIR;
+            fd_description_put(description);
+        }
+        if (!error) error = user_file_submit(USER_STORAGE, request);
+        else user_file_abort(request);
+    }
+    spinlock_preempt_enable();
+    return error ? error : user_file_finish(USER_STORAGE, SYSCALL_FILE_ACCESS, NULL, 0, 0);
+}
+
 static int64_t user_path_operation(uint32_t operation, const char *path, void *output, uint64_t flags)
 {
     if (flags & ~((uint64_t)SYSCALL_STAT_NOFOLLOW)) return -EINVAL;
-    size_t reply_size = operation == SYSCALL_FILE_PATH_INFO ? sizeof(syscall_stat_info_t) : sizeof(syscall_stat_t);
+    bool times = operation == SYSCALL_FILE_PATH_TIMES;
+    size_t reply_size = times ? sizeof(syscall_stat_times_t) :
+        operation == SYSCALL_FILE_PATH_INFO ? sizeof(syscall_stat_info_t) : sizeof(syscall_stat_t);
     if (operation != SYSCALL_FILE_CHDIR &&
         (!output || !user_ptr_range_valid(output, reply_size))) return -EFAULT;
     spinlock_preempt_disable();
@@ -735,8 +826,8 @@ static int64_t user_path_operation(uint32_t operation, const char *path, void *o
     {
         io_vfs_operation_t *work = io_request_buffer(request);
         work->opcode = operation == SYSCALL_FILE_CHDIR ? IO_VFS_RESOLVE_CWD :
-                       operation == SYSCALL_FILE_PATH_INFO ? IO_VFS_PATH_INFO : IO_VFS_STAT_PATH;
-        work->flags = (uint32_t)flags;
+                       operation == SYSCALL_FILE_PATH_INFO || times ? IO_VFS_PATH_INFO : IO_VFS_STAT_PATH;
+        work->flags = (uint32_t)flags | (times ? SYSCALL_STAT_TIME_FIELDS : 0);
         result = user_copy_cstring_from_user((char *)work->data, VFS_PATH_MAX, path, NULL);
         if (!result) result = user_file_submit(USER_STORAGE, request);
         else user_file_abort(request);
@@ -745,24 +836,27 @@ static int64_t user_path_operation(uint32_t operation, const char *path, void *o
     return result ? result : user_file_finish(USER_STORAGE, operation, output, 0, 0);
 }
 
-static int64_t user_file_stat_info(uint64_t fd, void *output)
+static int64_t user_file_stat_info(uint64_t fd, void *output, bool times)
 {
-    if (!output || !user_ptr_range_valid(output, sizeof(syscall_stat_info_t))) return -EFAULT;
+    size_t bytes = times ? sizeof(syscall_stat_times_t) : sizeof(syscall_stat_info_t);
+    if (!output || !user_ptr_range_valid(output, bytes)) return -EFAULT;
     spinlock_preempt_disable();
     fd_description_t *description = NULL;
     int result = user_file_pin(fd, &description);
     io_request_t *request = NULL;
     if (!result) result = user_file_create(USER_STORAGE,
-        sizeof(io_vfs_operation_t) + sizeof(syscall_stat_info_t), description, NULL, &request);
+        sizeof(io_vfs_operation_t) + bytes, description, NULL, &request);
     else fd_description_put(description);
     if (!result)
     {
         io_vfs_operation_t *work = io_request_buffer(request);
         work->opcode = IO_VFS_STAT_INFO;
+        work->flags = times ? SYSCALL_STAT_TIME_FIELDS : 0;
         result = user_file_submit(USER_STORAGE, request);
     }
     spinlock_preempt_enable();
-    return result ? result : user_file_finish(USER_STORAGE, SYSCALL_FILE_STAT_INFO, output, 0, 0);
+    return result ? result : user_file_finish(USER_STORAGE,
+        times ? SYSCALL_FILE_STAT_TIMES : SYSCALL_FILE_STAT_INFO, output, 0, 0);
 }
 
 static int64_t user_file_metadata(uint32_t operation, uint64_t fd, uint32_t first, uint32_t second)
@@ -1705,6 +1799,9 @@ int64_t io_user_file_dispatch(uint32_t operation, uint64_t first, uint64_t secon
 {
     switch (operation)
     {
+        case SYSCALL_FILE_LOG:
+            if (third || fourth) return -EINVAL;
+            return user_log_write((const void *)first, second);
         case SYSCALL_FILE_WRITEV:
             if(fourth)return -EINVAL;
             return user_file_writev(first,(const void *)second,third);
@@ -1728,13 +1825,22 @@ int64_t io_user_file_dispatch(uint32_t operation, uint64_t first, uint64_t secon
         case SYSCALL_FILE_TRUNCATE:
             if (third || fourth || second > INT64_MAX) return -EINVAL;
             return user_file_data(operation, first, NULL, 0, (int64_t)second, 0, 0);
+        case SYSCALL_FILE_TRUNCATE_PATH:
+            if (third || fourth || second > INT64_MAX) return -EINVAL;
+            return user_path_mutation(operation, (const char *)first, NULL, 0, second);
         case SYSCALL_FILE_REALPATH:
             if (fourth) return -EINVAL;
             return user_realpath((const char *)first, (void *)second, third);
+        case SYSCALL_FILE_SYMLINK:
+            if (third || fourth) return -EINVAL;
+            return user_path_mutation(operation, (const char *)first, (const char *)second, 0, 0);
+        case SYSCALL_FILE_ACCESS:
+            return user_path_access((const char *)first, second, third, (int64_t)fourth);
         case SYSCALL_FILE_MKDIR:
             if (second || third || fourth) return -EINVAL;
             return user_path_mutation(operation, (const char *)first, NULL, 0, 0777u);
         case SYSCALL_FILE_MKDIR_MODE:
+        case SYSCALL_FILE_MKFIFO:
             if (third || fourth) return -EINVAL;
             return user_path_mutation(operation, (const char *)first, NULL, 0, second);
         case SYSCALL_FILE_CHMOD_PATH:
@@ -1786,8 +1892,9 @@ int64_t io_user_file_dispatch(uint32_t operation, uint64_t first, uint64_t secon
             if (third || fourth) return -EINVAL;
             return user_file_select((const void *)first, second);
         case SYSCALL_FILE_STAT_INFO:
+        case SYSCALL_FILE_STAT_TIMES:
             if (third || fourth) return -EINVAL;
-            return user_file_stat_info(first, (void *)second);
+            return user_file_stat_info(first, (void *)second, operation == SYSCALL_FILE_STAT_TIMES);
         case SYSCALL_FILE_CHOWN:
             if (second > UINT32_MAX || third > UINT32_MAX || fourth) return -EINVAL;
             return user_file_metadata(operation, first, (uint32_t)second, (uint32_t)third);
@@ -1795,6 +1902,7 @@ int64_t io_user_file_dispatch(uint32_t operation, uint64_t first, uint64_t secon
             if (second > UINT32_MAX || third || fourth) return -EINVAL;
             return user_file_metadata(operation, first, (uint32_t)second, 0);
         case SYSCALL_FILE_PATH_INFO:
+        case SYSCALL_FILE_PATH_TIMES:
             if (fourth) return -EINVAL;
             return user_path_operation(operation, (const char *)first, (void *)second, third);
         case SYSCALL_FILE_STAT_PATH: return user_path_operation(operation, (const char *)first, (void *)second, third);

@@ -665,6 +665,27 @@ static int64_t child_wait(int64_t pid, void *output, uint64_t flags, bool info, 
 
 int64_t io_process_dispatch(uint32_t operation, uint64_t first, uint64_t second, uint64_t third)
 {
+    if (operation == SYSCALL_PROCESS_ELF_INFO)
+    {
+        if (third) return -EINVAL;
+        spinlock_preempt_disable();
+        process_t *process = current_process_local();
+        int64_t result = !process || !process->is_user ? -ESRCH :
+            !process->user_elf_metadata ? -ENOENT : (int64_t)process->user_elf_metadata_size;
+        if (result > 0 && (first || second))
+        {
+            if (second < (uint64_t)result) result = -ERANGE;
+            else result = user_copy_to_user((void *)(uintptr_t)first, process->user_elf_metadata,
+                                            process->user_elf_metadata_size) ? result : -EFAULT;
+        }
+        spinlock_preempt_enable();
+        return result;
+    }
+    if (operation == SYSCALL_PROCESS_ALARM)
+    {
+        if (first > UINT32_MAX || second || third) return -EINVAL;
+        return process_alarm((unsigned)first);
+    }
     if (operation == SYSCALL_PROCESS_UMASK)
     {
         if (second || third) return -EINVAL;

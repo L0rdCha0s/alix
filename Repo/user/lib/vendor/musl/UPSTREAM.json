@@ -10,7 +10,9 @@
     "src/internal/libm.h",
     "src/internal/complex_impl.h",
     "include/complex.h",
-    "src/prng/random.c"
+    "src/prng/random.c",
+    "src/network/inet_aton.c",
+    "include/elf.h"
   ],
   "notes": "Alix ABI, headers, FP environment, allocation and I/O remain native.",
   "adaptations": [
@@ -19,10 +21,21 @@
     "Thread-local gamma sign state",
     "Private byte/wide scanning stream; heap-owned decimal workspace and scanset",
     "FreeBSD replacements for incomplete extended complex routines",
-    "POSIX random state generator uses the existing native alix_mutex; musl fork lock hook omitted"
+    "POSIX random state generator uses the existing native alix_mutex; musl fork lock hook omitted",
+    "Legacy IPv4 parser uses native headers; public wrapper publishes output only on success"
   ],
   "prng": {
     "source_sha256": "3a47a757115e2a2ea7b1242a0000100ad802c27c2a398b4d8b8360d768780209",
     "vendored_sha256": "09dc7fdaa5ac8194981907ecb3cdae76dad08ebb7df2c32609c8101786ea4a3f"
+  },
+  "inet_aton": {
+    "source_sha256": "b2c4bb22f74da864412a12b8c6c702d62a5789255f698aba18146cb9233a75ee",
+    "vendored_sha256": "89d8085117395606ece9568c4d3a0ee520b178aaeb9e4e7ea5bda54cfc3d98c9"
+  },
+  "elf_header": {
+    "destination": "include/elf.h",
+    "source_sha256": "ebfb1791bae850a20dbd4ede3908365d63a38c3677f89397d36ea5a706ec6f4a",
+    "vendored_sha256": "01910d3c40cc90ade4e5d51575806337a8db6227afdc14119440c1d45cb14e08",
+    "adaptation": "Native kernel loader declarations follow the unchanged public ELF definitions."
   }
 }

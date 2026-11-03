@@ -39,15 +39,19 @@ USER_SCAN_SOURCES := $(wildcard $(USER_MUSL_DIR)/scan/*.c)
 USER_SCAN_OBJECTS := $(patsubst user/%.c,$(USER_OBJDIR)/%.o,$(USER_SCAN_SOURCES))
 USER_FREEBSD_SOURCES := $(wildcard user/lib/vendor/freebsd/*.c)
 USER_FREEBSD_OBJECTS := $(patsubst user/%.c,$(USER_OBJDIR)/%.o,$(USER_FREEBSD_SOURCES))
-USER_C11_NAMES := fenv threads stdlib_extra uchar scanf wcstofloat stdio_files math_errno atomic tempfile
+USER_C11_NAMES := fenv threads stdlib_extra uchar scanf wcstofloat stdio_files math_errno atomic tempfile syslog calendar_parse auxv
 USER_C11_OBJECTS := $(addprefix $(USER_OBJDIR)/lib/,$(addsuffix .o,$(USER_C11_NAMES)))
 USER_COMPILER_COMPLEX := $(USER_OBJDIR)/lib/compiler_complex.o
 USER_PRNG_OBJECT := $(USER_OBJDIR)/lib/vendor/musl/prng/random.o
-USER_COMMON_OBJECTS += $(USER_MUSL_OBJECTS) $(USER_SCAN_OBJECTS) $(USER_FREEBSD_OBJECTS) $(USER_C11_OBJECTS) $(USER_COMPILER_COMPLEX) $(USER_PRNG_OBJECT)
+USER_INET_OBJECT := $(USER_OBJDIR)/lib/vendor/musl/network/inet_aton.o
+USER_COMMON_OBJECTS += $(USER_MUSL_OBJECTS) $(USER_SCAN_OBJECTS) $(USER_FREEBSD_OBJECTS) $(USER_C11_OBJECTS) $(USER_COMPILER_COMPLEX) $(USER_PRNG_OBJECT) $(USER_INET_OBJECT)
 USER_NUMERIC_FLAGS := -fno-strict-aliasing -O2 -frounding-math -ffp-contract=off -Wno-unused-but-set-variable -Wno-parentheses -Wno-unknown-pragmas
 
 $(USER_MUSL_OBJECTS) $(USER_SCAN_OBJECTS) $(USER_FREEBSD_OBJECTS): user/lib/libc_runtime.mk
 $(USER_PRNG_OBJECT): user/lib/vendor/musl/prng/random.c include/alix_mutex.h
+	@mkdir -p $(dir $@)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+$(USER_INET_OBJECT): user/lib/vendor/musl/network/inet_aton.c
 	@mkdir -p $(dir $@)
 	$(CC) $(USER_CFLAGS) -c -o $@ $<
 $(USER_OBJDIR)/lib/vendor/musl/%.o: user/lib/vendor/musl/%.c

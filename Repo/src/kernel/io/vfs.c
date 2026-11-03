@@ -12,6 +12,7 @@
 #include "system_identity.h"
 #include "vfs_mapping.h"
 #include "io_record_lock.h"
+#include "logger.h"
 
 typedef struct {
     vfs_file_mapping_t *mapping;
@@ -276,7 +277,7 @@ static int io_vfs_open_common(vfs_node_t *cwd, const char *path, uint32_t flags,
     if (!output) return -EINVAL;
     *output = NULL;
     uint32_t known = SYSCALL_OPEN_READ | SYSCALL_OPEN_WRITE | SYSCALL_OPEN_CREATE |
-                     SYSCALL_OPEN_TRUNCATE | SYSCALL_OPEN_EXCLUSIVE | SYSCALL_OPEN_APPEND | SYSCALL_OPEN_NONBLOCK | SYSCALL_OPEN_SYNC;
+                     SYSCALL_OPEN_TRUNCATE | SYSCALL_OPEN_EXCLUSIVE | SYSCALL_OPEN_APPEND | SYSCALL_OPEN_NONBLOCK | SYSCALL_OPEN_SYNC | SYSCALL_OPEN_NOFOLLOW;
     if (!retirement || (!shared_memory && !cwd) || !path || (flags & ~known) || !(flags & (SYSCALL_OPEN_READ | SYSCALL_OPEN_WRITE)) ||
         ((flags & SYSCALL_OPEN_TRUNCATE) && !(flags & SYSCALL_OPEN_WRITE))) return -EINVAL;
     if (shared_memory && (!(flags & SYSCALL_OPEN_READ) ||
@@ -296,10 +297,17 @@ static int io_vfs_open_common(vfs_node_t *cwd, const char *path, uint32_t flags,
                            (flags & SYSCALL_OPEN_TRUNCATE) != 0,
                            (flags & SYSCALL_OPEN_EXCLUSIVE) != 0, uid, gid, mode,
                            file->writable ? 6u : 4u, &file->node) :
-        vfs_open_data_mode_owned(cwd, path, (flags & SYSCALL_OPEN_CREATE) != 0,
+        vfs_open_data_nofollow_owned(cwd, path, (flags & SYSCALL_OPEN_CREATE) != 0,
                                            (flags & SYSCALL_OPEN_TRUNCATE) != 0,
                                            (flags & SYSCALL_OPEN_EXCLUSIVE) != 0, uid, gid,
-                                           (file->readable ? 4u : 0) | (file->writable ? 2u : 0), mode, &file->node);
+                                           (file->readable ? 4u : 0) | (file->writable ? 2u : 0), mode,
+                                           (flags & SYSCALL_OPEN_NOFOLLOW) != 0, &file->node);
+    if (!result && vfs_node_type(file->node) == VFS_NODE_FIFO)
+    {
+        vfs_node_t *node = file->node; file->node = NULL;
+        fd_description_put(description);
+        return io_pipe_named_open_owned(node, flags, retirement, output);
+    }
     if (result) fd_description_put(description);
     else
     {
@@ -446,6 +454,14 @@ void io_vfs_execute(io_request_t *request, io_service_result_t *result,
     size_t available = io_request_buffer_size(request) - sizeof(*operation);
     if (!operation || operation->reserved) return;
     fd_description_t *description = io_request_description(request);
+    if (operation->opcode == IO_VFS_LOG)
+    {
+        if (description || operation->flags || operation->whence || operation->offset ||
+            !operation->count || operation->count > SYSCALL_LOG_MAX_BYTES || operation->count != available) return;
+        result->result = logger_write_len((const char *)operation->data, (size_t)operation->count) ?
+                         (int64_t)operation->count : -EIO;
+        return;
+    }
     if (operation->opcode == IO_VFS_SET_TIMES)
     {
         if (description || !io_request_cwd(request) || operation->flags > 1 || operation->count || operation->offset ||
@@ -474,19 +490,22 @@ void io_vfs_execute(io_request_t *request, io_service_result_t *result,
     if (operation->opcode == IO_VFS_STAT_INFO || operation->opcode == IO_VFS_PATH_INFO)
     {
         bool path = operation->opcode == IO_VFS_PATH_INFO;
+        bool times = (operation->flags & SYSCALL_STAT_TIME_FIELDS) != 0;
+        size_t bytes = times ? sizeof(syscall_stat_times_t) : sizeof(syscall_stat_info_t);
         if (operation->count || operation->offset || operation->whence ||
-            (operation->flags & ~(path ? SYSCALL_STAT_NOFOLLOW : 0u)) ||
-            available < sizeof(syscall_stat_info_t)) return;
+            (operation->flags & ~(SYSCALL_STAT_TIME_FIELDS | (path ? SYSCALL_STAT_NOFOLLOW : 0u))) ||
+            available < bytes) return;
         if (path && (description || !io_request_cwd(request))) return;
         if (path && strnlen((const char *)operation->data, available) == available)
         { result->result = -ENAMETOOLONG; return; }
-        if (path || io_vfs_description_valid(description))
+        vfs_node_t *pipe_node = io_pipe_node(description);
+        if (path || io_vfs_description_valid(description) || pipe_node)
         {
             vfs_stat_info_t *info = calloc(1, sizeof(*info));
             if (!info) { result->result = -ENOMEM; return; }
             result->result = path ? vfs_path_stat_info(io_request_cwd(request), (const char *)operation->data,
                 !(operation->flags & SYSCALL_STAT_NOFOLLOW), io_request_uid(request), io_request_gid(request), info) :
-                vfs_node_stat_info(((io_vfs_file_t *)fd_description_context(description))->node, info);
+                vfs_node_stat_info(pipe_node ? pipe_node : ((io_vfs_file_t *)fd_description_context(description))->node, info);
             if (!result->result) io_vfs_stat_info_encode(info, (void *)operation->data);
             free(info);
         }
@@ -496,7 +515,10 @@ void io_vfs_execute(io_request_t *request, io_service_result_t *result,
              * bounded nested call uses the same owned request, never a caller
              * buffer. Anonymous descriptions have no filesystem inode/link. */
             operation->opcode = IO_VFS_STAT;
+            uint32_t flags = operation->flags;
+            operation->flags = 0;
             io_vfs_execute(request, result, retirement);
+            operation->flags = flags;
             operation->opcode = IO_VFS_STAT_INFO;
             if (!result->result)
             {
@@ -507,6 +529,16 @@ void io_vfs_execute(io_request_t *request, io_service_result_t *result,
                     .block_size = 4096, .blocks = m->size_bytes / 512 + (m->size_bytes % 512 != 0),
                 };
             }
+        }
+        if (!result->result && times)
+        {
+            syscall_stat_times_t *reply = (void *)operation->data;
+            if (reply->info.atime > INT64_MAX || reply->info.mtime > INT64_MAX || reply->info.ctime > INT64_MAX)
+            { result->result = -EOVERFLOW; return; }
+            /* Current AlixFS timestamp precision is one second. */
+            reply->accessed = (syscall_file_timestamp_t){(int64_t)reply->info.atime, 0};
+            reply->modified = (syscall_file_timestamp_t){(int64_t)reply->info.mtime, 0};
+            reply->changed = (syscall_file_timestamp_t){(int64_t)reply->info.ctime, 0};
         }
         return;
     }
@@ -578,6 +610,40 @@ void io_vfs_execute(io_request_t *request, io_service_result_t *result,
         result->result = vfs_path_snapshot(io_request_cwd(request), (char *)operation->data, (size_t)operation->count);
         return;
     }
+    if (operation->opcode == IO_VFS_SYMLINK)
+    {
+        if (description || !io_request_cwd(request) || operation->flags || available < 2 * VFS_PATH_MAX) return;
+        const char *target = (const char *)operation->data, *path = target + VFS_PATH_MAX;
+        if (strnlen(target, VFS_PATH_MAX) == VFS_PATH_MAX || strnlen(path, VFS_PATH_MAX) == VFS_PATH_MAX)
+        { result->result = -ENAMETOOLONG; return; }
+        result->result = vfs_symlink_create(io_request_cwd(request), target, path,
+                                            io_request_uid(request), io_request_gid(request));
+        return;
+    }
+    if (operation->opcode == IO_VFS_ACCESS)
+    {
+        if (description || !io_request_cwd(request) || available < VFS_PATH_MAX || operation->whence < 0 ||
+            operation->whence > 7 || operation->flags & ~(SYSCALL_ACCESS_NOFOLLOW | SYSCALL_ACCESS_EFFECTIVE)) return;
+        if (strnlen((const char *)operation->data, VFS_PATH_MAX) == VFS_PATH_MAX)
+        { result->result = -ENAMETOOLONG; return; }
+        result->result = vfs_access_path(io_request_cwd(request), (const char *)operation->data,
+            !(operation->flags & SYSCALL_ACCESS_NOFOLLOW), (uint32_t)operation->whence,
+            io_request_uid(request), io_request_gid(request));
+        return;
+    }
+    if (operation->opcode == IO_VFS_TRUNCATE_PATH)
+    {
+        if (description || !io_request_cwd(request) || operation->flags || operation->offset < 0 || available < VFS_PATH_MAX) return;
+        if (strnlen((const char *)operation->data, VFS_PATH_MAX) == VFS_PATH_MAX)
+        { result->result = -ENAMETOOLONG; return; }
+        vfs_node_t *node = NULL;
+        int error = vfs_open_data_access_owned(io_request_cwd(request), (const char *)operation->data,
+            false, false, false, io_request_uid(request), io_request_gid(request), 2u, &node);
+        if (!error) error = vfs_resize_data(node, (uint64_t)operation->offset);
+        vfs_node_release_owned(node);
+        result->result = error;
+        return;
+    }
     if (operation->opcode == IO_VFS_CHMOD_PATH)
     {
         if (description || !io_request_cwd(request) || operation->flags || available < VFS_PATH_MAX ||
@@ -591,15 +657,18 @@ void io_vfs_execute(io_request_t *request, io_service_result_t *result,
         result->result = error;
         return;
     }
-    if (operation->opcode == IO_VFS_MKDIR || operation->opcode == IO_VFS_MKDIR_MODE)
+    if (operation->opcode == IO_VFS_MKDIR || operation->opcode == IO_VFS_MKDIR_MODE || operation->opcode == IO_VFS_MKFIFO)
     {
         if (description || !io_request_cwd(request) || operation->flags || available < VFS_PATH_MAX) return;
         if (strnlen((const char *)operation->data, VFS_PATH_MAX) == VFS_PATH_MAX) { result->result = -ENAMETOOLONG; return; }
-        if (operation->opcode == IO_VFS_MKDIR_MODE)
+        if (operation->opcode == IO_VFS_MKDIR_MODE || operation->opcode == IO_VFS_MKFIFO)
         {
             if (operation->whence < 0 || operation->whence > 0777) return;
-            result->result = vfs_mkdir_mode_exclusive(io_request_cwd(request), (const char *)operation->data,
-                io_request_uid(request), io_request_gid(request), (uint32_t)operation->whence);
+            result->result = operation->opcode == IO_VFS_MKFIFO ?
+                vfs_mkfifo_exclusive(io_request_cwd(request), (const char *)operation->data,
+                    io_request_uid(request), io_request_gid(request), (uint32_t)operation->whence) :
+                vfs_mkdir_mode_exclusive(io_request_cwd(request), (const char *)operation->data,
+                    io_request_uid(request), io_request_gid(request), (uint32_t)operation->whence);
         }
         else result->result = vfs_mkdir_exclusive(io_request_cwd(request), (const char *)operation->data,
                                                  io_request_uid(request), io_request_gid(request));
@@ -669,7 +738,7 @@ void io_vfs_execute(io_request_t *request, io_service_result_t *result,
     }
     if (operation->opcode == IO_VFS_OPEN || operation->opcode == IO_VFS_SHM_OPEN || operation->opcode == IO_VFS_OPEN_MODE)
     {
-        uint32_t known = SYSCALL_OPEN_READ | SYSCALL_OPEN_WRITE | SYSCALL_OPEN_CREATE | SYSCALL_OPEN_TRUNCATE | SYSCALL_OPEN_EXCLUSIVE | SYSCALL_OPEN_APPEND | SYSCALL_OPEN_NONBLOCK | SYSCALL_OPEN_SYNC;
+        uint32_t known = SYSCALL_OPEN_READ | SYSCALL_OPEN_WRITE | SYSCALL_OPEN_CREATE | SYSCALL_OPEN_TRUNCATE | SYSCALL_OPEN_EXCLUSIVE | SYSCALL_OPEN_APPEND | SYSCALL_OPEN_NONBLOCK | SYSCALL_OPEN_SYNC | SYSCALL_OPEN_NOFOLLOW;
         if (!retirement || (description && !fd_table_reservation_valid(description)) || !io_request_cwd(request) ||
             (operation->flags & ~known) || !(operation->flags & (SYSCALL_OPEN_READ | SYSCALL_OPEN_WRITE)) ||
             ((operation->flags & SYSCALL_OPEN_TRUNCATE) && !(operation->flags & SYSCALL_OPEN_WRITE))) return;

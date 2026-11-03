@@ -67,6 +67,12 @@ eight-CPU acceptance covers concurrent generation, reseeding, state restoration,
 range and independent `rand` state; run `make zen-random-qemu-test`. These are
 deterministic generators. `getrandom`/`getentropy` provide the kernel entropy API.
 
+GNU-compatible `memalign` delegates to the existing native aligned allocator.
+It accepts arbitrary allocation sizes and power-of-two alignments, preserves
+errno on success and returns a freeable allocation for size zero. Invalid
+alignments and unrepresentable sizes report EINVAL/ENOMEM. The native Gecko
+font fixture exercises it directly and through Mozilla's real `moz_xmemalign`.
+
 The numeric library advertises `math_errhandling == MATH_ERREXCEPT`; native
 `sqrtf` and `scalbnf` also preserve their existing errno contracts. Environment
 operations cover x87 and SSE state together, including exception flags, masks,

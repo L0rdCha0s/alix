@@ -22,7 +22,7 @@ code=r'''
 #include <sys/time.h>
 #define CHECK(x) do{if(!(x)){fprintf(stderr,"usage line %d: %s\n",__LINE__,#x);abort();}}while(0)
 typedef pthread_mutex_t spinlock_t;
-typedef struct {spinlock_t usage_lock;bool is_user;uint64_t usage_user_ticks,usage_system_ticks,usage_minor_faults,usage_major_faults;} process_t;
+typedef struct {unsigned address_space;spinlock_t usage_lock;bool is_user;uint64_t usage_user_ticks,usage_system_ticks,usage_minor_faults,usage_major_faults;} process_t;
 static process_t *current;
 static _Thread_local unsigned depth,locked;
 static _Thread_local uint64_t irq=0x202;
@@ -41,6 +41,7 @@ static void *owned_calloc(size_t count,size_t bytes){CHECK(depth&&!locked);if(fa
 static void owned_free(void*p){CHECK(depth&&!locked&&p&&allocations);--allocations;free(p);}
 static bool user_ptr_range_valid(const void*p,size_t bytes){return (uintptr_t)p>4096&&bytes<=UINTPTR_MAX-(uintptr_t)p;}
 static bool user_copy_to_user(void*out,const void*in,size_t bytes){CHECK(depth&&!locked);++copies;if(fail_copy)return false;memcpy(out,in,bytes);return true;}
+static void paging_user_residency(unsigned *space,uint64_t *current,uint64_t *peak) { CHECK(depth&&!locked); (void)space; *current=20; *peak=50; }
 '''+wire+r'''
 #define calloc owned_calloc
 #define free owned_free
@@ -80,12 +81,16 @@ code+=r'''
 typedef int64_t time_t_native;
 typedef int64_t suseconds_t_native;
 struct native_timeval {time_t_native tv_sec;suseconds_t_native tv_usec;};
-struct native_rusage {struct native_timeval ru_utime,ru_stime;long ru_minflt,ru_majflt;};
+struct native_rusage {struct native_timeval ru_utime,ru_stime;long ru_minflt,ru_majflt,ru_maxrss;};
 static _Thread_local int test_errno;
 #undef CLOCKS_PER_SEC
 #define CLOCKS_PER_SEC 1000
 static syscall_resource_usage_t user_wire;static int user_error;
-static int sys_resource_usage(int which,syscall_resource_usage_t*out,size_t bytes){CHECK(bytes==sizeof(*out));if(which)return-EINVAL;if(user_error)return user_error;*out=user_wire;return 0;}
+static int sys_resource_usage(int which,syscall_resource_usage_t*out,size_t bytes){
+    CHECK(bytes==sizeof(*out)||bytes==sizeof(syscall_resource_usage_v2_t));if(which)return-EINVAL;if(user_error)return user_error;*out=user_wire;
+    if(bytes==sizeof(syscall_resource_usage_v2_t)) {syscall_resource_usage_v2_t *full=(void*)out;full->resident_pages=20;full->peak_resident_pages=50;}
+    return 0;
+}
 '''
 for signature in ['static int resource_snapshot(', 'clock_t clock(', 'static void resource_ticks_to_timeval(','int getrusage(']:
     source=function_definition(lib,signature)
@@ -95,10 +100,10 @@ for signature in ['static int resource_snapshot(', 'clock_t clock(', 'static voi
     code+=source+'\n'
 code+=r'''
 static void conversion_contract(void){
-    user_wire=(syscall_resource_usage_t){.version=1,.size=48,.tick_frequency=100,.user_ticks=125,.system_ticks=257,.minor_faults=81,.major_faults=2};
+    user_wire=(syscall_resource_usage_t){.version=2,.size=64,.tick_frequency=100,.user_ticks=125,.system_ticks=257,.minor_faults=81,.major_faults=2};
     struct native_rusage out;test_errno=EDOM;CHECK(!native_getrusage(0,&out)&&test_errno==EDOM);
     CHECK(out.ru_utime.tv_sec==1&&out.ru_utime.tv_usec==250000&&out.ru_stime.tv_sec==2&&out.ru_stime.tv_usec==570000&&out.ru_minflt==81&&out.ru_majflt==2);
-    struct native_rusage saved=out;CHECK(native_getrusage(-1,&out)==-1&&test_errno==EINVAL&&!memcmp(&out,&saved,sizeof(out)));
+    CHECK(out.ru_maxrss==200);struct native_rusage saved=out;CHECK(native_getrusage(-1,&out)==-1&&test_errno==EINVAL&&!memcmp(&out,&saved,sizeof(out)));
     CHECK(native_getrusage(0,NULL)==-1&&test_errno==EFAULT);
     user_error=-ENOMEM;CHECK(native_getrusage(0,&out)==-1&&test_errno==ENOMEM&&!memcmp(&out,&saved,sizeof(out)));user_error=0;
     for(unsigned i=0;i<4;++i){uint32_t *field=i==0?&user_wire.version:i==1?&user_wire.size:i==2?&user_wire.tick_frequency:&user_wire.reserved;uint32_t old=*field;*field=i==3?1:0;CHECK(native_getrusage(0,&out)==-1&&test_errno==EIO&&!memcmp(&out,&saved,sizeof(out)));*field=old;}

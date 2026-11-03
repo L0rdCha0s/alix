@@ -10,5 +10,6 @@ bool logger_write(const char *text);
 bool logger_write_len(const char *text, size_t len);
 bool logger_log(const char *line);
 bool logger_is_ready(void);
+void logger_enable_writes(void);
 
 #endif

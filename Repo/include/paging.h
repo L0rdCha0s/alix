@@ -20,6 +20,7 @@ typedef struct paging_space
     paging_extra_page_t *extra_pages;
     size_t extra_page_count;
     uint32_t active_cpu_mask;
+    uint64_t resident_user_pages, peak_resident_user_pages;
     spinlock_t lock;
     bool lock_inited;
 } paging_space_t;
@@ -72,6 +73,7 @@ void paging_flush_global_tlb(void);
 void paging_handle_remote_tlb_flush(void);
 /* AP bring-up uses its resolved index before smp_current_cpu_index is valid. */
 void paging_initialize_cpu_tlb(uint32_t cpu_index);
+void paging_user_residency(paging_space_t *space, uint64_t *current, uint64_t *peak);
 void paging_set_clone_trace(bool enable);
 bool paging_global_lock_held_by_current_cpu(void);
 

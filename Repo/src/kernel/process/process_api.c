@@ -678,6 +678,8 @@ static void process_mark_terminated(process_t *process, int status, uint32_t wai
     process->wait_status = wait_status;
     process->state = PROCESS_STATE_ZOMBIE;
 
+    process_alarm_cancel_locked(process);
+
     spinlock_lock(&process->threads_lock);
     for (thread_t *thread = process->threads; thread; thread = thread->process_next)
     {
@@ -2416,6 +2418,7 @@ void process_on_timer_tick(interrupt_frame_t *frame)
         }
 
         sleep_queue_wake_due(now_ticks);
+        process_alarm_tick(now_ticks);
         stack_watch_check_timeouts();
     }
 

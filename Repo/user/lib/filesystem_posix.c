@@ -7,7 +7,8 @@
 #include <stddef.h>
 #include "sys/time.h"
 
-_Static_assert(sizeof(struct stat) == sizeof(syscall_stat_info_t) && sizeof(struct stat) == 88,
+_Static_assert(sizeof(struct stat) == sizeof(syscall_stat_times_t) && sizeof(struct stat) == 136 &&
+               offsetof(struct stat, st_atim) == sizeof(syscall_stat_info_t),
                "full stat ABI size");
 #define STAT_FIELD(public_name, wire_name) \
     _Static_assert(offsetof(struct stat, public_name) == offsetof(syscall_stat_info_t, wire_name), "stat field ABI")
@@ -35,13 +36,25 @@ int chmod(const char *path, mode_t mode)
 static int path_stat(const char *path, struct stat *output, uint32_t flags)
 {
     if (!output) { errno = EFAULT; return -1; }
-    int64_t result = sys_file_io(SYSCALL_FILE_PATH_INFO, (uintptr_t)path, (uintptr_t)output, flags, 0);
+    int64_t result = sys_file_io(SYSCALL_FILE_PATH_TIMES, (uintptr_t)path, (uintptr_t)output, flags, 0);
     if (result < 0) { errno = (int)-result; return -1; }
     return 0;
 }
 
 int stat(const char *path, struct stat *output) { return path_stat(path, output, 0); }
 int lstat(const char *path, struct stat *output) { return path_stat(path, output, SYSCALL_STAT_NOFOLLOW); }
+
+static int path_stat_v2(const char *path, void *output, uint32_t flags)
+{
+    if (!output) { errno = EFAULT; return -1; }
+    int64_t result = sys_file_io(SYSCALL_FILE_PATH_INFO, (uintptr_t)path, (uintptr_t)output, flags, 0);
+    if (result < 0) { errno = (int)-result; return -1; }
+    return 0;
+}
+int __alix_stat_v2(const char *, void *) __asm__("alix_stat_v2");
+int __alix_lstat_v2(const char *, void *) __asm__("alix_lstat_v2");
+int __alix_stat_v2(const char *path, void *output) { return path_stat_v2(path, output, 0); }
+int __alix_lstat_v2(const char *path, void *output) { return path_stat_v2(path, output, SYSCALL_STAT_NOFOLLOW); }
 
 static int legacy_path_stat(const char *path, void *output, uint32_t flags)
 {

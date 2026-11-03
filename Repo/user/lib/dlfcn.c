@@ -2,6 +2,8 @@
 #include "alix_mutex.h"
 #include "alix_process.h"
 #include "dynamic_elf.h"
+#include "alix_image.h"
+#include "link.h"
 #include "errno.h"
 #include "fcntl.h"
 #include "stdio.h"
@@ -31,6 +33,8 @@ struct dl_module
     size_t relro_bytes;
     dl_phdr *segments;
     size_t segment_count;
+    const dl_phdr *program_headers;
+    size_t program_header_count;
     dl_dyn *dynamic;
     size_t dynamic_count;
     dl_sym *symbols;
@@ -68,6 +72,8 @@ static dl_module dl_main, *dl_modules;
 static uint64_t dl_next_id = 2, dl_sequence;
 static bool dl_collecting, dl_exit_registered;
 static bool dl_startup_done;
+
+_Static_assert(sizeof(dl_phdr) == sizeof(Elf64_Phdr), "native ELF program header ABI");
 extern char __alix_user_pointer_base[], __alix_user_text_end[], __alix_user_data_start[],
     __alix_user_image_loaded_end[];
 extern dl_dyn __alix_dynamic_start[], __alix_dynamic_end[];
@@ -550,15 +556,17 @@ static bool dl_main_initialize(void)
     dl_main.high = (uintptr_t)__alix_user_image_loaded_end;
     dl_main.span = dl_main.high - dl_main.low;
     dl_main.tls_memsz = (uintptr_t)__alix_static_tls_bytes;
-    dl_main.segments = calloc(2, sizeof(dl_phdr));
+    const syscall_elf_info_t *image = __alix_main_image();
+    if (!image) return dl_fail("cannot obtain running ELF program headers");
+    dl_main.program_headers = (const dl_phdr *)(image + 1);
+    dl_main.program_header_count = image->phnum;
+    dl_main.segments = calloc(image->phnum, sizeof(dl_phdr));
     if (!dl_main.segments)
         return dl_fail("out of memory initializing loader");
-    dl_main.segment_count = 2;
-    dl_main.segments[0] = (dl_phdr){
-        .vaddr = dl_main.low, .memsz = (uintptr_t)__alix_user_text_end - dl_main.low, .flags = DL_R | DL_X};
-    dl_main.segments[1] = (dl_phdr){.vaddr = (uintptr_t)__alix_user_data_start,
-                                    .memsz = dl_main.high - (uintptr_t)__alix_user_data_start,
-                                    .flags = DL_R | DL_W};
+    dl_main.segment_count = 0;
+    for (size_t i = 0; i < dl_main.program_header_count; ++i)
+        if (dl_main.program_headers[i].type == DL_LOAD && dl_main.program_headers[i].memsz)
+            dl_main.segments[dl_main.segment_count++] = dl_main.program_headers[i];
     char *path = malloc(4096);
     if (!path)
     {
@@ -1343,7 +1351,8 @@ static bool dl_map_file(dl_module *m)
         m->relro_address = m->bias + relro->vaddr;
         m->relro_bytes = relro->memsz;
     }
-    free(headers);
+    m->program_headers = headers;
+    m->program_header_count = header.phnum;
     close(fd);
     return dl_meta(m);
 failed:
@@ -1653,6 +1662,7 @@ static void dl_collect(void)
         }
         *cursor = m->next;
         free(m->segments);
+        free((void *)m->program_headers);
         free(m->dependencies);
         free(m->bindings);
         free(m->versions);
@@ -1889,4 +1899,39 @@ int dladdr(const void *address, Dl_info *information)
     }
     dl_unlock();
     return 1;
+}
+
+int dl_iterate_phdr(int (*callback)(struct dl_phdr_info *, size_t, void *), void *context)
+{
+    if (!callback) { errno = EINVAL; return -1; }
+    typedef struct { dl_module *module; struct dl_phdr_info info; } snapshot_t;
+    dl_lock();
+    if (!dl_main_initialize()) { dl_unlock(); errno = ENOMEM; return -1; }
+    size_t count = 0;
+    for (dl_module *m = dl_modules; m; m = m->next)
+        if (!m->retiring && m->relocated && m->program_header_count) ++count;
+    snapshot_t *snapshots = calloc(count ? count : 1, sizeof(*snapshots));
+    if (!snapshots) { dl_unlock(); errno = ENOMEM; return -1; }
+    size_t index = 0;
+    for (dl_module *m = dl_modules; m; m = m->next)
+    {
+        if (m->retiring || !m->relocated || !m->program_header_count) continue;
+        ++m->busy;
+        snapshots[index++] = (snapshot_t){.module = m, .info = {
+            .dlpi_addr = m->bias, .dlpi_name = m->main ? "" : m->path,
+            .dlpi_phdr = (const Elf64_Phdr *)m->program_headers,
+            .dlpi_phnum = (Elf64_Half)m->program_header_count}};
+    }
+    dl_unlock();
+    /* User callbacks can open/close libraries or join a different loader user.
+     * Each image and its immutable metadata remain pinned across callbacks. */
+    int result = 0;
+    for (index = 0; index < count && !result; ++index)
+        result = callback(&snapshots[index].info, sizeof(snapshots[index].info), context);
+    dl_lock();
+    for (index = 0; index < count; ++index) --snapshots[index].module->busy;
+    free(snapshots);
+    dl_collect();
+    dl_unlock();
+    return result;
 }

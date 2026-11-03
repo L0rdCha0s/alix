@@ -1,4 +1,19 @@
 #include "process_internal.h"
+
+bool process_set_elf_metadata(process_t *process, const void *headers, size_t count, uintptr_t entry)
+{
+    if (!process || !headers || !count || count > UINT16_MAX || process->user_elf_metadata) return false;
+    size_t size = sizeof(syscall_elf_info_t) + count * SYSCALL_ELF_PHENT;
+    syscall_elf_info_t *info = calloc(1, size);
+    if (!info) return false;
+    info->version = SYSCALL_ELF_INFO_VERSION; info->size = (uint32_t)size;
+    info->phent = SYSCALL_ELF_PHENT; info->phnum = (uint32_t)count; info->entry = entry;
+    info->uid = process->uid; info->gid = process->gid;
+    memcpy(info + 1, headers, count * SYSCALL_ELF_PHENT);
+    process->user_elf_metadata = info;
+    process->user_elf_metadata_size = size;
+    return true;
+}
 #include "physmem.h"
 
 /*
@@ -326,6 +341,9 @@ void process_free_user_regions(process_t *process)
         return;
     }
     process_vm_destroy(process);
+    free(process->user_elf_metadata);
+    process->user_elf_metadata = NULL;
+    process->user_elf_metadata_size = 0;
 
     if (process->user_stack_pages && process->user_stack_page_count > 0 &&
         process->user_stack_top != 0 && process->user_stack_size != 0)

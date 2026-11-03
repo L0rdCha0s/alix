@@ -21,7 +21,8 @@ typedef enum
     VFS_NODE_DIR = 0,
     VFS_NODE_FILE = 1,
     VFS_NODE_BLOCK = 2,
-    VFS_NODE_SYMLINK = 3
+    VFS_NODE_SYMLINK = 3,
+    VFS_NODE_FIFO = 6
 } vfs_node_type_t;
 
 typedef struct
@@ -95,6 +96,15 @@ int vfs_open_data_access_owned(vfs_node_t *cwd, const char *path, bool create, b
 int vfs_open_data_mode_owned(vfs_node_t *cwd, const char *path, bool create, bool truncate,
                              bool exclusive, uint32_t uid, uint32_t gid, uint32_t access,
                              uint32_t mode, vfs_node_t **out);
+int vfs_open_data_nofollow_owned(vfs_node_t *cwd, const char *path, bool create, bool truncate,
+                                 bool exclusive, uint32_t uid, uint32_t gid, uint32_t access,
+                                 uint32_t mode, bool nofollow, vfs_node_t **out);
+int vfs_symlink_create(vfs_node_t *cwd, const char *target, const char *path, uint32_t uid, uint32_t gid);
+int vfs_mkfifo_exclusive(vfs_node_t *cwd, const char *path, uint32_t uid, uint32_t gid, uint32_t mode);
+struct io_pipe;
+/* Caller owns the FIFO node; its lifetime protects the returned stream. */
+struct io_pipe *vfs_fifo_state(vfs_node_t *node);
+int vfs_access_path(vfs_node_t *cwd, const char *path, bool follow, uint32_t mode, uint32_t uid, uint32_t gid);
 /* Volatile named memory objects. The namespace and open handles own separate
  * references; no filesystem path exposes or persists these nodes. */
 int vfs_shm_open_owned(const char *name, bool create, bool truncate, bool exclusive,

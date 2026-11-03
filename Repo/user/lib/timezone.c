@@ -4,6 +4,7 @@
 #include "stdint.h"
 #include "stdlib.h"
 #include "string.h"
+#include "strings.h"
 #include "stdio.h"
 #include "timezone_platform.h"
 
@@ -607,6 +608,47 @@ static int zone_convert(const zone_state_t *state, time_t value, struct tm *resu
     result->tm_gmtoff = type->offset;
     result->tm_zone = (char *)type->name;
     return 1;
+}
+
+/* Parse against an owned immutable state, rather than racing independent
+ * timezone/tzname globals or inventing an offset from an abbreviation. */
+size_t __alix_timezone_parse_name(const char *input, struct tm *date)
+{
+    static const char *const universal[] = {"UTC", "GMT"};
+    for (unsigned i = 0; i < 2; ++i)
+    {
+        if (!strncasecmp(input, universal[i], 3))
+        {
+            date->tm_gmtoff = 0; date->tm_isdst = 0; date->tm_zone = (char *)universal[i];
+            return 3;
+        }
+    }
+    zone_state_t *state = zone_acquire(0);
+    if (!state) return 0;
+    const zone_type_t *best = NULL;
+    size_t length = 0;
+    for (size_t i = 0; i < state->type_count + 2; ++i)
+    {
+        const zone_type_t *type = i < state->type_count ? &state->types[i] :
+            i == state->type_count ? &state->posix.standard : &state->posix.summer;
+        if (!type->name || !*type->name) continue;
+        size_t size = strlen(type->name);
+        if (size > length && !strncasecmp(input, type->name, size)) { best = type; length = size; }
+    }
+    if (best && date->tm_year >= -1900 && date->tm_year <= 8099 &&
+        date->tm_mon >= 0 && date->tm_mon < 12 && date->tm_mday > 0 && date->tm_mday <= 31)
+    {
+        struct tm civil = {.tm_year = date->tm_year, .tm_mon = date->tm_mon,
+                           .tm_mday = date->tm_mday, .tm_hour = 12};
+        const zone_type_t *active = zone_type_at(state, timegm(&civil));
+        if (active && strlen(active->name) == length && !strncasecmp(input, active->name, length)) best = active;
+    }
+    if (best)
+    {
+        date->tm_gmtoff = best->offset; date->tm_isdst = best->is_dst; date->tm_zone = (char *)best->name;
+    }
+    zone_release(state);
+    return length;
 }
 
 struct tm *localtime_r(const time_t *value, struct tm *result)

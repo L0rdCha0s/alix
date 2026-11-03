@@ -42,3 +42,6 @@ or complete Zen startup. The acceptance consumer uses the rasterizer without
 Gecko telemetry. The target also runs `ports/zen/rust/check_glyph_gecko.py`,
 which compiles its `gecko` and `capture` features with the real Glean crates.
 A complete Gecko Rust root remains a separate gate.
+
+The Thebes platform, native font discovery and bundled-font integration have
+separate C++ component verification. See [Gecko graphics](gecko_graphics.md).

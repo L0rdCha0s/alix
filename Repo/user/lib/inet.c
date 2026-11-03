@@ -11,6 +11,30 @@ uint16_t ntohs(uint16_t value) { return be16toh(value); }
 uint32_t htonl(uint32_t value) { return htobe32(value); }
 uint32_t ntohl(uint32_t value) { return be32toh(value); }
 
+int __inet_aton(const char *text, struct in_addr *address);
+int inet_aton(const char *text, struct in_addr *address)
+{
+    if (!text || !address) { errno = EFAULT; return 0; }
+    int saved = errno;
+    struct in_addr parsed;
+    int valid = __inet_aton(text, &parsed);
+    if (valid) *address = parsed;
+    errno = saved;
+    return valid;
+}
+
+in_addr_t inet_addr(const char *text)
+{
+    struct in_addr address;
+    return inet_aton(text, &address) ? address.s_addr : INADDR_NONE;
+}
+
+char *inet_ntoa(struct in_addr address)
+{
+    static _Thread_local char text[INET_ADDRSTRLEN];
+    return (char *)inet_ntop(AF_INET, &address, text, sizeof(text));
+}
+
 int inet_pton(int family, const char *text, void *address)
 {
     if (family != AF_INET) { errno = EAFNOSUPPORT; return -1; }

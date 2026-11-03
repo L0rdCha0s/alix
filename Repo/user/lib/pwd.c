@@ -6,6 +6,7 @@
 #include "string.h"
 #include "sys/stat.h"
 #include "unistd.h"
+#include "pthread.h"
 
 _Static_assert(sizeof(struct passwd) == 48, "native passwd ABI size");
 _Static_assert(offsetof(struct passwd, pw_dir) == 32, "native passwd ABI directory");
@@ -144,4 +145,68 @@ int getpwnam_r(const char *name, struct passwd *entry, char *buffer, size_t capa
     int saved = errno;
     int error = pwd_lookup(name, 0, entry, buffer, capacity, result);
     errno = saved; return error;
+}
+
+typedef struct
+{
+    struct passwd entry;
+    char *buffer;
+    size_t capacity;
+} pwd_cached_t;
+static pthread_once_t pwd_key_once = PTHREAD_ONCE_INIT;
+static pthread_key_t pwd_key;
+static int pwd_key_error;
+
+static void pwd_cached_destroy(void *context)
+{
+    pwd_cached_t *state = context;
+    if (state) { free(state->buffer); free(state); }
+}
+
+static void pwd_cached_initialize(void)
+{
+    pwd_key_error = pthread_key_create(&pwd_key, pwd_cached_destroy);
+}
+
+static struct passwd *pwd_cached_lookup(const char *name, uid_t uid)
+{
+    int saved = errno;
+    int error = pthread_once(&pwd_key_once, pwd_cached_initialize);
+    if (!error) error = pwd_key_error;
+    if (error) { errno = error; return NULL; }
+    pwd_cached_t *state = pthread_getspecific(pwd_key);
+    if (!state)
+    {
+        state = calloc(1, sizeof(*state));
+        if (!state) { errno = ENOMEM; return NULL; }
+        state->capacity = 256;
+        state->buffer = malloc(state->capacity);
+        if (!state->buffer) { free(state); errno = ENOMEM; return NULL; }
+        error = pthread_setspecific(pwd_key, state);
+        if (error) { pwd_cached_destroy(state); errno = error; return NULL; }
+    }
+    char *owned_name = name ? strdup(name) : NULL;
+    if (name && !owned_name) { errno = ENOMEM; return NULL; }
+    struct passwd *result = NULL;
+    for (;;)
+    {
+        error = name ? getpwnam_r(owned_name, &state->entry, state->buffer, state->capacity, &result) :
+                       getpwuid_r(uid, &state->entry, state->buffer, state->capacity, &result);
+        if (error != ERANGE || state->capacity == PWD_DATABASE_LIMIT + 32u) break;
+        size_t capacity = state->capacity * 2;
+        if (capacity > PWD_DATABASE_LIMIT + 32u) capacity = PWD_DATABASE_LIMIT + 32u;
+        char *buffer = realloc(state->buffer, capacity);
+        if (!buffer) { error = ENOMEM; break; }
+        state->buffer = buffer; state->capacity = capacity;
+    }
+    free(owned_name);
+    errno = error ? error : saved;
+    return error ? NULL : result;
+}
+
+struct passwd *getpwuid(uid_t uid) { return pwd_cached_lookup(NULL, uid); }
+struct passwd *getpwnam(const char *name)
+{
+    if (!name || !*name) { errno = EINVAL; return NULL; }
+    return pwd_cached_lookup(name, 0);
 }

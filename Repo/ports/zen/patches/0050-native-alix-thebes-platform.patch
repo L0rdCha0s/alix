@@ -184,12 +184,12 @@
 +++ b/gfx/thebes/gfxPlatform.cpp
 @@ -3,6 +3,9 @@
   * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
- 
+
  #include "gfxPlatform.h"
 +#ifdef MOZ_WIDGET_ALIX
 +#  include "gfxAlixPlatform.h"
 +#endif
- 
+
  #include "GfxDriverInfo.h"
  #include "VRProcessManager.h"
 @@ -782,6 +785,8 @@
@@ -215,13 +215,13 @@
 @@ -2,10 +2,16 @@
   * License, v. 2.0. If a copy of the MPL was not distributed with this
   * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
- 
+
 -#include <android/log.h>
 +#ifdef MOZ_WIDGET_ANDROID
 +#  include <android/log.h>
 +#endif
  #include <dirent.h>
- 
+
 -#include "gfxAndroidPlatform.h"
 +#ifdef MOZ_WIDGET_ANDROID
 +#  include "gfxAndroidPlatform.h"
@@ -239,7 +239,7 @@
 +#ifdef MOZ_WIDGET_ANDROID
 +#  define ALOG(args...) __android_log_print(ANDROID_LOG_INFO, "Gecko", ##args)
 +#endif
- 
+
  #include "ft2build.h"
  #include FT_FREETYPE_H
 @@ -30,7 +38,11 @@
@@ -255,7 +255,24 @@
  #undef StandardFonts
  #include <fcntl.h>
  #include <sys/mman.h>
-@@ -1258,6 +1270,10 @@
+@@ -957,12 +969,16 @@
+ }
+
+ gfxFT2FontList::gfxFT2FontList() : mJarModifiedTime(0) {
++#ifdef MOZ_WIDGET_ALIX
++  CheckFamilyList(kBaseFonts_Alix);
++#else
+   CheckFamilyList(kBaseFonts_Android);
+   CheckFamilyList(kBaseFonts_Android5_8);
+   CheckFamilyList(kBaseFonts_Android9_Higher);
+   CheckFamilyList(kBaseFonts_Android9_11);
+   CheckFamilyList(kBaseFonts_Android12_Higher);
+   CheckFamilyList(kLangPack_MFR_Android12_Higher);
++#endif
+
+   nsCOMPtr<nsIObserverService> obs = services::GetObserverService();
+   if (obs) {
+@@ -1258,6 +1274,10 @@
  using Device = nsIGfxInfo::FontVisibilityDeviceDetermination;
  FontVisibility gfxFT2FontList::GetVisibilityForFamily(
      const nsACString& aName) const {
@@ -266,13 +283,13 @@
    static Device fontVisibilityDevice = Device::Unassigned;
    if (fontVisibilityDevice == Device::Unassigned) {
      nsCOMPtr<nsIGfxInfo> gfxInfo = components::GfxInfo::Service();
-@@ -1311,10 +1327,16 @@
+@@ -1311,10 +1331,16 @@
    }
- 
+
    return FontVisibility::User;
 +#endif
  }
- 
+
  nsTArray<std::pair<const char**, uint32_t>>
  gfxFT2FontList::GetFilteredPlatformFontLists() {
 +#ifdef MOZ_WIDGET_ALIX
@@ -283,35 +300,35 @@
    static Device fontVisibilityDevice = Device::Unassigned;
    if (fontVisibilityDevice == Device::Unassigned) {
      nsCOMPtr<nsIGfxInfo> gfxInfo = components::GfxInfo::Service();
-@@ -1362,6 +1384,7 @@
+@@ -1362,6 +1388,7 @@
    }
- 
+
    return fontLists;
 +#endif
  }
- 
+
  static void GetName(hb_face_t* aFace, hb_ot_name_id_t aNameID,
-@@ -1541,6 +1564,10 @@
+@@ -1541,6 +1568,10 @@
    }
    mFontNameCache->Init();
- 
+
 +#if defined(MOZ_WIDGET_ALIX)
 +  FindFontsInDir("/usr/share/fonts"_ns, mFontNameCache.get());
 +  FindFontsInDir("/usr/local/share/fonts"_ns, mFontNameCache.get());
 +#else
  #if defined(MOZ_WIDGET_ANDROID)
    // Android API 29+ provides system font and font matcher API for native code.
- 
-@@ -1584,6 +1611,7 @@
+
+@@ -1584,6 +1615,7 @@
    {
      FindFontsInDir(androidFontsRoot, mFontNameCache.get());
    }
 +#endif
- 
+
    // Look for fonts stored in omnijar, unless we're on a low-memory
    // device where we don't want to spend the RAM to decompress them.
-@@ -1653,6 +1681,19 @@
- 
+@@ -1653,6 +1685,19 @@
+
  void gfxFT2FontList::FindFontsInDir(const nsCString& aDir,
                                      FontNameCache* aFNC) {
 +#ifdef MOZ_WIDGET_ALIX
@@ -330,15 +347,15 @@
    static const char* sStandardFonts[] = {"DroidSans.ttf",
                                           "DroidSans-Bold.ttf",
                                           "DroidSerif-Regular.ttf",
-@@ -1704,6 +1745,7 @@
+@@ -1704,6 +1749,7 @@
    }
- 
+
    closedir(d);
 +#endif
  }
- 
+
  void gfxFT2FontList::AppendFaceFromFontListEntry(const FontListEntry& aFLE,
-@@ -1906,7 +1948,11 @@
+@@ -1906,7 +1952,11 @@
      FontVisibilityProvider* aFontVisibilityProvider, const gfxFontStyle* aStyle,
      nsAtom* aLanguage) {
    FontFamily ff;
@@ -381,7 +398,7 @@
 @@ -147,6 +147,31 @@
              "XlibDisplay.cpp",
          ]
- 
+
 +elif CONFIG["MOZ_WIDGET_TOOLKIT"] == "alix":
 +    EXPORTS += ["gfxAlixPlatform.h", "gfxFT2FontBase.h", "gfxFT2Fonts.h"]
 +    SOURCES += [
@@ -413,15 +430,15 @@
 @@ -256,10 +281,10 @@
      "/widget/gtk",
  ]
- 
+
 -if CONFIG["MOZ_WIDGET_TOOLKIT"] in ("android", "gtk"):
 +if CONFIG["MOZ_WIDGET_TOOLKIT"] in ("android", "gtk", "alix"):
      DEFINES["MOZ_ENABLE_FREETYPE"] = True
- 
+
 -if CONFIG["MOZ_WIDGET_TOOLKIT"] in ("android"):
 +if CONFIG["MOZ_WIDGET_TOOLKIT"] in ("android", "alix"):
      CXXFLAGS += CONFIG["CAIRO_FT_CFLAGS"]
- 
+
  if CONFIG["MOZ_WIDGET_TOOLKIT"] == "gtk":
 --- a/browser/installer/package-manifest.in
 +++ b/browser/installer/package-manifest.in

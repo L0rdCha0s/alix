@@ -1252,6 +1252,28 @@ uintptr_t paging_kernel_cr3(void)
  * `virtual_addr` and `physical_addr` are page-aligned internally. Pages are
  * mapped as user-accessible and can be marked writable/executable.
  */
+static void paging_account_user_leaf(paging_space_t *space, uint64_t before, uint64_t after)
+{
+    const uint64_t mask = PAGE_PRESENT | PAGE_USER;
+    bool was = (before & mask) == mask, now = (after & mask) == mask;
+    if (now && !was)
+    {
+        ++space->resident_user_pages;
+        if (space->resident_user_pages > space->peak_resident_user_pages)
+            space->peak_resident_user_pages = space->resident_user_pages;
+    }
+    else if (was && !now && space->resident_user_pages) --space->resident_user_pages;
+}
+
+void paging_user_residency(paging_space_t *space, uint64_t *current, uint64_t *peak)
+{
+    bool used_global = false;
+    uint64_t flags = paging_space_lock(space, &used_global);
+    *current = space->resident_user_pages;
+    *peak = space->peak_resident_user_pages;
+    paging_space_unlock(space, used_global, flags);
+}
+
 bool paging_map_user_page(paging_space_t *space,
                           uintptr_t virtual_addr,
                           uintptr_t physical_addr,
@@ -1290,7 +1312,9 @@ static bool paging_map_user_page_internal(paging_space_t *space,
     }
 
     size_t pt_idx = index_pt(virtual_addr);
+    uint64_t before = pt[pt_idx];
     apply_small_mapping(&pt[pt_idx], physical_addr, writable, executable, true);
+    paging_account_user_leaf(space, before, pt[pt_idx]);
     if (space->cr3 == read_cr3())
     {
         invalidate_page(virtual_addr);
@@ -1432,6 +1456,7 @@ bool paging_write_prepared_user_page(paging_space_t *space, uintptr_t address,
     }
     if (okay)
     {
+        uint64_t before = table[index_pt(address)];
         if (present)
         {
             apply_small_mapping(&table[index_pt(address)], physical, writable, executable, true);
@@ -1440,6 +1465,7 @@ bool paging_write_prepared_user_page(paging_space_t *space, uintptr_t address,
         {
             table[index_pt(address)] = 0;
         }
+        paging_account_user_leaf(space, before, table[index_pt(address)]);
         if (space->cr3 == read_cr3())
         {
             invalidate_page(address);
@@ -1485,6 +1511,7 @@ static bool paging_unmap_user_page_internal(paging_space_t *space,
     {
         return false;
     }
+    paging_account_user_leaf(space, pt[pt_idx], 0);
     pt[pt_idx] = 0;
     __asm__ volatile ("invlpg (%0)" :: "r"(virtual_addr) : "memory");
     paging_flush_space_tlb(space);

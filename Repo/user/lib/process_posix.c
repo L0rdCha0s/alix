@@ -54,13 +54,37 @@ int getrusage(int who, struct rusage *usage)
 {
     if (!usage) { errno = EFAULT; return -1; }
     if (who != RUSAGE_SELF) { errno = EINVAL; return -1; }
+    syscall_resource_usage_v2_t extended = {0};
+    syscall_resource_usage_t *snapshot = &extended.usage;
+    int result = sys_resource_usage(RUSAGE_SELF, snapshot, sizeof(extended));
+    if (result < 0) { errno = -result; return -1; }
+    if (snapshot->version != SYSCALL_USAGE_VERSION_2 || snapshot->size != sizeof(extended) ||
+        !snapshot->tick_frequency || snapshot->reserved || extended.peak_resident_pages < extended.resident_pages)
+    { errno = EIO; return -1; }
+    struct rusage value = {0};
+    resource_ticks_to_timeval(snapshot->user_ticks, snapshot->tick_frequency, &value.ru_utime);
+    resource_ticks_to_timeval(snapshot->system_ticks, snapshot->tick_frequency, &value.ru_stime);
+    value.ru_minflt = snapshot->minor_faults > LONG_MAX ? LONG_MAX : (long)snapshot->minor_faults;
+    value.ru_majflt = snapshot->major_faults > LONG_MAX ? LONG_MAX : (long)snapshot->major_faults;
+    value.ru_maxrss = extended.peak_resident_pages > LONG_MAX / 4u ? LONG_MAX : (long)(extended.peak_resident_pages * 4u);
+    *usage = value;
+    return 0;
+}
+
+/* Installed programs retain their original 48-byte output ABI. */
+typedef struct { struct timeval user, system; long minor, major; } resource_usage_legacy_t;
+int resource_getrusage_legacy(int, resource_usage_legacy_t *) __asm__("getrusage");
+int resource_getrusage_legacy(int who, resource_usage_legacy_t *usage)
+{
+    if (!usage) { errno = EFAULT; return -1; }
+    if (who != RUSAGE_SELF) { errno = EINVAL; return -1; }
     syscall_resource_usage_t snapshot = {0};
     if (resource_snapshot(&snapshot)) return -1;
-    struct rusage value = {0};
-    resource_ticks_to_timeval(snapshot.user_ticks, snapshot.tick_frequency, &value.ru_utime);
-    resource_ticks_to_timeval(snapshot.system_ticks, snapshot.tick_frequency, &value.ru_stime);
-    value.ru_minflt = snapshot.minor_faults > LONG_MAX ? LONG_MAX : (long)snapshot.minor_faults;
-    value.ru_majflt = snapshot.major_faults > LONG_MAX ? LONG_MAX : (long)snapshot.major_faults;
+    resource_usage_legacy_t value = {0};
+    resource_ticks_to_timeval(snapshot.user_ticks, snapshot.tick_frequency, &value.user);
+    resource_ticks_to_timeval(snapshot.system_ticks, snapshot.tick_frequency, &value.system);
+    value.minor = snapshot.minor_faults > LONG_MAX ? LONG_MAX : (long)snapshot.minor_faults;
+    value.major = snapshot.major_faults > LONG_MAX ? LONG_MAX : (long)snapshot.major_faults;
     *usage = value;
     return 0;
 }

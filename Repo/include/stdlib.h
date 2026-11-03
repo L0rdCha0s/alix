@@ -31,6 +31,7 @@ size_t mbstowcs(wchar_t *output, const char *text, size_t capacity);
 size_t wcstombs(char *output, const wchar_t *text, size_t capacity);
 void *aligned_alloc(size_t alignment, size_t size);
 int posix_memalign(void **result, size_t alignment, size_t size);
+void *memalign(size_t alignment, size_t size);
 int abs(int value);
 long labs(long value);
 long long llabs(long long value);

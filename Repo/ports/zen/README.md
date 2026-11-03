@@ -447,6 +447,15 @@ The complete Alix widget directory and the common theme unit now compile.
 Thebes platform/font integration and the remaining libc/platform diagnostics
 still precede the next full-browser link and launch attempt.
 
+Patches `0050` through `0052` add `gfxAlixPlatform`, reuse the upstream FreeType
+font-list/face implementations, connect Moz2D font resources and stage nine
+pinned font faces with their notices. The complete Thebes and Moz2D modules
+compile. The production font scanner, actual configured FreeType/HarfBuzz and
+Mozilla allocator pass an eight-CPU native fixture, including ligature shaping,
+stable glyph pixels, nested directories and native byte paths. Reproduce with
+`make zen-alix-font-files-qemu-test`; see
+[Gecko graphics](../../docs/kernel/gecko_graphics.md) for the verification scope.
+
 `make zen-udp-core-qemu-test` verifies the native kernel UDP transport with eight
 pinned services and 256 real host exchanges, independently checked packet
 metadata/checksums and DNS/NTP port ownership. The transport lives in the shared

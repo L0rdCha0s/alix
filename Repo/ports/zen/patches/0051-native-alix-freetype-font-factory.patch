@@ -1,0 +1,58 @@
+--- a/gfx/2d/2D.h
++++ b/gfx/2d/2D.h
+@@ -35,7 +35,7 @@
+ #include "mozilla/gfx/FontData.h"
+ #include "nsRegionFwd.h"
+
+-#if defined(MOZ_WIDGET_ANDROID) || defined(MOZ_WIDGET_GTK)
++#if defined(MOZ_WIDGET_ANDROID) || defined(MOZ_WIDGET_GTK) || defined(MOZ_WIDGET_ALIX)
+ #  ifndef MOZ_ENABLE_FREETYPE
+ #    define MOZ_ENABLE_FREETYPE
+ #  endif
+@@ -2256,7 +2256,7 @@
+       RefPtr<SharedFTFace> aFace, FcPattern* aPattern);
+ #endif
+
+-#ifdef MOZ_WIDGET_ANDROID
++#if defined(MOZ_WIDGET_ANDROID) || defined(MOZ_WIDGET_ALIX)
+   static already_AddRefed<ScaledFont> CreateScaledFontForFreeTypeFont(
+       const RefPtr<UnscaledFont>& aUnscaledFont, Float aSize,
+       RefPtr<SharedFTFace> aFace, bool aApplySyntheticBold = false);
+--- a/gfx/2d/Factory.cpp
++++ b/gfx/2d/Factory.cpp
+@@ -29,7 +29,7 @@
+ #  include "UnscaledFontFreeType.h"
+ #endif
+
+-#ifdef MOZ_WIDGET_ANDROID
++#if defined(MOZ_WIDGET_ANDROID) || defined(MOZ_WIDGET_ALIX)
+ #  include "NativeFontResourceFreeType.h"
+ #  include "ScaledFontFreeType.h"
+ #  include "UnscaledFontFreeType.h"
+@@ -395,7 +395,7 @@
+ #elif defined(MOZ_WIDGET_GTK)
+     case FontType::FONTCONFIG:
+       return NativeFontResourceFontconfig::Create(aData, aSize);
+-#elif defined(MOZ_WIDGET_ANDROID)
++#elif defined(MOZ_WIDGET_ANDROID) || defined(MOZ_WIDGET_ALIX)
+     case FontType::FREETYPE:
+       return NativeFontResourceFreeType::Create(aData, aSize);
+ #endif
+@@ -422,7 +422,7 @@
+     case FontType::FONTCONFIG:
+       return UnscaledFontFontconfig::CreateFromFontDescriptor(
+           aData, aDataLength, aIndex);
+-#elif defined(MOZ_WIDGET_ANDROID)
++#elif defined(MOZ_WIDGET_ANDROID) || defined(MOZ_WIDGET_ALIX)
+     case FontType::FREETYPE:
+       return UnscaledFontFreeType::CreateFromFontDescriptor(aData, aDataLength,
+                                                             aIndex);
+@@ -452,7 +452,7 @@
+ }
+ #endif
+
+-#ifdef MOZ_WIDGET_ANDROID
++#if defined(MOZ_WIDGET_ANDROID) || defined(MOZ_WIDGET_ALIX)
+ already_AddRefed<ScaledFont> Factory::CreateScaledFontForFreeTypeFont(
+     const RefPtr<UnscaledFont>& aUnscaledFont, Float aSize,
+     RefPtr<SharedFTFace> aFace, bool aApplySyntheticBold) {

@@ -97,6 +97,16 @@ static bool split_parent_and_name(vfs_node_t *cwd,const char *path,vfs_node_t **
     CHECK(tree_owned); if(!strcmp(path,"missing-parent")) return false;
     *parent=cwd; *name=malloc(strlen(path)+1); CHECK(*name); strcpy(*name,path); return true;
 }
+static bool split_parent_and_name_checked(vfs_node_t *cwd,const char *path,vfs_node_t **parent,char **name,int *error) {
+    bool okay=split_parent_and_name(cwd,path,parent,name); if(error) *error=okay?0:-ENOENT; return okay;
+}
+/* This model isolates regular-file ownership. Traversal has a production
+ * walker contract and a separate native symlink/no-follow guest fixture. */
+#define VFS_MAX_SYMLINK_DEPTH 8
+#define VFS_NODE_FIFO 6
+static vfs_node_t *vfs_readlink_resolve_locked(vfs_node_t *cwd,const char *path,bool follow,int *error) {
+    (void)cwd;(void)path;(void)follow;(void)error; CHECK(false); return NULL;
+}
 static vfs_node_t *vfs_find_child(vfs_node_t *parent,const char *name) { (void)parent; CHECK(tree_owned); return existing && !strcmp(existing->name,name)?existing:NULL; }
 static vfs_node_t *vfs_alloc_node(vfs_node_type_t type) {
     if(fail_node) return NULL; vfs_node_t *n=calloc(1,sizeof(*n)); CHECK(n); n->type=type; n->refcount=1; n->mutable=true; n->permissions=type==VFS_NODE_DIR?0777:0666; return n;
@@ -134,7 +144,7 @@ ssize_t vfs_readlink_snapshot(vfs_node_t *cwd,const char *path,void *buffer,size
     # adapter below remains a historical lifetime fixture, not current service
     # coverage; current service behavior is verified by native guest tests.
     vfs = (ROOT / "src/kernel/vfs.c").read_text()
-    for signature in ("static int vfs_node_access_locked(", "static vfs_node_t *vfs_open_file_internal(", "vfs_node_t *vfs_open_file(",
+    for signature in ("static int vfs_node_access_locked(", "static const char *vfs_node_symlink_target(", "static vfs_node_t *vfs_open_file_internal(", "vfs_node_t *vfs_open_file(",
                       "int vfs_open_data_owned(", "int vfs_open_data_access_owned(", "static ssize_t vfs_read_at_internal(", "ssize_t vfs_read_data_at(",
                       "ssize_t vfs_read_at(", "static ssize_t vfs_write_at_internal(", "ssize_t vfs_write_data_at(",
                       "ssize_t vfs_write_at(", "bool vfs_set_file_callbacks("):

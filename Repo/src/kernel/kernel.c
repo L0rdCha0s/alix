@@ -329,6 +329,7 @@ static void lock_slash_root_once(void)
     {
         vfs_set_subtree_mutable(tmp, true);
     }
+    logger_enable_writes();
     g_slash_locked = true;
 }
 

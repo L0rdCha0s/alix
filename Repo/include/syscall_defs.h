@@ -101,6 +101,18 @@ typedef enum
 #define SYSCALL_PROCESS_GETGID 4u
 #define SYSCALL_PROCESS_WAIT_INFO 5u
 #define SYSCALL_PROCESS_UMASK 6u
+#define SYSCALL_PROCESS_ALARM 7u
+#define SYSCALL_PROCESS_ELF_INFO 8u
+#define SYSCALL_ELF_INFO_VERSION 1u
+#define SYSCALL_ELF_PHENT 56u
+typedef struct
+{
+    uint32_t version, size, phent, phnum;
+    uint64_t entry;
+    uint32_t uid, gid;
+    uint64_t reserved;
+    /* phnum native ELF64 program headers follow this fixed prefix. */
+} syscall_elf_info_t;
 #define SYSCALL_PROCESS_WAIT_ALL 0u
 #define SYSCALL_PROCESS_WAIT_PID 1u
 #define SYSCALL_PROCESS_WAIT_PGID 2u
@@ -158,8 +170,11 @@ typedef enum
     SYSCALL_FILE_STAT_INFO, SYSCALL_FILE_PATH_INFO, SYSCALL_FILE_CHOWN, SYSCALL_FILE_CHMOD,
     SYSCALL_FILE_RECORD_LOCK, SYSCALL_FILE_SET_TIMES,
     SYSCALL_FILE_SHM_OPEN, SYSCALL_FILE_SHM_UNLINK,
-    SYSCALL_FILE_OPEN_MODE, SYSCALL_FILE_MKDIR_MODE, SYSCALL_FILE_CHMOD_PATH
+    SYSCALL_FILE_OPEN_MODE, SYSCALL_FILE_MKDIR_MODE, SYSCALL_FILE_CHMOD_PATH,
+    SYSCALL_FILE_LOG, SYSCALL_FILE_SYMLINK, SYSCALL_FILE_ACCESS, SYSCALL_FILE_MKFIFO,
+    SYSCALL_FILE_TRUNCATE_PATH, SYSCALL_FILE_STAT_TIMES, SYSCALL_FILE_PATH_TIMES
 } syscall_file_operation_t;
+#define SYSCALL_LOG_MAX_BYTES 4096u
 #define SYSCALL_F_GETLK 5
 #define SYSCALL_F_SETLK 6
 #define SYSCALL_F_SETLKW 7
@@ -301,6 +316,12 @@ typedef struct
     uint32_t tick_frequency, reserved;
     uint64_t user_ticks, system_ticks, minor_faults, major_faults;
 } syscall_resource_usage_t;
+#define SYSCALL_USAGE_VERSION_2 2u
+typedef struct
+{
+    syscall_resource_usage_t usage;
+    uint64_t resident_pages, peak_resident_pages;
+} syscall_resource_usage_v2_t;
 
 #define SYSCALL_DIRENT_VERSION 1u
 #define SYSCALL_DIRENT_NAME_MAX 4095u
@@ -371,6 +392,9 @@ typedef struct syscall_timezone_info
 #define SYSCALL_OPEN_APPEND (1u << 16)
 #define SYSCALL_OPEN_NONBLOCK (1u << 18)
 #define SYSCALL_OPEN_SYNC (1u << 19)
+#define SYSCALL_OPEN_NOFOLLOW (1u << 20)
+#define SYSCALL_ACCESS_NOFOLLOW 0x100u
+#define SYSCALL_ACCESS_EFFECTIVE 0x200u
 
 #define SYSCALL_SEEK_SET 0
 #define SYSCALL_SEEK_CUR 1
@@ -479,6 +503,13 @@ typedef struct
     uint32_t uid, gid;
     int64_t block_size, blocks;
 } syscall_stat_info_t;
+#define SYSCALL_STAT_TIME_FIELDS 2u
+typedef struct { int64_t seconds, nanoseconds; } syscall_file_timestamp_t;
+typedef struct
+{
+    syscall_stat_info_t info;
+    syscall_file_timestamp_t accessed, modified, changed;
+} syscall_stat_times_t;
 
 typedef enum
 {

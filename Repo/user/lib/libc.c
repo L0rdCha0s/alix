@@ -2723,6 +2723,17 @@ int posix_memalign(void **result, size_t alignment, size_t size)
     return 0;
 }
 
+void *memalign(size_t alignment, size_t size)
+{
+    if (!alignment || (alignment & (alignment - 1u))) { errno = EINVAL; return NULL; }
+    if (alignment < sizeof(void *)) alignment = sizeof(void *);
+    int saved = errno;
+    void *allocation = NULL;
+    int error = posix_memalign(&allocation, alignment, size ? size : 1u);
+    errno = error ? error : saved;
+    return error ? NULL : allocation;
+}
+
 void *realloc(void *ptr, size_t size)
 {
     uintptr_t caller = (uintptr_t)__builtin_return_address(0);
@@ -3693,6 +3704,14 @@ int ftruncate(int fd, off_t length)
 #endif
 }
 
+int truncate(const char *path, off_t length)
+{
+    if (length < 0) { errno = EINVAL; return -1; }
+    int64_t result = sys_file_io(SYSCALL_FILE_TRUNCATE_PATH, (uintptr_t)path, (uint64_t)length, 0, 0);
+    if (result < 0) { errno = (int)-result; return -1; }
+    return 0;
+}
+
 int puts(const char *text)
 {
     if (!text)
@@ -3762,6 +3781,9 @@ int __alix_stat_decode(const syscall_stat_t *input, struct stat *st)
     st->st_atime = input->atime;
     st->st_mtime = input->mtime;
     st->st_ctime = input->ctime;
+    st->st_atim.tv_sec = (time_t)input->atime;
+    st->st_mtim.tv_sec = (time_t)input->mtime;
+    st->st_ctim.tv_sec = (time_t)input->ctime;
     return 0;
 }
 
@@ -3769,13 +3791,29 @@ int fstat(int fd, struct stat *st)
 {
     if (!st) { errno = EFAULT; return -1; }
 #ifdef ALIX_OWNED_FDS
-    int64_t result = sys_file_io(SYSCALL_FILE_STAT_INFO, (uint64_t)(int64_t)fd, (uintptr_t)st, 0, 0);
+    int64_t result = sys_file_io(SYSCALL_FILE_STAT_TIMES, (uint64_t)(int64_t)fd, (uintptr_t)st, 0, 0);
     if (result < 0) { errno = (int)-result; return -1; }
     return 0;
 #else
     syscall_stat_t value;
     int result = sys_fstat(fd, &value);
     return result ? result : __alix_stat_decode(&value, st);
+#endif
+}
+
+int __alix_fstat_v2(int fd, void *output) __asm__("alix_fstat_v2");
+int __alix_fstat_v2(int fd, void *output)
+{
+    if (!output) { errno = EFAULT; return -1; }
+#ifdef ALIX_OWNED_FDS
+    int64_t result = sys_file_io(SYSCALL_FILE_STAT_INFO, (uint64_t)(int64_t)fd, (uintptr_t)output, 0, 0);
+    if (result < 0) { errno = (int)-result; return -1; }
+    return 0;
+#else
+    struct stat value;
+    int result = fstat(fd, &value);
+    if (!result) memcpy(output, &value, sizeof(syscall_stat_info_t));
+    return result;
 #endif
 }
 
@@ -3917,21 +3955,30 @@ void *sbrk(int64_t increment)
 
 int access(const char *path, int mode)
 {
-    uint64_t flags = 0;
-    if (mode & W_OK)
-    {
-        flags |= SYSCALL_OPEN_WRITE;
-    }
-    if ((mode & W_OK) == 0 || (mode & R_OK))
-    {
-        flags |= SYSCALL_OPEN_READ;
-    }
-    int fd = open(path, flags);
-    if (fd < 0)
-    {
-        return -1;
-    }
-    close(fd);
+    int64_t result = sys_file_io(SYSCALL_FILE_ACCESS, (uintptr_t)path, (uint64_t)(int64_t)mode, 0, (uint64_t)(int64_t)-100);
+    if (result < 0) { errno = (int)-result; return -1; }
+    return 0;
+}
+
+int faccessat(int directory, const char *path, int mode, int flags)
+{
+    int64_t result = sys_file_io(SYSCALL_FILE_ACCESS, (uintptr_t)path, (uint64_t)(int64_t)mode,
+                                 (uint64_t)(int64_t)flags, (uint64_t)(int64_t)directory);
+    if (result < 0) { errno = (int)-result; return -1; }
+    return 0;
+}
+
+int symlink(const char *target, const char *path)
+{
+    int64_t result = sys_file_io(SYSCALL_FILE_SYMLINK, (uintptr_t)target, (uintptr_t)path, 0, 0);
+    if (result < 0) { errno = (int)-result; return -1; }
+    return 0;
+}
+
+int mkfifo(const char *path, mode_t mode)
+{
+    int64_t result = sys_file_io(SYSCALL_FILE_MKFIFO, (uintptr_t)path, mode, 0, 0);
+    if (result < 0) { errno = (int)-result; return -1; }
     return 0;
 }
 
@@ -4880,6 +4927,15 @@ unsigned int sleep(unsigned int seconds)
     errno = saved_errno;
     return 0;
 }
+
+#ifndef TTF_HOST_BUILD
+int usleep(useconds_t microseconds)
+{
+    struct timespec duration = { (time_t)(microseconds / 1000000u),
+                                (long)(microseconds % 1000000u) * 1000L };
+    return nanosleep(&duration, NULL);
+}
+#endif
 
 time_t time(time_t *result)
 {

@@ -19,6 +19,7 @@ struct rusage
 {
     struct timeval ru_utime, ru_stime;
     long ru_minflt, ru_majflt;
+    long ru_maxrss; /* Peak resident user mappings, in KiB. */
 };
 
 #ifdef __cplusplus
@@ -26,7 +27,7 @@ extern "C" {
 #endif
 int getrlimit(int resource, struct rlimit *limit);
 int setrlimit(int resource, const struct rlimit *limit);
-int getrusage(int who, struct rusage *usage);
+int getrusage(int who, struct rusage *usage) __asm__("alix_getrusage_v2");
 #ifdef __cplusplus
 }
 #endif
