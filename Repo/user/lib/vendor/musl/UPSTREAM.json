@@ -9,7 +9,8 @@
     "src/complex/*.c",
     "src/internal/libm.h",
     "src/internal/complex_impl.h",
-    "include/complex.h"
+    "include/complex.h",
+    "src/prng/random.c"
   ],
   "notes": "Alix ABI, headers, FP environment, allocation and I/O remain native.",
   "adaptations": [
@@ -17,6 +18,11 @@
     "Native errno adapters for sqrtf/scalbnf; signaling-NaN handling in rounding functions",
     "Thread-local gamma sign state",
     "Private byte/wide scanning stream; heap-owned decimal workspace and scanset",
-    "FreeBSD replacements for incomplete extended complex routines"
-  ]
+    "FreeBSD replacements for incomplete extended complex routines",
+    "POSIX random state generator uses the existing native alix_mutex; musl fork lock hook omitted"
+  ],
+  "prng": {
+    "source_sha256": "3a47a757115e2a2ea7b1242a0000100ad802c27c2a398b4d8b8360d768780209",
+    "vendored_sha256": "09dc7fdaa5ac8194981907ecb3cdae76dad08ebb7df2c32609c8101786ea4a3f"
+  }
 }

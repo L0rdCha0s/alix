@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check real Alix SSP code generation, optional linking and preinit ordering."""
+"""Check SSP code generation, shared-runtime exports and preinit ordering."""
 import json
 import os
 from pathlib import Path
@@ -58,15 +58,24 @@ def main():
         if names[name_offset:].split(b"\0", 1)[0] == b".preinit_array":
             offset, size = struct.unpack_from("<QQ", data, header + 24)
             preinit = struct.unpack_from("<" + "Q" * (size // 8), data, offset)
-    if not preinit or preinit[0] != symbols["stack_protector_initialize"] or \
-            preinit[1:] != (symbols["preinitialize"],):
+    # The uninstrumented ELF TLS fixup is loader bootstrap, before the SSP
+    # initializer. Both must precede every ordinary user preinit callback.
+    expected = tuple(symbols[name] for name in
+                     ("dl_main_startup", "stack_protector_initialize", "preinitialize"))
+    if preinit != expected:
         raise RuntimeError("SSP guard initialization does not precede ordinary preinit")
     unprotected = ROOT / "build/user/stack_protector_unprotected_test.elf"
-    source = '#include "serial.h"\nint main(void) { serial_printf("STACK_PROTECTOR_UNPROTECTED: PASS\\n"); return 0; }\n'
-    run([compiler, "-fno-stack-protector", "-x", "c", "-", "-o", unprotected], env=env, input=source)
-    if "__stack_chk_" in run(["x86_64-elf-nm", unprotected]):
-        raise RuntimeError("unprotected executable unexpectedly acquired the SSP entropy requirement")
-    print("Native Alix SSP code generation, optional archive and first-preinit order: PASS")
+    source = '#include "serial.h"\n#include "dlfcn.h"\n#include "stdint.h"\nint main(void) { uintptr_t *guard=dlsym(RTLD_DEFAULT,"__stack_chk_guard"); if(!guard||!*guard)return 1; serial_printf("STACK_PROTECTOR_UNPROTECTED: PASS\\n"); return 0; }\n'
+    plain_object=ROOT/"build/user/tests/stack_protector_unprotected_test.o"
+    run([compiler,"-fno-stack-protector","-x","c","-","-c","-o",plain_object],env=env,input=source)
+    if "__stack_chk_" in run(["x86_64-elf-objdump","-dr",plain_object]):
+        raise RuntimeError("unprotected object acquired compiler canary instrumentation")
+    run([compiler,plain_object,"-o",unprotected],env=env)
+    exported=run(["x86_64-elf-readelf","--dyn-syms","--wide",unprotected])
+    for symbol in ("__stack_chk_guard","__stack_chk_fail"):
+        if not any(symbol in line and "DEFAULT" in line and "UND" not in line for line in exported.splitlines()):
+            raise RuntimeError("upstream executable did not retain shared SSP runtime: "+symbol)
+    print("Native Alix SSP code generation, protected-library exports and runtime-preinit order: PASS")
     print(f"Execution remains to be checked in Alix: {output}")
 
 

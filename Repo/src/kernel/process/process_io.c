@@ -5,6 +5,8 @@
 /* Static zero initialization is the wait_queue initializer. Its lifetime is
  * global: requests never store a pointer to a thread, process or stack queue. */
 static wait_queue_t g_io_completion_queue;
+static wait_queue_t g_io_cleanup_queue;
+void process_io_notify_cleanup(void);
 
 static bool process_io_thread_terminal(const thread_t *thread)
 {
@@ -178,7 +180,18 @@ int process_io_finish_current(bool abandon)
         }
     }
     scheduler_lock_release(flags);
+    if (!result) process_io_notify_cleanup();
     return result;
+}
+
+bool process_io_wait_cleanup(bool (*predicate)(void *), void *context, uint64_t timeout_ticks)
+{
+    return wait_queue_wait_timeout(&g_io_cleanup_queue, predicate, context, timeout_ticks);
+}
+
+void process_io_notify_cleanup(void)
+{
+    wait_queue_wake_all(&g_io_cleanup_queue);
 }
 
 void process_io_notify_completion(void)
@@ -194,5 +207,7 @@ int process_io_complete_request(io_request_t *request, int64_t result,
     /* EXECUTOR remains owned through the wake even if a cancelled caller was
      * already reaped, or a woken caller immediately consumes its result. */
     process_io_notify_completion();
-    return io_request_worker_release(request);
+    status = io_request_worker_release(request);
+    if (!status) process_io_notify_cleanup();
+    return status;
 }

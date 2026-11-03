@@ -66,6 +66,7 @@ extern bool vfs_io_boot_test(void) __attribute__((weak));
 extern bool shell_cwd_boot_test(void) __attribute__((weak));
 extern bool scheduler_wake_boot_test(void) __attribute__((weak));
 extern bool tcp_owned_boot_test(void) __attribute__((weak));
+extern bool udp_owned_boot_test(void) __attribute__((weak));
 
 static void shell_process_entry(void *arg);
 static void storage_flush_process_entry(void *arg);
@@ -595,7 +596,13 @@ static void mount_default_fstab(void)
             continue;
         }
 
-        if (!vfs_mount_device(device, mount_point))
+        serial_printf("[alix] fstab: mounting %s -> %s", entry->device_name, entry->mount_path);
+        uint64_t mount_start_ms = timer_monotonic_millis();
+        bool mounted = vfs_mount_device(device, mount_point);
+        serial_printf("[alix] fstab: mount %s -> %s result=%s elapsed_ms=%llu",
+                      entry->device_name, entry->mount_path, mounted ? "ok" : "failed",
+                      (unsigned long long)(timer_monotonic_millis() - mount_start_ms));
+        if (!mounted)
         {
             serial_printf("[alix] fstab: mount failed for %s -> %s; leaving disk unchanged (mkfs must be requested explicitly)",
                           entry->device_name, entry->mount_path);
@@ -688,6 +695,11 @@ static void warmup_run_sequence(void)
         serial_printf("VFS_IO_TEST: FAIL boot hook");
         /* Keep timer/serial service alive so the fixture's queued diagnostic
          * can drain. Startup remains blocked and no shell is exposed. */
+        for (;;) process_sleep_ms(1000);
+    }
+    if (udp_owned_boot_test && !udp_owned_boot_test())
+    {
+        serial_printf("UDP_CORE_TEST: FAIL boot hook");
         for (;;) process_sleep_ms(1000);
     }
     if (tcp_owned_boot_test && !tcp_owned_boot_test())

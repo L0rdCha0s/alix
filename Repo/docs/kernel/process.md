@@ -20,8 +20,10 @@ The scheduler's idle process retains its special internal ID zero.
 
 Native `alix_spawn_argv`, `wait` and `waitpid` now use an owned child registry;
 see [child_processes.md](child_processes.md). The argv interface launches an
-empty environment. POSIX environment/file-action/attribute integration and
-fork/exec adaptation remain pending. Processes record an
+empty environment. POSIX spawn additionally supports copied environments,
+ordered file actions and signal attributes; fork/in-place exec remain pending.
+`waitid` supports exited children and non-consuming `WNOWAIT` reads through the
+same owned registry. Processes record an
 immutable `wait_status` separately from the existing kernel join result:
 normal exit 141 is `141 << 8`, while SIGPIPE termination is 13. Default raises,
 self/remote signal kills and synchronous faults record their signal cause;
@@ -57,6 +59,15 @@ snapshots. No usage lock spans allocation or safe user copying. The user wrapper
 converts ticks to normalized timevals and clamps unrepresentable signed fields.
 The native resource fixture passed eight CPUs, observed 128 induced faults and
 increasing CPU time; the register/FP fault-preservation fixture passed afterward.
+
+Syscall 69 also accepts dedicated CPU-clock selectors `0x100` (process) and
+`0x101` (current thread), returning a 16-byte total-tick/frequency snapshot.
+The existing self-usage selector and 48-byte ABI remain unchanged. The new
+snapshots use atomic reads of the scheduler's existing total counters, a
+call-bounded heap reply and deferred preemption through checked copying/free.
+`CLOCK_PROCESS_CPUTIME_ID`, `CLOCK_THREAD_CPUTIME_ID` and `clock_getres` use
+these native samples. The RLBox eight-CPU guest verifies busy-thread accounting,
+sleep exclusion and aggregate process time; see [Wasm sandbox runtime](wasm_sandbox.md).
 
 Per-CPU current pointers (arrays indexed by CPU):
 

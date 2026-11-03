@@ -91,6 +91,14 @@ int sigpending(sigset_t *set)
 {
     return signal_result(sys_sigprocmask(ALIX_SIG_PENDING, NULL, set));
 }
+int sigwait(const sigset_t *set, int *number)
+{
+    int saved = errno;
+    int result;
+    do { result = sys_sigwait(set, number, sizeof(*set), 0); } while (result == -EINTR);
+    errno = saved;
+    return result < 0 ? -result : result;
+}
 int sigaltstack(const stack_t *stack, stack_t *old)
 {
     return signal_result(sys_sigaltstack(stack, old, sizeof(*stack)));

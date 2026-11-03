@@ -92,7 +92,11 @@ static void signal_notify_locked(thread_t *thread)
         if (thread->io_interruptible) process_io_cancel_thread_locked(thread);
         return;
     }
-    if (thread->futex_waiting)
+    if (thread->sigwait_active)
+    {
+        wait_queue_wake_all_locked(&thread->sigwait_queue);
+    }
+    else if (thread->futex_waiting)
     {
         thread->futex_interrupted = true;
         __atomic_store_n(&thread->futex_notified, true, __ATOMIC_RELEASE);
@@ -599,8 +603,29 @@ static void signal_queue_thread_locked(thread_t *target, int number, const alix_
     if (!(target->signal_pending & bit))
         target->signal_info[number] = *info;
     target->signal_pending |= bit;
-    if (!(target->signal_mask & bit))
+    if (target->sigwait_active && (target->sigwait_mask & bit))
+    {
+        wait_queue_wake_all_locked(&target->sigwait_queue);
+        target->time_slice_remaining = 0;
+    }
+    else if (!(target->signal_mask & bit))
         signal_notify_locked(target);
+}
+
+/* Caller holds scheduler_lock and process->threads_lock. Synchronous waiters
+ * are eligible while their masks remain blocked; async candidates follow. */
+static thread_t *signal_process_target_locked(process_t *process, uint64_t bit)
+{
+    for (thread_t *thread = process->threads; thread; thread = thread->process_next)
+        if (signal_user_thread(thread) && thread->sigwait_active && (thread->sigwait_mask & bit)) return thread;
+    thread_t *target = NULL;
+    for (thread_t *thread = process->threads; thread; thread = thread->process_next)
+        if (signal_user_thread(thread) && !(thread->signal_mask & bit))
+        {
+            target = thread;
+            if (!thread->io_request) break;
+        }
+    return target;
 }
 
 int process_signal_raise(int number, uint64_t tid)
@@ -694,17 +719,10 @@ int process_signal_kill(int32_t pid, int number)
                                    .si_uid = self->process->uid,
                                    .si_tid = self->tid};
             spinlock_lock(&process->threads_lock);
-            thread_t *target = NULL;
-            for (thread_t *cursor = process->threads; cursor; cursor = cursor->process_next)
-                if (signal_user_thread(cursor) && !(cursor->signal_mask & bit))
-                {
-                    target = cursor;
-                    if (!cursor->io_request)
-                        break;
-                }
+            thread_t *target = signal_process_target_locked(process, bit);
             if (target)
             {
-                if (!action.handler)
+                if (!action.handler && !(target->signal_mask & bit))
                     terminate = true;
                 else
                 {
@@ -736,6 +754,73 @@ int process_signal_kill(int32_t pid, int number)
     if (number)
         smp_broadcast_schedule_ipi(false);
     return 0;
+}
+
+int process_signal_wait(uintptr_t input, uintptr_t output, size_t size, uint64_t flags)
+{
+    thread_t *thread = current_thread_local();
+    if (!signal_user_thread(thread)) return -EPERM;
+    if (size != sizeof(alix_sigset_t) || flags) return -EINVAL;
+    if (!input || !output || !user_ptr_range_valid((const void *)input, sizeof(alix_sigset_t)) ||
+        !user_ptr_range_valid((void *)output, sizeof(int32_t))) return -EFAULT;
+    alix_sigset_t requested = 0;
+    if (!user_copy_from_user(&requested, (const void *)input, sizeof(requested))) return -EFAULT;
+    if (requested & ~ALIX_SIGNAL_MASK) return -EINVAL;
+    requested = signal_mask_valid(requested);
+    if (!requested) return -EINVAL;
+    for (int number = ALIX_SIGCONT; number <= ALIX_SIGTTOU; ++number)
+        if (requested & signal_bit(number)) return -EINVAL;
+
+    uint64_t lock = scheduler_lock_acquire("sigwait_register");
+    int result = 0;
+    if (!signal_user_thread(thread)) result = -ECANCELED;
+    else if (requested & ~thread->signal_mask) result = -EINVAL;
+    else if (thread->sigwait_active || thread->waiting_queue || thread->io_request ||
+             thread->futex_waiting || thread->signal_sleeping) result = -EBUSY;
+    if (result) { scheduler_lock_release(lock); return result; }
+    wait_queue_init(&thread->sigwait_queue);
+    thread->sigwait_mask = requested;
+    thread->sigwait_active = true;
+    for (;;)
+    {
+        /* A killed waiter must never be put back on a runnable queue. */
+        if (!signal_user_thread(thread)) { result = -ECANCELED; break; }
+        uint64_t pending = (thread->signal_pending | thread->process->signal_pending) & requested;
+        if (pending)
+        {
+            int32_t number = __builtin_ctzll(pending) + 1;
+            uint64_t bit = signal_bit(number);
+            /* Existing signal-mask copies use this scheduler -> memory lock
+             * order. Copy first: EFAULT must not consume the selected signal. */
+            if (!user_copy_to_user((void *)output, &number, sizeof(number))) result = -EFAULT;
+            else if (thread->signal_pending & bit) thread->signal_pending &= ~bit;
+            else thread->process->signal_pending &= ~bit;
+            break;
+        }
+        if (process_signal_pending_locked(thread)) { result = -EINTR; break; }
+        if (thread_in_run_queue_load(thread)) remove_from_run_queue_locked(thread);
+        spinlock_lock(&thread->sigwait_queue.lock);
+        if (!thread->waiting_queue)
+        {
+            thread->waiting_queue = &thread->sigwait_queue;
+            thread->wait_queue_next = NULL;
+            if (thread->sigwait_queue.tail) thread->sigwait_queue.tail->wait_queue_next = thread;
+            else thread->sigwait_queue.head = thread;
+            thread->sigwait_queue.tail = thread;
+        }
+        thread->state = THREAD_STATE_BLOCKED;
+        spinlock_unlock(&thread->sigwait_queue.lock);
+        /* A sender cannot pass scheduler_lock between the pending check and
+         * queue publication. Only this live caller retains the user addresses. */
+        scheduler_lock_release(lock);
+        scheduler_schedule(false);
+        lock = scheduler_lock_acquire("sigwait_resume");
+    }
+    if (thread->waiting_queue == &thread->sigwait_queue) thread_remove_from_wait_queue(thread);
+    thread->sigwait_active = false;
+    thread->sigwait_mask = 0;
+    scheduler_lock_release(lock);
+    return result;
 }
 
 static bool signal_sleep_ready(void *context)
@@ -792,6 +877,8 @@ void process_signal_thread_cleanup(thread_t *thread)
         return;
     process_signal_frame_t *record = thread->signal_frames;
     thread->signal_frames = NULL;
+    thread->sigwait_active = false;
+    thread->sigwait_mask = 0;
     thread->signal_depth = 0;
     while (record)
     {

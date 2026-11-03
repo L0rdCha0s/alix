@@ -16,6 +16,7 @@ int process_signal_sigaltstack(uintptr_t, uintptr_t, size_t, uintptr_t);
 int process_signal_raise(int, uint64_t);
 int process_signal_kill(int32_t, int);
 int process_signal_sleep(uint32_t, uintptr_t);
+int process_signal_wait(uintptr_t, uintptr_t, size_t, uint64_t);
 bool process_signal_pending_locked(thread_t *);
 void process_signal_thread_cleanup(thread_t *);
 bool process_signal_address_mapped(process_t *, uintptr_t);

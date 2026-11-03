@@ -1,0 +1,136 @@
+--- a/ipc/chromium/moz.build
++++ b/ipc/chromium/moz.build
+@@ -112,6 +112,12 @@
+         "src/base/time_posix.cc",
+     ]
+
++if CONFIG["TARGET_KERNEL"] == "Alix":
++    SOURCES += [
++        "src/base/process_util_alix.cc",
++        "src/base/time_posix.cc",
++    ]
++
+ if CONFIG["TARGET_KERNEL"] == "Linux":
+     SOURCES += [
+         "src/base/process_util_linux.cc",
+--- a/ipc/chromium/src/base/process_util_posix.cc
++++ b/ipc/chromium/src/base/process_util_posix.cc
+@@ -126,6 +126,9 @@
+ #elif defined(XP_LINUX) || defined(XP_SOLARIS)
+   static const rlim_t kSystemDefaultMaxFds = 8192;
+   static const char kFDDir[] = "/proc/self/fd";
++#elif defined(MOZ_WIDGET_ALIX)
++  static const rlim_t kSystemDefaultMaxFds = 256;
++  static const char kFDDir[] = "";
+ #elif defined(XP_DARWIN)
+   static const rlim_t kSystemDefaultMaxFds = 256;
+   static const char kFDDir[] = "/dev/fd";
+--- a/ipc/glue/GeckoChildProcessHost.cpp
++++ b/ipc/glue/GeckoChildProcessHost.cpp
+@@ -345,6 +345,8 @@
+   virtual Result<Ok, LaunchError> DoSetup() override;
+ };
+ typedef LinuxProcessLauncher ProcessLauncher;
++#  elif defined(MOZ_WIDGET_ALIX)
++using ProcessLauncher = PosixProcessLauncher;
+ #  elif defined(MOZ_WIDGET_UIKIT)
+ class IosProcessLauncher : public PosixProcessLauncher {
+  public:
+--- /dev/null
++++ b/ipc/chromium/src/base/process_util_alix.cc
+@@ -0,0 +1,95 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#include "base/process_util.h"
++
++#include <errno.h>
++#include <fcntl.h>
++#include <spawn.h>
++#include <sys/wait.h>
++#include <unistd.h>
++
++#include "base/eintr_wrapper.h"
++#include "mozilla/ipc/FileDescriptor.h"
++#include "mozilla/ipc/FileDescriptorShuffle.h"
++
++namespace {
++
++class SpawnState {
++ public:
++  int Init() {
++    int error = posix_spawn_file_actions_init(&mActions);
++    if (error) return error;
++    mActionsReady = true;
++    error = posix_spawnattr_init(&mAttributes);
++    if (error) return error;
++    mAttributesReady = true;
++    return posix_spawnattr_setflags(&mAttributes, POSIX_SPAWN_CLOEXEC_DEFAULT);
++  }
++  ~SpawnState() {
++    if (mAttributesReady) posix_spawnattr_destroy(&mAttributes);
++    if (mActionsReady) posix_spawn_file_actions_destroy(&mActions);
++  }
++  posix_spawn_file_actions_t mActions{};
++  posix_spawnattr_t mAttributes{};
++
++ private:
++  bool mActionsReady = false;
++  bool mAttributesReady = false;
++};
++
++MOZ_RUNINIT static mozilla::EnvironmentLog gProcessLog("MOZ_PROCESS_LOG");
++
++}  // namespace
++
++namespace base {
++
++Result<Ok, LaunchError> LaunchApp(const std::vector<std::string>& argv,
++                                LaunchOptions&& options,
++                                ProcessHandle* process_handle) {
++  if (argv.empty() || argv[0].empty()) return Err(LaunchError("argv", EINVAL));
++  mozilla::UniquePtr<char*[]> arguments(new char*[argv.size() + 1]);
++  for (size_t i = 0; i < argv.size(); ++i) {
++    arguments[i] = const_cast<char*>(argv[i].c_str());
++  }
++  arguments[argv.size()] = nullptr;
++
++  EnvironmentArray environment;
++  const EnvironmentArray& envp = options.full_env
++                                    ? options.full_env
++                                    : (environment = BuildEnvironmentArray(options.env_map));
++  mozilla::ipc::FileDescriptorShuffle shuffle;
++  if (!shuffle.Init(options.fds_to_remap)) {
++    return Err(LaunchError("FileDescriptorShuffle", errno));
++  }
++  SpawnState state;
++  int error = state.Init();
++  for (int fd = STDIN_FILENO; !error && fd <= STDERR_FILENO; ++fd) {
++    if (fcntl(fd, F_GETFD) >= 0) {
++      error = posix_spawn_file_actions_adddup2(&state.mActions, fd, fd);
++    } else if (errno != EBADF) {
++      error = errno;
++    }
++  }
++  if (!error && !options.workdir.empty()) {
++    error = posix_spawn_file_actions_addchdir_np(&state.mActions, options.workdir.c_str());
++  }
++  for (const auto& mapping : shuffle.Dup2Sequence()) {
++    if (error) break;
++    error = posix_spawn_file_actions_adddup2(&state.mActions, mapping.first, mapping.second);
++  }
++  if (error) return Err(LaunchError("posix_spawn setup", error));
++  pid_t pid;
++  error = posix_spawn(&pid, arguments[0], &state.mActions, &state.mAttributes,
++                      arguments.get(), envp.get());
++  if (error) return Err(LaunchError("posix_spawn", error));
++  if (process_handle) *process_handle = pid;
++  gProcessLog.print("==> process %d launched child process %d\n", GetCurrentProcId(), pid);
++  if (options.wait && HANDLE_EINTR(waitpid(pid, nullptr, 0)) < 0) {
++    return Err(LaunchError("waitpid", errno));
++  }
++  return Ok();
++}
++
++}  // namespace base

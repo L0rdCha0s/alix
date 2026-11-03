@@ -2,6 +2,7 @@
 #include "sys/mman.h"
 #include "errno.h"
 #include "serial.h"
+#include "unistd.h"
 
 #define PAGE 4096u
 #define RESERVATION (512u * 1024u * 1024u)
@@ -106,12 +107,25 @@ int main(int argc, char **argv)
     {
         return fault_probe(argv[1]);
     }
-    const int flags = MAP_PRIVATE | MAP_ANONYMOUS;
+    const int flags = MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE;
     REQUIRE(mmap(NULL, 0, PROT_READ, flags, -1, 0) == MAP_FAILED && errno == EINVAL, "zero length");
     REQUIRE(mmap(NULL, PAGE, 0x80, flags, -1, 0) == MAP_FAILED && errno == EINVAL,
             "unknown protection rejection");
     REQUIRE(mmap((void *)1, PAGE, PROT_READ, flags | MAP_FIXED_NOREPLACE, -1, 0) == MAP_FAILED,
             "invalid address");
+
+    const size_t large_reservation = 8ULL * 1024 * 1024 * 1024;
+    long available_before = sysconf(_SC_AVPHYS_PAGES);
+    uint8_t *large = mmap(NULL, large_reservation, PROT_NONE, flags, -1, 0);
+    REQUIRE(large != MAP_FAILED, "8GiB noreserve interval");
+    long available_after = sysconf(_SC_AVPHYS_PAGES);
+    REQUIRE(available_before > 0 && available_after > 0 && available_before - available_after < 256,
+            "noreserve interval keeps physical backing sparse");
+    REQUIRE(mprotect(large + large_reservation - PAGE, PAGE, PROT_READ | PROT_WRITE) == 0,
+            "commit high noreserve page");
+    REQUIRE(large[large_reservation - PAGE] == 0, "high noreserve page starts zeroed");
+    large[large_reservation - PAGE] = 0x91;
+    REQUIRE(munmap(large, large_reservation) == 0, "release large noreserve interval");
 
     uint8_t *reservation = mmap(NULL, RESERVATION, PROT_NONE, flags, -1, 0);
     REQUIRE(reservation != MAP_FAILED, "sparse reserve");
@@ -224,6 +238,6 @@ int main(int argc, char **argv)
             "concurrent readable mappings preserved");
     REQUIRE(munmap((void *)shared->word, PAGE) == 0, "shared release");
     free(shared);
-    serial_printf("VM_PLATFORM_TEST: PASS sparse=512MiB readers=4 protections=128 fixed=1 jit=42 rwx=42\n");
+    serial_printf("VM_PLATFORM_TEST: PASS sparse=512MiB readers=4 protections=128 fixed=1 jit=42 rwx=42 noreserve=8GiB\n");
     return 0;
 }

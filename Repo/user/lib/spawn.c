@@ -96,7 +96,8 @@ int posix_spawnattr_getflags(const posix_spawnattr_t *attributes, short *flags)
 int posix_spawnattr_setflags(posix_spawnattr_t *attributes, short flags)
 {
     unsigned known = POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_RESETIDS |
-                     POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSCHEDPARAM | POSIX_SPAWN_SETSCHEDULER;
+                     POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSCHEDPARAM | POSIX_SPAWN_SETSCHEDULER |
+                     POSIX_SPAWN_CLOEXEC_DEFAULT;
     if (!attributes || attributes->magic != ATTR_MAGIC || ((unsigned short)flags & ~known)) return EINVAL;
     attributes->flags = flags; return 0;
 }

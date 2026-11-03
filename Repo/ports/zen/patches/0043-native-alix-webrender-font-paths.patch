@@ -1,0 +1,36 @@
+--- a/gfx/webrender_bindings/src/bindings.rs
++++ b/gfx/webrender_bindings/src/bindings.rs
+@@ -16,7 +16,14 @@
+ #[cfg(target_os = "android")]
+ use std::os::raw::c_int;
+ use std::os::raw::{c_char, c_float, c_void};
+-#[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "windows")))]
++#[cfg(target_os = "alix")]
++use std::os::alix::ffi::OsStringExt;
++#[cfg(not(any(
++    target_os = "macos",
++    target_os = "ios",
++    target_os = "windows",
++    target_os = "alix"
++)))]
+ use std::os::unix::ffi::OsStringExt;
+ #[cfg(target_os = "windows")]
+ use std::os::windows::ffi::OsStringExt;
+--- a/gfx/webrender_bindings/src/moz2d_renderer.rs
++++ b/gfx/webrender_bindings/src/moz2d_renderer.rs
+@@ -49,7 +49,14 @@
+ 
+ #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "windows")))]
+ use std::ffi::CString;
+-#[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "windows")))]
++#[cfg(target_os = "alix")]
++use std::os::alix::ffi::OsStrExt;
++#[cfg(not(any(
++    target_os = "macos",
++    target_os = "ios",
++    target_os = "windows",
++    target_os = "alix"
++)))]
+ use std::os::unix::ffi::OsStrExt;
+ 
+ /// Local print-debugging utility

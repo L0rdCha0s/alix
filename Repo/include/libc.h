@@ -59,7 +59,11 @@ bool alix_ensure_dir_path(const char *path);
 ssize_t read(int fd, void *buffer, size_t count);
 ssize_t write(int fd, const void *buffer, size_t count);
 int close(int fd);
+#ifdef TTF_HOST_BUILD
 int open(const char *path, uint64_t flags, ...);
+#else
+int open(const char *path, uint64_t flags, ...) __asm__("alix_open_v2");
+#endif
 int socket_open(const char *iface_name);
 int socket_connect(int fd, const char *ipv4_text, uint16_t port);
 ssize_t socket_available(int fd);

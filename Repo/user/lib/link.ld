@@ -55,12 +55,28 @@ SECTIONS
         KEEP(*(.note.gnu.build-id))
     } :text
 
+    /* Optional standard export metadata; executables remain fixed ET_EXEC. */
+    .dynsym : ALIGN(8) { *(.dynsym) } :text
+    .dynstr : ALIGN(1) { *(.dynstr) } :text
+    .hash : ALIGN(8) { *(.hash) } :text
+    .gnu.hash : ALIGN(8) { *(.gnu.hash) } :text
+    __alix_user_text_end = .;
+
     . = ALIGN(0x1000);
+    __alix_user_data_start = .;
 
     .data : ALIGN(16)
     {
         *(.data*)
         *(.ldata*)
+    } :data
+
+    .got : ALIGN(8) { *(.got) *(.got.plt) } :data
+    .dynamic : ALIGN(8)
+    {
+        __alix_dynamic_start = .;
+        *(.dynamic)
+        __alix_dynamic_end = .;
     } :data
 
     .preinit_array : ALIGN(8)
@@ -100,6 +116,9 @@ SECTIONS
         *(.tbss .tbss.* .gnu.linkonce.tb.*)
         *(.tcommon)
     } :data :tls
+    __alix_static_tls_start = SIZEOF(.tdata) ? ADDR(.tdata) : ADDR(.tbss);
+    __alix_static_tls_end = SIZEOF(.tbss) ? ADDR(.tbss) + SIZEOF(.tbss) : ADDR(.tdata) + SIZEOF(.tdata);
+    __alix_static_tls_bytes = __alix_static_tls_end - __alix_static_tls_start;
 
     .bss : ALIGN(16)
     {

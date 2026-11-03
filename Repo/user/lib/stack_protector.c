@@ -3,9 +3,10 @@
 #include "usyscall.h"
 
 /* Clang's native Alix target uses this process-wide guard, not an offset in
- * another OS's thread control block. This object is linked only when an
- * instrumented object references the guard or failure handler. */
-uintptr_t __stack_chk_guard __attribute__((visibility("hidden")));
+ * another OS's thread control block. Ordinary apps retain it when instrumented;
+ * the upstream executable driver also retains it for protected shared libraries
+ * even when the executable's own objects are uninstrumented. */
+uintptr_t __stack_chk_guard __attribute__((visibility("default")));
 
 __attribute__((noreturn, no_stack_protector))
 static void stack_protector_abort(const char *message, size_t length)
@@ -33,7 +34,7 @@ static void stack_protector_initialize(void)
     stack_protector_abort(message, sizeof(message) - 1);
 }
 
-__attribute__((noreturn, no_stack_protector, visibility("hidden")))
+__attribute__((noreturn, no_stack_protector, visibility("default")))
 void __stack_chk_fail(void)
 {
     static const char message[] = "ALIX_STACK_PROTECTOR: stack corruption\n";

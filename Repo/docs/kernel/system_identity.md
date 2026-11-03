@@ -34,6 +34,10 @@ one user/group identity pair; `geteuid` and `getegid` report that same pair.
 Separate saved/effective identities, set-ID execution and Unix permission/ACL
 enforcement remain unfinished.
 
+Owned regular files now support fchown with captured-caller authorization and
+persisted uid/gid. Root can change either field; an owner can retain its uid
+and use its existing or primary group. See [VFS ownership](vfs.md#file-identity-and-ownership).
+
 The native acceptance target is `make zen-system-identity-qemu-test`. It
 correlates uname with the exact booted ELF build ID and kernel hash, checks
 credentials, pointer errors and hostname limits, and performs 512 snapshots

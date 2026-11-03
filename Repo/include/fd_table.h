@@ -96,6 +96,13 @@ bool fd_description_is_deferred_to(const fd_description_t *description, const fd
 
 fd_table_t *fd_table_create(size_t capacity);
 bool fd_table_get(fd_table_t *table);
+/* Optional process-owned advisory-lock observer. Called synchronously outside
+ * table locks while a removed description is still pinned. NULL means shutdown.
+ * It must be bounded, allocation-free and must not wait or run storage I/O.
+ * Register once (repeating the same pair is allowed) while owning this table. */
+typedef void (*fd_table_close_observer_t)(void *context, fd_description_t *description);
+int fd_table_observe_closes(fd_table_t *table, fd_table_close_observer_t observer, void *context);
+bool fd_table_closed(fd_table_t *table);
 /* Reserve a not-yet-visible OPEN slot before worker-side create/truncate. The
  * returned deferred description owns a table reference and cancels its ticket
  * on final cleanup. No table->reservation reference cycle exists. Caller holds

@@ -19,6 +19,8 @@ struct tm
 };
 #define CLOCK_REALTIME 0
 #define CLOCK_MONOTONIC 1
+#define CLOCK_PROCESS_CPUTIME_ID 2
+#define CLOCK_THREAD_CPUTIME_ID 3
 #define TIME_UTC 1
 #define CLOCKS_PER_SEC 1000
 
@@ -26,6 +28,7 @@ struct tm
 extern "C" {
 #endif
 int clock_gettime(clockid_t clock, struct timespec *value);
+int clock_getres(clockid_t clock, struct timespec *value);
 clock_t clock(void);
 int timespec_get(struct timespec *value, int base);
 int nanosleep(const struct timespec *duration, struct timespec *remaining);

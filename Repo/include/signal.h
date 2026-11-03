@@ -66,6 +66,12 @@ struct sigaction
 #define SIGSTKSZ ALIX_SIGSTKSZ
 #define SI_USER ALIX_SI_USER
 #define SI_TKILL ALIX_SI_TKILL
+#define CLD_EXITED ALIX_CLD_EXITED
+#define CLD_KILLED ALIX_CLD_KILLED
+#define CLD_DUMPED ALIX_CLD_DUMPED
+#define CLD_TRAPPED ALIX_CLD_TRAPPED
+#define CLD_STOPPED ALIX_CLD_STOPPED
+#define CLD_CONTINUED ALIX_CLD_CONTINUED
 #define SEGV_MAPERR ALIX_SEGV_MAPERR
 #define SEGV_ACCERR ALIX_SEGV_ACCERR
 #define ILL_ILLOPC ALIX_ILL_ILLOPC
@@ -83,6 +89,7 @@ extern "C"
     int sigismember(const sigset_t *, int);
     int sigprocmask(int, const sigset_t *, sigset_t *);
     int sigpending(sigset_t *);
+    int sigwait(const sigset_t *, int *);
     int sigaltstack(const stack_t *, stack_t *);
     int raise(int);
     int kill(pid_t, int);

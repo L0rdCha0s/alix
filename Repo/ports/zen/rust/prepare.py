@@ -96,7 +96,12 @@ def patch_selectors(publish):
         "pipe/mod.rs": "        mod alix;\n        pub use alix::{Pipe, pipe};",
         "env/mod.rs": "        mod alix;\n        pub use alix::*;",
         "paths/mod.rs": "        mod alix;\n        use alix as imp;",
+        "net/connection/mod.rs": "        mod alix;\n        pub use alix::*;",
+        "net/hostname/mod.rs": "        mod alix;\n        pub use alix::hostname;",
     }.items(): branch(base + path, body)
+    relative = base + "fs/mod.rs"
+    original, changed = patches[relative]
+    patches[relative] = original, changed + '\n#[cfg(target_os = "alix")]\npub(crate) use imp::FileDesc;\n'
     # Reuse upstream concurrent algorithms, replacing only the OS wait boundary.
     for item, exports in {"mutex": "Mutex", "condvar": "Condvar", "once": "Once, OnceState",
                           "rwlock": "RwLock", "thread_parking": "Parker"}.items():
@@ -124,7 +129,9 @@ pub mod alix;
     original = (pristine / relative).read_text()
     anchor = '#[cfg(not(target_os = "trusty"))]\nmod net;'
     if original.count(anchor) != 1: raise RuntimeError("network fd selector changed")
-    patches[relative] = original, original.replace(anchor, '#[cfg(not(any(target_os = "trusty", target_os = "alix")))]\nmod net;', 1)
+    # Native network types now own real FileDesc/OwnedFd values, so restore
+    # upstream's safe/raw descriptor conversions rather than excluding Alix.
+    patches[relative] = original, original
     for name in ("owned", "raw"):
         relative = f"library/std/src/os/fd/{name}.rs"
         original = (pristine / relative).read_text()
@@ -133,13 +140,6 @@ pub mod alix;
             anchor = '#[cfg(target_os = "motor")]\nuse super::owned::OwnedFd;'
             if changed.count(anchor) != 1: raise RuntimeError("native OwnedFd import changed")
             changed = changed.replace(anchor, '#[cfg(any(target_os = "motor", target_os = "alix"))]\nuse super::owned::OwnedFd;', 1)
-        else:
-            a = changed.index('impl AsFd for crate::net::TcpStream')
-            a = changed.rfind('#[stable(', 0, a)
-            b = changed.index('#[stable(feature = "asfd_ptrs"', a)
-            section = changed[a:b]
-            if section.count('#[cfg(not(target_os = "trusty"))]') != 9: raise RuntimeError("network fd conversions changed")
-            changed = changed[:a] + section.replace('#[cfg(not(target_os = "trusty"))]', '#[cfg(not(any(target_os = "trusty", target_os = "alix")))]') + changed[b:]
         patches[relative] = original, changed
     relative = "library/std/src/sys/process/unsupported.rs"
     original = (pristine / relative).read_text()

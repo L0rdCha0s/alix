@@ -1,0 +1,176 @@
+--- a/third_party/rust/socket2/Cargo.toml
++++ b/third_party/rust/socket2/Cargo.toml
+@@ -90,7 +90,7 @@
+ name = "socket2"
+ path = "src/lib.rs"
+ 
+-[target.'cfg(any(unix, target_os = "wasi"))'.dependencies.libc]
++[target.'cfg(any(unix, target_os = "alix", target_os = "wasi"))'.dependencies.libc]
+ version = "0.2.172"
+ 
+ [target."cfg(windows)".dependencies.windows-sys]
+--- a/third_party/rust/socket2/src/lib.rs
++++ b/third_party/rust/socket2/src/lib.rs
+@@ -109,7 +109,7 @@
+     ($from: ty, $for: ty) => {
+         impl From<$from> for $for {
+             fn from(socket: $from) -> $for {
+-                #[cfg(any(unix, all(target_os = "wasi", not(target_env = "p1"))))]
++                #[cfg(any(unix, target_os = "alix", all(target_os = "wasi", not(target_env = "p1"))))]
+                 unsafe {
+                     <$for>::from_raw_fd(socket.into_raw_fd())
+                 }
+@@ -177,13 +177,13 @@
+ mod sockref;
+ 
+ #[cfg_attr(
+-    any(unix, all(target_os = "wasi", not(target_env = "p1"))),
++    any(unix, target_os = "alix", all(target_os = "wasi", not(target_env = "p1"))),
+     path = "sys/unix.rs"
+ )]
+ #[cfg_attr(windows, path = "sys/windows.rs")]
+ mod sys;
+ 
+-#[cfg(not(any(windows, unix, all(target_os = "wasi", not(target_env = "p1")))))]
++#[cfg(not(any(windows, unix, target_os = "alix", all(target_os = "wasi", not(target_env = "p1")))))]
+ compile_error!("Socket2 doesn't support the compile target");
+ 
+ use sys::c_int;
+--- a/third_party/rust/socket2/src/sys/unix.rs
++++ b/third_party/rust/socket2/src/sys/unix.rs
+@@ -46,8 +46,10 @@
+ ))]
+ use std::num::NonZeroUsize;
+ use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
+-#[cfg(not(target_os = "wasi"))]
++#[cfg(not(any(target_os = "wasi", target_os = "alix")))]
+ use std::os::unix::ffi::OsStrExt;
++#[cfg(target_os = "alix")]
++use std::os::alix::ffi::OsStrExt;
+ #[cfg(all(feature = "all", unix))]
+ use std::os::unix::net::{UnixDatagram, UnixListener, UnixStream};
+ #[cfg(not(target_os = "wasi"))]
+@@ -377,6 +379,8 @@
+     target_os = "android",
+ ))]
+ type IovLen = usize;
++#[cfg(target_os = "alix")]
++type IovLen = usize;
+ 
+ #[cfg(any(
+     all(
+@@ -409,6 +413,12 @@
+ ))]
+ type IovLen = c_int;
+ 
++#[cfg(all(feature = "all", target_os = "alix"))]
++impl Type {
++    pub const fn nonblocking(self) -> Type { Type(self.0 | libc::SOCK_NONBLOCK) }
++    pub const fn cloexec(self) -> Type { Type(self.0 | libc::SOCK_CLOEXEC) }
++}
++
+ /// Unix only API.
+ impl Domain {
+     /// Domain for low-level packet interface, corresponding to `AF_PACKET`.
+@@ -860,6 +870,7 @@
+ 
+     /// Returns this address as Unix `SocketAddr` if it is an `AF_UNIX` pathname
+     /// address, otherwise returns `None`.
++    #[cfg(not(target_os = "alix"))]
+     pub fn as_unix(&self) -> Option<std::os::unix::net::SocketAddr> {
+         let path = self.as_pathname()?;
+         // SAFETY: we can represent this as a valid pathname, then so can the
+@@ -1001,7 +1012,7 @@
+ 
+ #[cfg(all(
+     feature = "all",
+-    any(unix, all(target_os = "wasi", not(target_env = "p1"))),
++    any(unix, target_os = "alix", all(target_os = "wasi", not(target_env = "p1"))),
+     not(target_os = "vita")
+ ))]
+ pub(crate) fn nonblocking(fd: RawSocket) -> io::Result<bool> {
+--- a/third_party/rust/socket2/src/sockaddr.rs
++++ b/third_party/rust/socket2/src/sockaddr.rs
+@@ -298,7 +298,7 @@
+                 ip,
+                 port,
+                 addr.sin6_flowinfo,
+-                #[cfg(any(unix, all(target_os = "wasi", not(target_env = "p1"))))]
++                #[cfg(any(unix, target_os = "alix", all(target_os = "wasi", not(target_env = "p1"))))]
+                 addr.sin6_scope_id,
+                 #[cfg(windows)]
+                 unsafe {
+@@ -393,7 +393,7 @@
+             storage.sin6_port = addr.port().to_be();
+             storage.sin6_addr = crate::sys::to_in6_addr(addr.ip());
+             storage.sin6_flowinfo = addr.flowinfo();
+-            #[cfg(any(unix, all(target_os = "wasi", not(target_env = "p1"))))]
++            #[cfg(any(unix, target_os = "alix", all(target_os = "wasi", not(target_env = "p1"))))]
+             {
+                 storage.sin6_scope_id = addr.scope_id();
+             }
+--- a/third_party/rust/socket2/.cargo-checksum.json
++++ b/third_party/rust/socket2/.cargo-checksum.json
+@@ -1 +1 @@
+-{"files":{".cargo_vcs_info.json":"d9496ebc9e9da381892f28c23f9f4f7dc0be5e60cbba739c1740b651f9722495","Cargo.lock":"1586faadf8962804b1a78918b3e1ef35210946a7cd9535b0ac54b8d033c8d0db","Cargo.toml":"8b7a9083b19569241428e9d486fbf4f461b03ff004e4ec8cea9563a687877329","Cargo.toml.orig":"a27397c2dd5de8688bea65db80a730419067dc9e5c34f285ac7f791c5f94fdee","LICENSE-APACHE":"a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2","LICENSE-MIT":"378f5840b258e2779c39418f3f2d7b2ba96f1c7917dd6be0713f88305dbda397","README.md":"444031b783070ac056bd95abc4b2f4a72fd98ab11270268d8ba4c4ca53dade68","src/lib.rs":"90e5edbced9a2eba7d7c46c66fd1b7a462a2a6dbe0c38ad04ace081a9093f11a","src/sockaddr.rs":"1eb260befdb62a53a1dc940a4c0863b1774ce7fa0daf3045154e42f6f477ecbd","src/socket.rs":"1d60e8c2729bf1d19a0852b1ec39c8c6224355abeab9e361a0c694419367fe62","src/sockref.rs":"0dbb3de3b6fb457330c09b88ca2c3777a3d1b57a7a91946afac8f5f313e30aa4","src/sys/unix.rs":"dc648e4ebbaabe77f7cbcfa85a22d79fe599b47c4a06e9b2fcc87ad164bb9be7","src/sys/windows.rs":"6d9d05a39b79ec53642bc7096f5ebfe32ae7c1562c3621d2400d08cfa8e91c3d"},"package":"3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"}
+\ No newline at end of file
++{"files":{".cargo_vcs_info.json":"d9496ebc9e9da381892f28c23f9f4f7dc0be5e60cbba739c1740b651f9722495","Cargo.lock":"1586faadf8962804b1a78918b3e1ef35210946a7cd9535b0ac54b8d033c8d0db","Cargo.toml":"98e3ffff6e28cd9a60c3281b2f597c74adf2e4e69d2a6b729b0cdf9a3663a15d","Cargo.toml.orig":"a27397c2dd5de8688bea65db80a730419067dc9e5c34f285ac7f791c5f94fdee","LICENSE-APACHE":"a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2","LICENSE-MIT":"378f5840b258e2779c39418f3f2d7b2ba96f1c7917dd6be0713f88305dbda397","README.md":"444031b783070ac056bd95abc4b2f4a72fd98ab11270268d8ba4c4ca53dade68","src/lib.rs":"de79d87dc7785314539008abc2d4785d9bb1146e8b3027067c14b0a387921f4d","src/sockaddr.rs":"e9242439bfc38350ad58bb5c0d637b9d79ca7df512547c1fe04ab51cf6acf566","src/socket.rs":"f331051948661bdf3f42d0df8c3fa2a64ca9ea8527175b916c4a21d2daf0db89","src/sockref.rs":"c16dd58f0843a93e697c4f3c34092a385ec68e854ca3c103a493be4a855240eb","src/sys/unix.rs":"bdfbdef55f45979120546875a0dd119c6b1a7987923ae7035fd2d9f4ce0b5a12","src/sys/windows.rs":"6d9d05a39b79ec53642bc7096f5ebfe32ae7c1562c3621d2400d08cfa8e91c3d"},"package":"3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"}
+--- a/third_party/rust/socket2/src/socket.rs
++++ b/third_party/rust/socket2/src/socket.rs
+@@ -14,7 +14,7 @@
+ #[cfg(not(target_os = "nto"))]
+ use std::net::Ipv6Addr;
+ use std::net::{self, Ipv4Addr, Shutdown};
+-#[cfg(any(unix, all(target_os = "wasi", not(target_env = "p1"))))]
++#[cfg(any(unix, target_os = "alix", all(target_os = "wasi", not(target_env = "p1"))))]
+ use std::os::fd::{FromRawFd, IntoRawFd};
+ #[cfg(windows)]
+ use std::os::windows::io::{FromRawSocket, IntoRawSocket};
+@@ -220,7 +220,7 @@
+         match res {
+             Ok(()) => return Ok(()),
+             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {}
+-            #[cfg(any(unix, all(target_os = "wasi", not(target_env = "p1"))))]
++            #[cfg(any(unix, target_os = "alix", all(target_os = "wasi", not(target_env = "p1"))))]
+             Err(ref e) if e.raw_os_error() == Some(libc::EINPROGRESS) => {}
+             Err(e) => return Err(e),
+         }
+@@ -367,7 +367,7 @@
+     /// On Windows it is not possible retrieve the nonblocking mode status.
+     #[cfg(all(
+         feature = "all",
+-        any(unix, all(target_os = "wasi", not(target_env = "p1")))
++        any(unix, target_os = "alix", all(target_os = "wasi", not(target_env = "p1")))
+     ))]
+     pub fn nonblocking(&self) -> io::Result<bool> {
+         sys::nonblocking(self.as_raw())
+@@ -745,6 +745,9 @@
+ /// support it.
+ #[inline(always)]
+ const fn set_common_type(ty: Type) -> Type {
++    #[cfg(target_os = "alix")]
++    let ty = Type(ty.0 | libc::SOCK_CLOEXEC);
++
+     // On platforms that support it set `SOCK_CLOEXEC`.
+     #[cfg(any(
+         target_os = "android",
+--- a/third_party/rust/socket2/src/sockref.rs
++++ b/third_party/rust/socket2/src/sockref.rs
+@@ -2,7 +2,7 @@
+ use std::marker::PhantomData;
+ use std::mem::ManuallyDrop;
+ use std::ops::Deref;
+-#[cfg(any(unix, all(target_os = "wasi", not(target_env = "p1"))))]
++#[cfg(any(unix, target_os = "alix", all(target_os = "wasi", not(target_env = "p1"))))]
+ use std::os::fd::{AsFd, AsRawFd, FromRawFd};
+ #[cfg(windows)]
+ use std::os::windows::io::{AsRawSocket, AsSocket, FromRawSocket};
+@@ -77,7 +77,7 @@
+ }
+ 
+ /// On Windows, a corresponding `From<&impl AsSocket>` implementation exists.
+-#[cfg(any(unix, all(target_os = "wasi", not(target_env = "p1"))))]
++#[cfg(any(unix, target_os = "alix", all(target_os = "wasi", not(target_env = "p1"))))]
+ impl<'s, S> From<&'s S> for SockRef<'s>
+ where
+     S: AsFd,

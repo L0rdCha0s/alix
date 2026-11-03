@@ -57,11 +57,23 @@ clearing a newer error. Reading SO_ERROR clears the pending error, not the faile
 transport state. Concurrent readers cannot all consume the same error.
 
 `sys/socket.h`, `netinet/in.h`, `netinet/tcp.h`, `arpa/inet.h` and `sys/uio.h`
-declare the native types and intended API. Remaining socket options,
+declare the native types and intended API. Remaining socket options, TCP
 bind/listen/accept, shutdown and complete half-close behavior, local sockets,
-descriptor passing, datagrams, vectored/message I/O and signal-aware
-data-I/O interruption remain required work. Their declarations are not proof of
-implementation. No successful substitute implementations are supplied.
+descriptor passing, POSIX addressed/ancillary messages and signal-aware
+data-I/O interruption remain required work. Unsupported server/local/half-close
+entry points now report their standard failure path, validating an existing
+owned socket where applicable. They do not return success or alter outputs.
+Connected `sendto`/`recvfrom` calls with no address use the existing TCP send/recv
+backend. Gather writes have real [writev](vectored_io.md) acceptance.
+Connected TCP `sendmsg`/`recvmsg` now gather/scatter real payloads through the
+owned I/O executor. Headers and vector metadata are captured once into heap
+storage; pending requests retain their metadata behind the bounded payload,
+which is the only region the event worker accesses. The resumed caller performs
+checked scatter copies and output-header updates. Capture failures submit no
+send; failed receive copies may leave a prefix and the stream read can already
+have consumed bytes. PEEK, per-call DONTWAIT, empty vectors, EOF and NOSIGNAL use
+the existing TCP policies. Unsupported destination addresses and sent ancillary
+data fail before I/O. Receiver ancillary output is empty for this TCP backend.
 The initial IPv4 DNS/netdb layer now has native lookup, ownership and cancellation
 evidence; see [resolver.md](resolver.md) for capability and verification limits.
 
@@ -86,3 +98,24 @@ assertions. `tests/inet_contract_test.py` compares 20,000 IPv4
 conversions against host libc and checks strict failures and output bounds
 under ASan/UBSan. These targeted results do not establish complete POSIX socket,
 NSPR/NSS, Gecko or Zen runtime acceptance.
+
+The upstream Rust standard library now has an explicit Alix network backend
+using these native APIs. `make zen-rust-std-net-qemu-test` verifies nine real
+TCP connections and 294,912 received bytes, timed/nonblocking connects, refusal,
+descriptor ownership and cloning, CLOEXEC, peek/EOF, lookup and hostname in
+eight-CPU Alix. Unsupported listener/IPv6 capabilities return errors.
+Evidence is `build/test-out/rust-std-net-qemu.log` with its network capture.
+The actual Socket2 crate now compiles with its `all` feature for the explicit
+Alix target. Its acceptance program exercises real TCP, polling deadlines,
+atomic creation flags, cloning/shared nonblocking state, native FD ownership,
+peek/EOF, gather/scatter message I/O and C/Rust address/poll/message layouts.
+It also checks negative capability and capture-error paths. Reproduce with
+`make zen-rust-socket2-qemu-test`; the serial and packet evidence are
+`build/test-out/rust-socket2-qemu.log` and `rust-socket2-network.pcap`.
+These TCP results do not establish server, local-IPC or complete browser support.
+IPv4 datagram sockets, Rust std UdpSocket and the actual Quinn UDP crate now
+have separate eight-CPU native acceptance. The shared event executor captures
+payloads/endpoints and retains descriptions through blocked-call cancellation.
+Classic addressed send/receive, connected gather/scatter, real buffer budgets
+and explicit per-packet metadata are supported. See
+[UDP transport](udp_transport.md) for scope, limits and packet evidence.

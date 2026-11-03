@@ -10,6 +10,7 @@ The network stack is split into:
 `net_interface_t` represents a NIC (or virtual interface):
 
 - Identity: `name`, `mac`, `present`, `link_up`
+- Native Ethernet MTU: `mtu` (currently 1500)
 - IPv4 config: `ipv4_addr`, `ipv4_netmask`, `ipv4_gateway`
 - TX hook: `iface->send(iface, frame, len)` set by the driver
 - Counters: rx/tx bytes/packets/errors
@@ -35,7 +36,10 @@ Drivers parse Ethernet and dispatch to protocol handlers. Example (RTL8139):
     - DNS  (53)    → `net_dns_handle_frame`
     - NTP  (123)   → `net_ntp_handle_frame`
 
-There is no generic UDP socket layer yet; UDP is used internally for DHCP/DNS/NTP.
+The native UDP transport now also has owned sockets and bounded datagram queues,
+with common port leases shared by DHCP/DNS/NTP and future application sockets.
+The userspace socket/executor and Quinn bridge remain unfinished. See
+[UDP transport](udp_transport.md) for the current kernel scope and packet proof.
 
 ## ARP + Routing (`src/net/arp.c`, `src/net/route.c`)
 
@@ -43,6 +47,11 @@ There is no generic UDP socket layer yet; UDP is used internally for DHCP/DNS/NT
 - `arp.c` maintains a neighbor cache and can:
   - Resolve next-hop MACs via ARP requests.
   - Announce the host IP→MAC mapping (`net_arp_announce`) so gateways learn/refresh the entry.
+
+Configuration updates and route snapshots now share an IRQ-safe gate, including
+transactional IPv4 address/netmask/gateway replacement. Native callers can query
+the selected interface and MTU through syscall 78 without a socket or packet.
+See [route snapshots](network_routes.md) for ABI, ownership and verification.
 
 ## TCP (`src/net/tcp.c`)
 

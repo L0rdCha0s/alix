@@ -25,6 +25,7 @@ struct vfs_node
     bool allow_mutation;
     uint32_t uid;
     uint32_t gid;
+    uint32_t permissions;
     uint64_t atime;
     uint64_t mtime;
     uint64_t ctime;
@@ -38,6 +39,8 @@ struct vfs_node
     uint64_t dirty_seq;
     uint64_t last_data_write_tick;
     spinlock_t data_lock;
+    struct vfs_mapped_page *mapped_pages;
+    struct vfs_file_mapping *mappings;
 
     uint32_t disk_id;
     bool disk_meta_dirty;
@@ -61,6 +64,7 @@ struct vfs_mount
     bool needs_full_sync;
     bool supports_times;
     size_t dirty_bytes;
+    size_t mapped_files; /* Shared page caches scanned for CPU stores by flushd. */
     size_t dirty_bytes_limit;
     uint64_t dirty_seq;
     spinlock_t dirty_lock;

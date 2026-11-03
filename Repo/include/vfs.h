@@ -31,6 +31,19 @@ typedef struct
     uint64_t atime, mtime, ctime;
 } vfs_stat_snapshot_t;
 
+typedef struct
+{
+    vfs_stat_snapshot_t metadata;
+    uint64_t device, inode, links;
+    uint32_t uid, gid, permissions;
+} vfs_stat_info_t;
+/* Protected worker, caller retains node/cwd. Identity is shared with readdir,
+ * stable across rename and independent opens, and never exposes a pointer.
+ * An unlinked but retained node has zero links. No hard links are supported. */
+int vfs_node_stat_info(vfs_node_t *node, vfs_stat_info_t *output);
+int vfs_path_stat_info(vfs_node_t *cwd, const char *path, bool follow_final,
+                        uint32_t uid, uint32_t gid, vfs_stat_info_t *output);
+
 /* Maximum path/target storage including NUL. Existing oversized disk targets
  * are preserved; snapshot/resolve rejects them instead of truncating success. */
 #define VFS_PATH_MAX 4096u
@@ -76,11 +89,23 @@ int vfs_open_data_owned(vfs_node_t *cwd, const char *path, bool create, bool tru
                         uint32_t uid, uint32_t gid, vfs_node_t **out);
 int vfs_open_data_flags_owned(vfs_node_t *cwd, const char *path, bool create, bool truncate,
                               bool exclusive, uint32_t uid, uint32_t gid, vfs_node_t **out);
+int vfs_open_data_access_owned(vfs_node_t *cwd, const char *path, bool create, bool truncate,
+                               bool exclusive, uint32_t uid, uint32_t gid, uint32_t access, vfs_node_t **out);
+int vfs_open_data_mode_owned(vfs_node_t *cwd, const char *path, bool create, bool truncate,
+                             bool exclusive, uint32_t uid, uint32_t gid, uint32_t access,
+                             uint32_t mode, vfs_node_t **out);
+/* Volatile named memory objects. The namespace and open handles own separate
+ * references; no filesystem path exposes or persists these nodes. */
+int vfs_shm_open_owned(const char *name, bool create, bool truncate, bool exclusive,
+                       uint32_t uid, uint32_t gid, uint32_t mode, uint32_t access,
+                       vfs_node_t **out);
+int vfs_shm_unlink_owned(const char *name, uint32_t uid);
 int vfs_open_legacy_handle(vfs_node_t *cwd, const char *path, bool create, bool truncate,
                             bool exclusive, vfs_node_t **out);
 int vfs_remove_path(vfs_node_t *cwd, const char *path, bool allow_directory);
 int vfs_remove_directory_path(vfs_node_t *cwd, const char *path);
 int vfs_mkdir_exclusive(vfs_node_t *cwd, const char *path, uint32_t uid, uint32_t gid);
+int vfs_mkdir_mode_exclusive(vfs_node_t *cwd, const char *path, uint32_t uid, uint32_t gid, uint32_t mode);
 /* Resize an owned regular node under its data lock; no callback execution. */
 int vfs_resize_data(vfs_node_t *file, uint64_t length);
 ssize_t vfs_realpath_snapshot(vfs_node_t *cwd, const char *path, char *buffer, size_t capacity);
@@ -132,6 +157,11 @@ vfs_node_t *vfs_first_child(vfs_node_t *dir);
 vfs_node_t *vfs_next_sibling(vfs_node_t *node);
 void vfs_node_get_owner(const vfs_node_t *node, uint32_t *uid_out, uint32_t *gid_out);
 void vfs_node_set_owner(vfs_node_t *node, uint32_t uid, uint32_t gid);
+int vfs_chown_owned(vfs_node_t *node, uint32_t caller_uid, uint32_t caller_gid,
+                     uint32_t uid, uint32_t gid);
+int vfs_chmod_owned(vfs_node_t *node, uint32_t caller_uid, uint32_t mode);
+int vfs_set_times_owned(vfs_node_t *node, uint32_t uid, uint32_t gid, bool explicit_times,
+                         uint64_t access_seconds, uint64_t modify_seconds);
 typedef bool (*vfs_enum_cb_t)(const vfs_node_t *child, void *context);
 size_t vfs_enum_children(vfs_node_t *dir, vfs_enum_cb_t callback, void *context);
 vfs_node_t *vfs_add_block_device(vfs_node_t *dir, const char *name, block_device_t *device);

@@ -23,6 +23,14 @@ static void parent_handler(int number){(void)number;}
 
 static int child(const char *mode)
 {
+    if (!strcmp(mode, "default"))
+    {
+        for (int fd = 0; fd < 256; ++fd)
+            CHECK(fd == 41 ? fcntl(fd, F_GETFD) == 0 : fcntl(fd, F_GETFD) == -1 && errno == EBADF,
+                  "default CLOEXEC retains only explicit action");
+        CHECK(write(41, "DEFAULT", 7) == 7, "default action source retained before filtering");
+        return 29;
+    }
     struct sigaction *action=calloc(1,sizeof(*action));sigset_t *mask=calloc(1,sizeof(*mask));
     CHECK(action&&mask,"child signal heap");
     CHECK(sigprocmask(SIG_SETMASK,NULL,mask)==0,"child mask query");
@@ -99,6 +107,21 @@ int main(int argc,char **argv)
     pid=-123;CHECK(posix_spawn(&pid,"/tmp/test.elf",actions,NULL,arguments,NULL)==EBADF&&pid==-123,"bad action does not publish child");
     CHECK(waitpid(-1,NULL,WNOHANG)==-1&&errno==ECHILD,"no failed-spawn child");
     CHECK(!posix_spawn_file_actions_destroy(actions)&&sigprocmask(SIG_SETMASK,oldmask,NULL)==0&&chdir(cwd)==0,"restore parent state");
+    source = open("/tmp/spawn-default", O_RDWR | O_CREAT | O_TRUNC);
+    CHECK(source >= 3 && !fcntl(source, F_SETFD, 0), "ordinary non-CLOEXEC parent source");
+    CHECK(!posix_spawn_file_actions_init(actions) && !posix_spawnattr_init(attributes) &&
+          !posix_spawnattr_setflags(attributes, POSIX_SPAWN_CLOEXEC_DEFAULT) &&
+          !posix_spawn_file_actions_adddup2(actions, source, 41), "default CLOEXEC setup");
+    arguments[1] = "default"; errno = EDOM;
+    CHECK(!posix_spawn(&pid, "/tmp/test.elf", actions, attributes, arguments, NULL) && errno == EDOM &&
+          waitpid(pid, status, 0) == pid && WEXITSTATUS(*status) == 29, "native close-default launch");
+    CHECK(fcntl(source, F_GETFD) == 0 && !lseek(source, 0, SEEK_SET) &&
+          read(source, buffer, 7) == 7 && !memcmp(buffer, "DEFAULT", 7) &&
+          fcntl(0, F_GETFD) == 0 && fcntl(1, F_GETFD) == 0 && fcntl(2, F_GETFD) == 0,
+          "close-default leaves parent snapshot untouched");
+    CHECK(!close(source) && !posix_spawn_file_actions_destroy(actions) &&
+          !posix_spawnattr_destroy(attributes), "default CLOEXEC cleanup");
+    serial_printf("POSIX_SPAWN_DEFAULT: PASS child_snapshot=1 source_before_filter=1 parent_untouched=1\n");
     free(metadata);free(oldmask);free(defaults);free(mask);free(status);free(pipes);free(cwd);free(buffer);free(environment);free(arguments);free(attributes);free(actions);
     serial_printf("POSIX_SPAWN_TEST: PASS environment_before_main=1 actions=1 cloexec_order=1 self_dup=1 PATH=1 signals=1 errors=1\n");
     return 0;

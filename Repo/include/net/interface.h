@@ -5,6 +5,7 @@
 
 #define NET_IF_NAME_MAX 8
 #define NET_MAX_INTERFACES 8
+#define NET_ETHERNET_MTU 1500u
 
 typedef struct net_interface
 {
@@ -15,6 +16,7 @@ typedef struct net_interface
     uint32_t ipv4_addr;
     uint32_t ipv4_netmask;
     uint32_t ipv4_gateway;
+    uint32_t mtu;
     bool (*send)(struct net_interface *, const uint8_t *, size_t);
     uint64_t rx_bytes;
     uint64_t tx_bytes;

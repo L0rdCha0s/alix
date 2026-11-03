@@ -10,6 +10,8 @@ for signature,replacement in (
  ('static inline void dns_irq_restore(', 'static inline void dns_irq_restore(uint64_t flags){(void)flags;}')):
  source=source.replace(function_definition(source,signature),replacement)
 header='\n'.join(line for line in (ROOT/'include/net/dns.h').read_text().splitlines() if not line.startswith('#include'))
+ports='\n'.join(line for line in (ROOT/'src/net/udp_ports.c').read_text().splitlines() if not line.startswith('#include'))
+ports=ports.replace('static spinlock_t g_udp_ports_lock;', 'static spinlock_t g_udp_ports_lock = PTHREAD_MUTEX_INITIALIZER;')
 program=r'''
 #define _POSIX_C_SOURCE 200809L
 #include <stdbool.h>
@@ -22,6 +24,7 @@ program=r'''
 #include <pthread.h>
 #include <sched.h>
 #include <time.h>
+#include <errno.h>
 #define CHECK(c) do{if(!(c)){fprintf(stderr,"DNS contract line %d: %s\n",__LINE__,#c);abort();}}while(0)
 typedef struct {char name[8];bool present,link_up;uint8_t mac[6];uint32_t ipv4_addr;} net_interface_t;
 typedef pthread_mutex_t spinlock_t;
@@ -29,6 +32,8 @@ static _Thread_local unsigned dns_locked;
 static void spinlock_init(spinlock_t *lock){CHECK(!pthread_mutex_init(lock,NULL));}
 static void spinlock_lock(spinlock_t *lock){CHECK(!dns_locked);CHECK(!pthread_mutex_lock(lock));++dns_locked;}
 static void spinlock_unlock(spinlock_t *lock){CHECK(dns_locked==1);--dns_locked;CHECK(!pthread_mutex_unlock(lock));}
+static uint64_t spinlock_lock_irqsave(spinlock_t *lock){CHECK(!pthread_mutex_lock(lock));return 0;}
+static void spinlock_unlock_irqrestore(spinlock_t *lock,uint64_t flags){CHECK(!flags);CHECK(!pthread_mutex_unlock(lock));}
 static unsigned live_allocations;
 static void *dns_malloc(size_t bytes){CHECK(!dns_locked);void *p=malloc(bytes);if(p)__atomic_add_fetch(&live_allocations,1,__ATOMIC_RELAXED);return p;}
 static void dns_free(void *p){CHECK(!dns_locked);if(p){CHECK(__atomic_fetch_sub(&live_allocations,1,__ATOMIC_RELAXED));free(p);}}
@@ -53,7 +58,7 @@ static bool net_if_send_copy(net_interface_t *iface,const uint8_t *bytes,size_t 
  CHECK(!dns_locked);transmission_t *packet=malloc(sizeof(*packet)+length);CHECK(packet);packet->next=NULL;packet->iface=iface;packet->length=length;memcpy(packet->bytes,bytes,length);
  CHECK(!pthread_mutex_lock(&tx_lock));if(tx_tail)tx_tail->next=packet;else tx_head=packet;tx_tail=packet;++transmissions;CHECK(!pthread_cond_signal(&tx_changed));CHECK(!pthread_mutex_unlock(&tx_lock));return true;
 }
-'''+header+r'''
+'''+header+ports+r'''
 #define malloc dns_malloc
 #define free dns_free
 '''+source+r'''
@@ -88,6 +93,8 @@ typedef struct {char name[64];net_dns_result_t result;bool success;pthread_t thr
 static void *lookup(void *argument){lookup_t *job=argument;job->success=net_dns_resolve(job->name,NET_DNS_TYPE_A,NULL,&job->result);return NULL;}
 int main(void){
  net_dns_init();uint32_t address=0x0a000202;net_dns_set_servers(&address,1);
+ void *application_owner=calloc(1,1);uint16_t application_port=0;CHECK(application_owner);
+ CHECK(!net_udp_port_claim(application_owner,0,0xc000,&application_port)&&application_port==0xc000);
  uint64_t flags=dns_lock();g_next_port=0xffed;g_next_id=0xfffd;dns_unlock(flags);
  pthread_t *responder=malloc(sizeof(*responder));lookup_t *jobs=calloc(8,sizeof(*jobs));CHECK(responder&&jobs);CHECK(!pthread_create(responder,NULL,server,NULL));
  for(unsigned n=0;n<8;++n){snprintf(jobs[n].name,sizeof(jobs[n].name),"native%u.test",n);CHECK(!pthread_create(&jobs[n].thread,NULL,lookup,&jobs[n]));}
@@ -104,6 +111,8 @@ int main(void){
  CHECK(!pthread_mutex_lock(&tx_lock));stopping=true;CHECK(!pthread_cond_signal(&tx_changed));CHECK(!pthread_mutex_unlock(&tx_lock));CHECK(!pthread_join(*responder,NULL));
  CHECK(!tx_head&&!tx_tail&&!live_allocations);
  for(unsigned n=0;n<NET_DNS_MAX_PENDING;++n)CHECK(!g_pending[n].active&&!g_pending[n].packet_head&&!g_pending[n].packet_tail&&!g_pending[n].packet_count);
+ for(unsigned n=0;n<UDP_PORT_LEASES;++n)CHECK(!g_udp_ports[n].owner||g_udp_ports[n].owner==application_owner);
+ net_udp_port_release(application_owner);free(application_owner);
  free(jobs);free(responder);puts("DNS_OWNED: PASS workers=8 async_rx=1 addresses=2 bounds=1 duplicate_cleanup=1 cache=1 wrap=1");return 0;
 }
 '''

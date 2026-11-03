@@ -15,7 +15,7 @@ typedef struct
 } net_ntp_result_t;
 
 void net_ntp_init(void);
-void net_ntp_set_pending(uint32_t originate_seconds,
+bool net_ntp_set_pending(uint32_t originate_seconds,
                          uint32_t originate_fraction,
                          uint16_t local_port,
                          uint32_t server_ip);

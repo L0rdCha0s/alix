@@ -46,6 +46,11 @@ Resolution supports:
 
 ## Protected user I/O
 
+Regular-file mappings use stable shared physical cache pages, with VFS I/O
+coherence and protected storage-worker synchronization. See
+[file mappings](file_mappings.md) for ownership and the active-mapping shrink
+restriction.
+
 Process-owned regular files support `O_SYNC` writes through the protected
 storage worker. Each successful nonempty write waits for data/metadata
 commit and a device cache flush. See [synchronous files](synchronous_files.md)
@@ -163,6 +168,47 @@ For QEMU storage timing investigations, compile `src/drivers/ahci.c` with
 byte, scheduler-yield, and tick counts in one `[ahci] perf` line. Compare
 successive lines to measure the work attributable to a download. Enable
 `/proc/sys/vfs/log_enable` for per-file sync durations.
+
+## File identity and ownership
+
+The full metadata snapshot reports a numeric filesystem/device identity,
+inode, link count and uid/gid along with size/type/timestamps. Inodes share the
+tree-locked runtime identity used by readdir. Independent opens and aliases
+agree; rename retains identity, unlink reports zero links while a descriptor
+still owns the node, and recreation receives a different identity. Mounted
+filesystems receive distinct device identities. These numbers are stable for
+the live VFS object, rather than persistent on-disk inode numbers across boots.
+Directories report two links plus their immediate child directories; hard links
+remain unsupported. Anonymous descriptions report zero filesystem identity.
+
+`vfs_chown_owned` applies captured caller credentials under tree/data locks.
+Root may change owner/group. Other callers must own the node, retain its owner
+and choose either its existing group or their primary group. UINT32_MAX leaves
+that field unchanged. Successful updates mark metadata/ctime dirty. Immutable
+nodes, callbacks and old version-2 mounts without ownership storage fail.
+Existing version-3/4 AlixFS records persist ownership without a format change.
+
+`make zen-file-identity-qemu-test` verifies 512 snapshots on eight CPUs, both
+stat ABIs with adjacent canaries, readdir/rename/unlink/recreation, directory
+links, mount identities and checked output errors. An independent boot reads
+back a synced file with owner 12345 and group 23456. Host ASan/UBSan and TSan
+contracts cover owner policy and 4,000 coherent snapshots during 4,000 updates.
+Basic mode bits and fchmod now use the same captured-credential/storage path.
+Owner or root may change `0777`; file-type bits are ignored and unsupported
+set-ID/sticky modes return EOPNOTSUPP. Existing descriptions retain their granted
+read/write directions. New owned opens check the final file's owner/group/other
+bits before truncation; creation checks its parent's write/search bits. Full
+ancestor-search policy, per-open creation modes, umask and ACLs remain work.
+File creation currently retains the previous `0666` default. Native process-owned
+byte-range locks now have [separate acceptance](flock.md#process-owned-byte-range-locks).
+
+Modes persist in AlixFS's optional versioned node trailer. The independent
+readback test now also verifies `0640`; host contracts check versions 2/3/4,
+unknown-extension rejection, unchanged file data and retry after the mode write
+fails. Mode/owner snapshot contention tests cover 4,000 updates of each kind.
+The protected utimes path now also persists explicit access/modify seconds and
+checks captured caller authority. The independent remount verifies those times
+without changing file content or mode.
 
 ## devfs and procfs
 

@@ -23,6 +23,7 @@ def main() -> int:
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <errno.h>
 #include <sys/types.h>
 #define CHECK(c, msg) do { if (!(c)) { fprintf(stderr, "%s\n", msg); exit(1); } } while (0)
 typedef struct { unsigned locked; } spinlock_t;
@@ -52,6 +53,23 @@ bool block_write(block_device_t *dev, uint64_t lba, uint32_t count, const void *
 }
 bool block_flush(block_device_t *dev) { (void)dev; flushes++; return !fail_flush; }
 '''
+    program += r"""
+typedef uintptr_t paddr_t;
+typedef struct {bool active;} fd_description_t;
+typedef struct vfs_file_mapping vfs_file_mapping_t;
+static unsigned physical_live;
+static int fail_physical=-1;
+static bool fd_description_referenced(const fd_description_t *d) {return d->active;}
+static bool user_memory_alloc_page(paddr_t *out) {
+    if(fail_physical==0)return false;
+    if(fail_physical>0)--fail_physical;
+    void *p=malloc(4096);if(!p)return false;*out=(uintptr_t)p;++physical_live;return true;
+}
+static void user_memory_free_page(paddr_t p) {CHECK(physical_live,"physical page ownership");--physical_live;free((void *)p);}
+static void *phys_to_virt(paddr_t p) {return (void *)p;}
+static uint64_t timekeeping_now_seconds(void) {return 123456;}
+"""
+    program += without_includes("src/kernel/vfs_mapping.c")
     program += without_includes("src/kernel/alixfs.c")
     vfs = (ROOT / "src/kernel/vfs.c").read_text()
     program += "\n".join(re.findall(r"^#define VFS_[^\n]+", vfs, flags=re.M)) + "\n"
@@ -64,10 +82,11 @@ static void vfs_tree_lock_acquire(void) {}
 static void vfs_tree_lock_release(void) {}
 static bool vfs_sync_lock_acquire(vfs_mount_t *m) { CHECK(!m->sync_lock.locked, "nested mount lock"); m->sync_lock.locked = true; return true; }
 static void vfs_sync_lock_release(vfs_mount_t *m) { CHECK(m->sync_lock.locked, "mount lock not owned"); m->sync_lock.locked = false; }
-static void vfs_lock_node_data(vfs_node_t *n) { spinlock_lock(&n->data_lock); }
+static void vfs_lock_node_data(vfs_node_t *n) { spinlock_lock(&n->data_lock); vfs_mapping_pull_locked(n); }
 static void vfs_unlock_node_data(vfs_node_t *n) { spinlock_unlock(&n->data_lock); }
 void vfs_node_retain(vfs_node_t *n) { n->refcount++; }
 void vfs_node_release(vfs_node_t *n) { CHECK(n->refcount > 1, "lost tree reference"); n->refcount--; }
+void vfs_node_release_owned(vfs_node_t *n) {vfs_node_release(n);}
 static void vfs_mark_mount_dirty(vfs_mount_t *m) { m->dirty = true; m->dirty_seq++; }
 static bool vfs_logs_enabled(void) { return false; }
 static void serial_printf(const char *fmt, ...) { (void)fmt; }
@@ -77,6 +96,7 @@ static void vfs_log_sync_result(const char *name, const char *status, uint64_t s
     for signature in ("static bool vfs_mount_flush_tree", "static bool vfs_mount_flush_single", "static bool vfs_mount_writeback"):
         program += function_definition(vfs, signature) + "\n"
     program += r'''
+bool vfs_flush_node(vfs_node_t *n) {return vfs_mount_flush_single(n);}
 static void reset_counts(void) { reads = writes = flushes = fail_write = 0; written = 0; fail_flush = false; }
 static vfs_node_t *add_node(vfs_mount_t *mount, vfs_node_t *parent, const char *name, vfs_node_type_t type, size_t bytes)
 {
@@ -110,7 +130,7 @@ static void check_remount(block_device_t *dev, vfs_node_t *expected)
     vfs_node_t *actual = child(dir, "large.bin"); CHECK(actual, "new file was not linked on remount");
     CHECK(actual->size == expected->size, "persisted length changed");
     CHECK(!memcmp(actual->data, expected->data, expected->size), "persisted file bytes changed");
-    CHECK(actual->atime == expected->atime && actual->uid == expected->uid, "metadata update lost");
+    CHECK(actual->atime == expected->atime && actual->uid == expected->uid && actual->permissions == expected->permissions, "metadata update lost");
     free_tree(root); alixfs_mount_destroy(fs);
 }
 int main(void)
@@ -131,7 +151,7 @@ int main(void)
 
     reset_counts(); node->disk_meta_dirty = true; node->atime++; node->uid = 123;
     CHECK(vfs_mount_flush_single(node), "metadata-only sync failed");
-    CHECK(reads == 1 && writes == 1 && written == 512, "metadata-only update rewrote file data");
+    CHECK(reads == 2 && writes == 2 && written == 1024, "metadata-only prefix/mode update rewrote file data");
     CHECK(flushes == 1, "metadata sync omitted cache flush");
     check_remount(&dev, node);
 
@@ -172,6 +192,32 @@ int main(void)
     CHECK(mount.dirty && mount.needs_full_sync, "flush failure was not queued for recovery");
     reset_counts(); CHECK(vfs_mount_writeback(&mount, true), "recovery sync failed");
     CHECK(!mount.needs_full_sync, "recovery state was not cleared"); check_remount(&dev, node);
+    /* Production shared-page cache and writeback: independent alias identity,
+     * private copies, partial allocation rollback and device error propagation. */
+    fd_description_t owner={true};vfs_file_mapping_t *mapping=NULL,*alias=NULL,*copy=NULL;
+    CHECK(!vfs_mapping_create(node,0,8192,true,&owner,&mapping),"shared mapping creation");
+    CHECK(!vfs_mapping_create(node,4096,4096,true,&owner,&alias),"shared alias creation");
+    CHECK(vfs_mapping_page(mapping,1)==vfs_mapping_page(alias,0),"aliases do not share physical page");
+    CHECK(!vfs_mapping_create(node,0,4096,false,&owner,&copy),"private snapshot creation");
+    unsigned char original=node->data[111];
+    ((unsigned char *)phys_to_virt(vfs_mapping_page(copy,0)))[111]^=0x77;
+    CHECK(!vfs_mapping_sync(copy) && node->data[111]==(char)original,"private copy reached file");
+    ((unsigned char *)phys_to_virt(vfs_mapping_page(mapping,0)))[111]^=0x2a;
+    reset_counts();fail_write=1;
+    CHECK(vfs_mapping_sync(mapping)==-EIO && node->disk_data_dirty,"mapped write failure lost dirty state");
+    reset_counts();fail_flush=true;
+    CHECK(vfs_mapping_sync(mapping)==-EIO && mount.needs_full_sync,"mapped flush failure ignored");
+    reset_counts();CHECK(!vfs_mapping_sync(mapping) && flushes==1,"mapped synchronous retry failed");
+    CHECK(node->data[111]==(char)(original^0x2a),"shared store missing from file buffer");
+    check_remount(&dev,node);
+    unsigned live=physical_live;fail_physical=1;vfs_file_mapping_t *failed=NULL;
+    CHECK(vfs_mapping_create(node,8192,8192,false,&owner,&failed)==-ENOMEM && !failed && physical_live==live,"private allocation rollback leaked pages");
+    fail_physical=-1;
+    vfs_mapping_release(alias);vfs_mapping_release(mapping);
+    CHECK(mount.mapped_files==1,"private snapshot prematurely dropped shared cache");
+    /* The private mapping owns no shared pages, but keeps the node registry alive. */
+    vfs_mapping_release(copy);
+    CHECK(!physical_live && !mount.mapped_files && node->refcount==1,"mapping retirement leaked ownership");
     free_tree(root); alixfs_mount_destroy(fs); free(disk);
     puts("filesystem writeback test passed");
     return 0;

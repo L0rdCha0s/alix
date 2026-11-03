@@ -23,6 +23,7 @@ OBJDIR      := build
 GENERATED_DIR := $(OBJDIR)/generated
 DL_SCRIPT_SRC := $(GENERATED_DIR)/dl_script_data.c
 DL_SCRIPT_OBJ := $(GENERATED_DIR)/dl_script_data.o
+JS_DEMO := $(OBJDIR)/wasm-demo.js
 
 BASE_CFLAGS := -O4 -std=c11 -ffreestanding -fno-stack-protector -fno-builtin -fno-pic \
                -m64 -mno-red-zone -Wall -Wextra -g -I$(INCLUDE_DIR) -I$(ATK_DIR) \
@@ -67,10 +68,12 @@ C_SOURCES += $(KERNEL_DIR)/io/vfs.c $(KERNEL_DIR)/io/vfs_service.c
 C_SOURCES += $(KERNEL_DIR)/io/directory_service.c
 C_SOURCES += $(KERNEL_DIR)/io/event_service.c
 C_SOURCES += $(KERNEL_DIR)/io/tcp.c
+C_SOURCES += $(KERNEL_DIR)/io/udp.c
 C_SOURCES += $(KERNEL_DIR)/io/pipe.c
 C_SOURCES += $(KERNEL_DIR)/io/audio.c
 C_SOURCES += $(KERNEL_DIR)/io/poll.c
 C_SOURCES += $(KERNEL_DIR)/io/flock.c
+C_SOURCES += $(KERNEL_DIR)/io/record_lock.c
 C_SOURCES += $(KERNEL_DIR)/io/stream.c
 C_SOURCES += $(KERNEL_DIR)/io/user_file.c
 C_SOURCES += $(KERNEL_DIR)/io/process.c
@@ -105,6 +108,12 @@ C_OBJECTS += $(OBJDIR)/tests/io_service_boot_test.o
 endif
 
 IO_TCP_SELFTEST ?= 0
+UDP_SELFTEST ?= 0
+UDP_TEST_PORT ?= 0
+UDP_DNS_PORT ?= 0
+ifeq ($(UDP_SELFTEST),1)
+C_OBJECTS += $(OBJDIR)/tests/udp_owned_boot_test.o
+endif
 ifeq ($(IO_TCP_SELFTEST),1)
 C_OBJECTS += $(OBJDIR)/tests/tcp_owned_boot_test.o
 C_OBJECTS += $(OBJDIR)/tests/io_event_tcp_boot_test.o
@@ -143,7 +152,9 @@ USER_COMMON_SOURCES := \
 	$(USER_DIR)/lib/ioctl.c \
 	$(USER_DIR)/lib/utsname.c \
 	$(USER_DIR)/lib/process_posix.c \
+	$(USER_DIR)/lib/uio.c \
 	$(USER_DIR)/lib/resource.c \
+	$(USER_DIR)/lib/dlfcn.c \
 	$(USER_DIR)/lib/process_spawn.c \
 	$(USER_DIR)/lib/spawn.c \
 	$(USER_DIR)/lib/filesystem_posix.c \
@@ -355,7 +366,7 @@ TCG_CPU_TYPE ?= qemu64,+rdrand
 SMP_CORES ?= 8
 QEMU_SMP_OPTS := -smp $(SMP_CORES),sockets=1,cores=$(SMP_CORES),threads=1
 
-all: boot-volume $(USER_ELFS) $(USER_BINS) $(HTML_VIEW_TEST_BIN)
+all: boot-volume $(USER_ELFS) $(USER_BINS) $(HTML_VIEW_TEST_BIN) $(JS_DEMO)
 
 .PHONY: boot-volume
 boot-volume: $(BOOT_KERNEL) $(BOOT_EFI)
@@ -416,6 +427,11 @@ $(OBJDIR)/tests/scheduler_wake_boot_test.o: tests/scheduler_wake_boot_test.c
 
 TCP_TEST_PORT ?= 0
 $(OBJDIR)/tests/tcp_owned_boot_test.o: KERNEL_CFLAGS += -DTCP_OWNED_TEST_PORT=$(TCP_TEST_PORT)
+$(OBJDIR)/tests/udp_owned_boot_test.o: KERNEL_CFLAGS += -DUDP_OWNED_TEST_PORT=$(UDP_TEST_PORT) -DUDP_OWNED_DNS_PORT=$(UDP_DNS_PORT)
+
+$(OBJDIR)/tests/udp_owned_boot_test.o: tests/udp_owned_boot_test.c
+	@mkdir -p $(@D)
+	$(CC) $(KERNEL_CFLAGS) -c -o $@ $<
 $(OBJDIR)/tests/tcp_owned_boot_test.o: tests/tcp_owned_boot_test.c
 	@mkdir -p $(@D)
 	$(CC) $(KERNEL_CFLAGS) -c -o $@ $<
@@ -592,7 +608,12 @@ $(USER_ELF_ARCHIVE): $(USER_RUNTIME_ELFS)
 	zip -j -q -9 -FS $@.tmp.zip $(USER_RUNTIME_ELFS)
 	mv -f $@.tmp.zip $@
 
-$(DL_SCRIPT_SRC): $(USER_ELF_ARCHIVE) Makefile
+$(JS_DEMO): demos/wasm-demo.js
+	@mkdir -p $(dir $@)
+	cp $< $@.tmp
+	mv -f $@.tmp $@
+
+$(DL_SCRIPT_SRC): $(USER_ELF_ARCHIVE) $(JS_DEMO) Makefile
 	@mkdir -p $(GENERATED_DIR)
 	@{ \
 		echo '#include "types.h"'; \
@@ -604,6 +625,7 @@ $(DL_SCRIPT_SRC): $(USER_ELF_ARCHIVE) Makefile
 		printf '    "%s\\n"\n' 'wget gateway:8000/build/user/runtime/unzip.elf /tmp/dl-unzip.elf'; \
 		printf '    "%s\\n"\n' 'wget gateway:8000/build/user/user-elfs.zip /tmp/user-elfs.zip'; \
 		printf '    "%s\\n"\n' '/tmp/dl-unzip.elf /tmp/user-elfs.zip /root/usr/bin'; \
+		printf '    "%s\\n"\n' 'wget gateway:8000/build/wasm-demo.js /usr/bin/wasm-demo.js'; \
 		printf '    "%s\\n"\n' 'rm /tmp/dl-unzip.elf'; \
 		printf '    "%s\\n"\n' 'rm /tmp/user-elfs.zip'; \
 		echo ';'; \

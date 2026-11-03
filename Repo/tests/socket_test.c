@@ -93,7 +93,7 @@ static void *worker(void *context)
           fcntl(job->alias, F_GETFL) == (int)(O_RDWR | (flags ? O_NONBLOCK : 0)));
     CHECK(recv(job->descriptor, job->bytes, 1, MSG_OOB) == -1 && errno == EOPNOTSUPP);
     CHECK(send(job->descriptor, NULL, 1, MSG_NOSIGNAL) == -1 && errno == EFAULT);
-    CHECK(send(job->descriptor, "G", 1, MSG_DONTWAIT | MSG_NOSIGNAL) == 1);
+    CHECK(sendto(job->descriptor, "G", 1, MSG_DONTWAIT | MSG_NOSIGNAL,NULL,0) == 1);
     job->entry.events = POLLIN;
     CHECK(poll(&job->entry, 1, 5000) == 1 && (job->entry.revents & POLLIN));
     CHECK(!ioctl(job->descriptor,FIONREAD,&job->available_before) && job->available_before>=32 && job->available_before<=16384);
@@ -103,7 +103,7 @@ static void *worker(void *context)
     CHECK(recv(job->alias, job->second, sizeof(job->second), MSG_PEEK | MSG_DONTWAIT) == sizeof(job->second) &&
           !memcmp(job->first, job->second, sizeof(job->first)));
     CHECK(!ioctl(job->alias,FIONREAD,&job->available_after) && job->available_after>=job->available_before && job->available_after<=16384);
-    CHECK(recv(job->alias, job->bytes, sizeof(job->first), MSG_DONTWAIT) == sizeof(job->first) &&
+    CHECK(recvfrom(job->alias, job->bytes, sizeof(job->first), MSG_DONTWAIT,NULL,NULL) == sizeof(job->first) &&
           !memcmp(job->first, job->bytes, sizeof(job->first)));
     size_t total = sizeof(job->first);
     while (total < sizeof(job->bytes))
@@ -201,6 +201,16 @@ int main(int argc, char **argv)
     if (socket(AF_INET6, SOCK_STREAM, 0) != -1 || errno != EAFNOSUPPORT ||
         socket(AF_INET, SOCK_STREAM, IPPROTO_UDP) != -1 || errno != EPROTONOSUPPORT ||
         socket(AF_INET, SOCK_STREAM | 0x40000000, 0) != -1 || errno != EINVAL) return 1;
+    int unavailable=socket(AF_INET,SOCK_STREAM,0);
+    if(unavailable<0 || bind(unavailable,NULL,0)!=-1 || errno!=EOPNOTSUPP ||
+        listen(unavailable,1)!=-1 || errno!=EOPNOTSUPP || accept(unavailable,NULL,NULL)!=-1 || errno!=EOPNOTSUPP ||
+        accept4(unavailable,NULL,NULL,0x40000000)!=-1 || errno!=EINVAL ||
+        shutdown(unavailable,SHUT_RDWR)!=-1 || errno!=EOPNOTSUPP ||
+        bind(-1,NULL,0)!=-1 || errno!=EBADF || close(unavailable))return 1;
+    int *pair=calloc(2,sizeof(*pair));if(!pair)return 1;pair[0]=-17;pair[1]=-19;
+    if(socketpair(AF_UNIX,SOCK_STREAM,0,pair)!=-1 || errno!=EOPNOTSUPP || pair[0]!=-17 || pair[1]!=-19)return 1;
+    free(pair);
+    serial_printf("SOCKET_ENTRYPOINTS: PASS unsupported_errors=1 no_output=1 connected_forwarding=1\n");
     for (unsigned index = 0; index < 8; ++index)
     {
         job_t *job = &jobs[index]; job->index = index; job->descriptor = job->alias = -1;

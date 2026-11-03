@@ -1,6 +1,7 @@
 #include "usyscall.h"
 #include "libc.h"
 #include "errno.h"
+#include "alix_network.h"
 #ifdef ALIX_OWNED_FDS
 static int64_t owned_file_result(int64_t result)
 {
@@ -127,9 +128,39 @@ int sys_open(const char *path, uint64_t flags)
 #endif
 }
 
+int sys_open_mode(const char *path, uint64_t flags, uint32_t mode)
+{
+#ifdef ALIX_OWNED_FDS
+    return (int)owned_file_result(sys_file_io(SYSCALL_FILE_OPEN_MODE, (uintptr_t)path, flags, mode, 0));
+#else
+    (void)mode;
+    return sys_open(path, flags);
+#endif
+}
+
 int64_t sys_file_io(uint32_t operation, uint64_t first, uint64_t second, uint64_t third, uint64_t fourth)
 {
     return syscall5(SYSCALL_FILE_IO, operation, (long)first, (long)second, (long)third, (long)fourth);
+}
+
+int64_t sys_shm_open(const char *name, uint32_t flags, uint32_t mode)
+{
+#ifdef ALIX_OWNED_FDS
+    return sys_file_io(SYSCALL_FILE_SHM_OPEN, (uintptr_t)name, flags, mode, 0);
+#else
+    (void)name; (void)flags; (void)mode;
+    return -ENOTSUP;
+#endif
+}
+
+int sys_shm_unlink(const char *name)
+{
+#ifdef ALIX_OWNED_FDS
+    return (int)sys_file_io(SYSCALL_FILE_SHM_UNLINK, (uintptr_t)name, 0, 0, 0);
+#else
+    (void)name;
+    return -ENOTSUP;
+#endif
 }
 
 int64_t sys_directory(uint32_t operation, int handle, void *argument, size_t bytes)
@@ -393,9 +424,21 @@ uint64_t sys_process_uptime_ns(void)
     return (uint64_t)syscall0(SYSCALL_PROCESS_UPTIME_NS);
 }
 
+int alix_net_route_ipv4(uint32_t destination, alix_net_route_info_t *info)
+{
+    long result = syscall3(SYSCALL_NET_ROUTE, destination, (long)info, sizeof(*info));
+    if (result < 0) { errno = (int)-result; return -1; }
+    return (int)result;
+}
+
 int sys_resource_usage(int which, syscall_resource_usage_t *output, size_t bytes)
 {
     return (int)syscall3(SYSCALL_RESOURCE_USAGE, which, (long)output, (long)bytes);
+}
+
+int sys_cpu_clock(int which, syscall_cpu_clock_t *output)
+{
+    return (int)syscall3(SYSCALL_RESOURCE_USAGE, which, (long)output, sizeof(*output));
 }
 
 uint64_t sys_monotonic_millis(void)
@@ -431,6 +474,26 @@ int sys_futex_wake(volatile uint32_t *address, uint32_t max_waiters)
 int64_t sys_vm_map(uintptr_t hint, size_t length, uint32_t protection, uint32_t flags)
 {
     return (int64_t)syscall4(SYSCALL_VM_MAP, (long)hint, (long)length, protection, flags);
+}
+int64_t sys_vm_file_map(uintptr_t hint,size_t length,uint32_t protection,uint32_t flags,int fd,int64_t offset)
+{
+#ifdef ALIX_OWNED_FDS
+    return (int64_t)syscall6(SYSCALL_VM_FILE_MAP,(long)hint,(long)length,protection,flags,fd,(long)offset);
+#else
+    (void)hint;(void)length;(void)protection;(void)flags;(void)fd;(void)offset;
+    return -ENOTSUP;
+#endif
+}
+int sys_vm_sync(uintptr_t address,size_t length,uint32_t flags)
+{ return (int)syscall3(SYSCALL_VM_SYNC,(long)address,(long)length,flags); }
+ssize_t sys_file_writev(int fd,const void *vectors,int count)
+{
+#ifdef ALIX_OWNED_FDS
+    return (ssize_t)sys_file_io(SYSCALL_FILE_WRITEV,(uint64_t)(int64_t)fd,(uintptr_t)vectors,(uint64_t)(int64_t)count,0);
+#else
+    (void)fd;(void)vectors;(void)count;
+    return -ENOTSUP;
+#endif
 }
 
 int sys_vm_protect(uintptr_t address, size_t length, uint32_t protection)
@@ -508,6 +571,8 @@ int sys_sigaction(int number,const alix_sigaction_t *action,alix_sigaction_t *ol
 { return (int)syscall4(SYSCALL_SIGACTION,number,(long)action,(long)old,(long)size); }
 int sys_sigprocmask(int how,const alix_sigset_t *set,alix_sigset_t *old)
 { return (int)syscall3(SYSCALL_SIGPROCMASK,how,(long)set,(long)old); }
+int sys_sigwait(const alix_sigset_t *set,int *number,size_t size,uint64_t flags)
+{ return (int)syscall4(SYSCALL_SIGWAIT,(long)set,(long)number,(long)size,(long)flags); }
 int sys_sigaltstack(const alix_stack_t *stack,alix_stack_t *old,size_t size)
 { return (int)syscall3(SYSCALL_SIGALTSTACK,(long)stack,(long)old,(long)size); }
 int sys_sigreturn(uintptr_t frame) { return (int)syscall1(SYSCALL_SIGRETURN,(long)frame); }

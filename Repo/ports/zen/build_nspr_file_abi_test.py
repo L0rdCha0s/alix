@@ -22,6 +22,8 @@ def main():
     start = io_source.index('#if defined(ALIX) || defined(SOLARIS) || defined(LINUX) || defined(__GNU__) ||')
     functions.append(io_source[start:io_source.index('/*\n * Put a Unix file descriptor', start)])
     functions.append(function_definition(io_source, 'static void\npt_MakeFdNonblock('))
+    for name in ('void*\n_MD_MemMap(', 'PRStatus\n_MD_MemUnmap(', 'PRStatus\n_MD_SyncMemMap('):
+        functions.append(function_definition(source, name))
     out = ROOT / "build/ports/zen/nspr-file-abi"
     out.mkdir(parents=True, exist_ok=True)
     probe = out / "native.c"
@@ -29,6 +31,7 @@ def main():
 #include "fcntl.h"
 #include "stdio.h"
 #include "serial.h"
+#include "sys/mman.h"
 #include "obsolete/probslet.h"
 static PRErrorCode captured_error;
 static PRInt32 captured_os_error;
@@ -48,11 +51,19 @@ _Static_assert(__builtin_types_compatible_p(_MD_Open64,__typeof__(&open)), "nati
     io_argv = list(io_entry.get('arguments') or shlex.split(io_entry['command']))
     io_argv[io_argv.index('-o') + 1] = str(out / "ptio.o")
     subprocess.run(io_argv, cwd=io_entry['directory'], check=True)
+    errors_entry = next(e for e in commands if e['file'].endswith('/nsprpub/pr/src/md/unix/unix_errors.c'))
+    errors_argv = list(errors_entry.get('arguments') or shlex.split(errors_entry['command']))
+    errors_argv[errors_argv.index('-o') + 1] = str(out / 'unix_errors.o')
+    subprocess.run(errors_argv, cwd=errors_entry['directory'], check=True)
+    # Keep this component archive out of the executable's dynamic exports so
+    # section GC retains the tested APIs without rooting every NSPR subsystem.
+    archive = out / 'libnspr-fixture.a'
+    subprocess.run(['x86_64-elf-ar', 'rcs', str(archive), str(out / 'ptio.o'), str(out / 'unix_errors.o')], check=True)
     output = ROOT / "build/user/nspr_file_abi_test.elf"
-    subprocess.run([str(ROOT / "ports/zen/toolchain/alix-clang"), str(out / "native.o"), str(out / "ptio.o"),
-                    '-Wl,--gc-sections', '-o', str(output)], cwd=ROOT, check=True)
+    subprocess.run([str(ROOT / "ports/zen/toolchain/alix-clang"), str(out / "native.o"), str(archive),
+                    '-Wl,--gc-sections', '-Wl,--exclude-libs,libnspr-fixture.a', '-o', str(output)], cwd=ROOT, check=True)
     print('Native NSPR metadata/open ABI consumer compiled:', output)
-    print('Scope: actual extracted functions/configured headers; full NSPR remains blocked by shared-file mappings.')
+    print('Scope: actual extracted file/map helpers and configured headers; full NSPR linking/startup remains unverified.')
 
 if __name__ == "__main__":
     main()

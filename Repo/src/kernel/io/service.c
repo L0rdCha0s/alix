@@ -71,7 +71,8 @@ static void io_cleanup_entry(void *context)
     {
         /* No scheduler, availability or request lock surrounds destructors.
          * This worker remains available even when every storage worker blocks. */
-        (void)io_queue_drain(service->queue, 64);
+        size_t drained = io_queue_drain(service->queue, 64);
+        if (drained) process_io_notify_cleanup();
         io_queue_status_t status;
         if (io_queue_snapshot(service->queue, &status) != 0)
             fatal("I/O cleanup lost its queue");

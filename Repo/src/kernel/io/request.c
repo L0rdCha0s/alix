@@ -33,6 +33,7 @@ struct io_queue
     io_request_t *all, *head, *tail, *cleanup_head, *cleanup_tail;
 };
 
+
 static void io_enqueue_cleanup_locked(io_request_t *request)
 {
     if (request->owners != 0) return;

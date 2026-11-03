@@ -30,7 +30,14 @@ typedef struct
     child_action_t actions[CHILD_ARGUMENTS];
     char data[];
 } child_launch_work_t;
-typedef struct { int64_t pid; uint32_t flags, status; } child_wait_work_t;
+#define CHILD_WAIT_INFO 2u
+#define CHILD_WAIT_PEEK 4u
+typedef struct
+{
+    int64_t pid;
+    uint32_t flags, status;
+    alix_siginfo_t info;
+} child_wait_work_t;
 
 static io_service_t *g_launch_service;
 static io_event_service_t *g_wait_service;
@@ -174,8 +181,9 @@ static int child_apply_actions(child_record_t *record, child_launch_work_t *work
             error = fd_table_close(record->launch.files, action->fd);
             if (error == -EBADF) error = 0;
             fd_description_t *description = NULL;
-            if (!error) error = io_vfs_open_owned(fd_description_context(record->launch.cwd), work->data + action->path_offset,
-                                                   action->flags & ~SYSCALL_OPEN_CLOEXEC, record->launch.uid, record->launch.gid,
+            if (!error) error = io_vfs_open_mode_owned(fd_description_context(record->launch.cwd), work->data + action->path_offset,
+                                                   action->flags & ~SYSCALL_OPEN_CLOEXEC, action->mode & ~record->launch.creation_mask,
+                                                   record->launch.uid, record->launch.gid,
                                                    process_fd_retirement_queue(), &description);
             if (!error)
             {
@@ -341,6 +349,14 @@ static bool child_wait_handler(io_request_t *request, io_service_result_t *resul
         if (__atomic_load_n(&record->reaped, __ATOMIC_ACQUIRE))
         { child_claim_release(claim); fd_description_put(lease); continue; }
         work->status = status;
+        memset(&work->info, 0, sizeof(work->info));
+        work->info.si_signo = ALIX_SIGCHLD;
+        work->info.si_pid = (int32_t)record->watch.pid;
+        work->info.si_uid = record->launch.uid;
+        work->info.si_code = !(status & 0x7f) ? ALIX_CLD_EXITED :
+                            (status & 0x80) ? ALIX_CLD_DUMPED : ALIX_CLD_KILLED;
+        work->info.si_status = !(status & 0x7f) ? (int32_t)((status >> 8) & 0xff) :
+                                                (int32_t)(status & 0x7f);
         result->result = (int64_t)record->watch.pid;
         result->description_owned = lease;
         return true;
@@ -410,6 +426,25 @@ static int child_wait_commit(fd_description_t *lease, fd_table_t *table, void *o
     return error;
 }
 
+static int child_wait_commit_info(fd_description_t *lease, fd_table_t *table, void *output,
+                                  const child_wait_work_t *work)
+{
+    if (!lease || fd_description_ops(lease)->close != child_claim_close) return -EINVAL;
+    child_claim_t *claim = fd_description_context(lease);
+    int error = !user_copy_to_user(output, &work->info, sizeof(work->info)) ? -EFAULT : 0;
+    if (!error && !(work->flags & CHILD_WAIT_PEEK))
+    {
+        error = fd_table_close_if(table, claim->slot, claim->record);
+        if (!error)
+        {
+            child_record_t *record = fd_description_context(claim->record);
+            __atomic_store_n(&record->reaped, true, __ATOMIC_RELEASE);
+        }
+    }
+    child_claim_release(claim);
+    return error;
+}
+
 static int64_t child_finish(bool launching, void *output)
 {
     io_request_status_t status;
@@ -436,10 +471,19 @@ static int64_t child_finish(bool launching, void *output)
         else if (!error)
         {
             child_wait_work_t *work = io_request_buffer(request);
-            error = child_wait_commit(result, child_current_table(), output, work->status);
+            error = work->flags & CHILD_WAIT_INFO ?
+                    child_wait_commit_info(result, child_current_table(), output, work) :
+                    child_wait_commit(result, child_current_table(), output, work->status);
         }
         fd_description_put(result);
         if (error) value = error;
+    }
+    if (!error && !launching && !value)
+    {
+        child_wait_work_t *work = io_request_buffer(request);
+        if ((work->flags & CHILD_WAIT_INFO) &&
+            !user_copy_to_user(output, &work->info, sizeof(work->info)))
+        { error = -EFAULT; value = error; }
     }
     if (request && launching)
     {
@@ -521,9 +565,16 @@ static int64_t child_spawn(const char *path, uintptr_t argv, const syscall_spawn
     {
         record->launch.cwd = process_acquire_cwd_owner(current_process_local(), &record->launch.uid, &record->launch.gid);
         record->launch.parent_pid = current_process_local()->pid;
+        record->launch.creation_mask = __atomic_load_n(&current_process_local()->creation_mask, __ATOMIC_ACQUIRE);
         error = record->launch.cwd ? fd_table_clone_deferred(process_current_fd_table(), false, &record->launch.files) : -ENOMEM;
         if (!error && specification)
         {
+            if (specification->flags & SYSCALL_SPAWN_CLOEXEC_DEFAULT)
+                for (size_t index = 0; index < fd_table_capacity(record->launch.files); ++index)
+                {
+                    int marked = fd_table_set_flags(record->launch.files, (int)index, FD_TABLE_CLOEXEC);
+                    if (marked && marked != -EBADF) { error = marked; break; }
+                }
             uint64_t lock = scheduler_lock_acquire("spawn_signal_snapshot");
             thread_t *caller = current_thread_local();
             record->launch.signal_mask = caller->signal_mask;
@@ -573,11 +624,12 @@ static int64_t child_spawn(const char *path, uintptr_t argv, const syscall_spawn
     return error ? error : child_finish(true, NULL);
 }
 
-static int64_t child_wait(int64_t pid, void *output, uint64_t flags)
+static int64_t child_wait(int64_t pid, void *output, uint64_t flags, bool info, bool peek)
 {
     if ((pid <= 0 && pid != -1) || pid > INT32_MAX) return -ENOTSUP;
     if (flags & ~((uint64_t)SYSCALL_PROCESS_NOHANG)) return -ENOTSUP;
-    if (output && !user_ptr_range_valid(output, sizeof(uint32_t))) return -EFAULT;
+    if ((info && !output) ||
+        (output && !user_ptr_range_valid(output, info ? sizeof(alix_siginfo_t) : sizeof(uint32_t)))) return -EFAULT;
     spinlock_preempt_disable();
     fd_table_t *table = child_current_table();
     child_table_owner_t *owner = table ? calloc(1, sizeof(*owner)) : NULL;
@@ -599,6 +651,9 @@ static int64_t child_wait(int64_t pid, void *output, uint64_t flags)
     {
         child_wait_work_t *work = io_request_buffer(request);
         work->pid = pid; work->flags = (uint32_t)flags;
+        if (info) work->flags |= CHILD_WAIT_INFO;
+        if (peek) work->flags |= CHILD_WAIT_PEEK;
+        memset(&work->info, 0, sizeof(work->info));
         error = child_submit(request, false);
     }
     else { fd_description_put(description); if (request) io_request_waiter_abandon(request); }
@@ -608,6 +663,16 @@ static int64_t child_wait(int64_t pid, void *output, uint64_t flags)
 
 int64_t io_process_dispatch(uint32_t operation, uint64_t first, uint64_t second, uint64_t third)
 {
+    if (operation == SYSCALL_PROCESS_UMASK)
+    {
+        if (second || third) return -EINVAL;
+        spinlock_preempt_disable();
+        process_t *process = current_process_local();
+        int64_t result = process && process->is_user ?
+            (int64_t)__atomic_exchange_n(&process->creation_mask, (uint32_t)first & 0777u, __ATOMIC_ACQ_REL) : -ESRCH;
+        spinlock_preempt_enable();
+        return result;
+    }
     if (operation == SYSCALL_PROCESS_GETGID)
     {
         if (first || second || third) return -EINVAL;
@@ -638,11 +703,25 @@ int64_t io_process_dispatch(uint32_t operation, uint64_t first, uint64_t second,
         if (!user_copy_from_user(&specification, (const void *)first, sizeof(specification))) return -EFAULT;
         if (specification.version != SYSCALL_SPAWN_VERSION || specification.size != sizeof(specification) ||
             specification.action_count > CHILD_ARGUMENTS) return -EINVAL;
-        if (specification.flags & ~(SYSCALL_SPAWN_SETSIGMASK | SYSCALL_SPAWN_SETSIGDEF | SYSCALL_SPAWN_RESETIDS | SYSCALL_SPAWN_SEARCH_PATH)) return -ENOTSUP;
+        if (specification.flags & ~(SYSCALL_SPAWN_SETSIGMASK | SYSCALL_SPAWN_SETSIGDEF | SYSCALL_SPAWN_RESETIDS |
+                                    SYSCALL_SPAWN_CLOEXEC_DEFAULT | SYSCALL_SPAWN_SEARCH_PATH)) return -ENOTSUP;
         if (!(specification.flags & SYSCALL_SPAWN_SEARCH_PATH) && specification.search_path) return -EINVAL;
         if ((specification.signal_mask | specification.signal_default) & ~ALIX_SIGNAL_MASK) return -EINVAL;
         return child_spawn((const char *)(uintptr_t)specification.path, (uintptr_t)specification.argv, &specification);
     }
-    if (operation == SYSCALL_PROCESS_WAIT) return child_wait((int64_t)first, (void *)second, third);
+    if (operation == SYSCALL_PROCESS_WAIT) return child_wait((int64_t)first, (void *)second, third, false, false);
+    if (operation == SYSCALL_PROCESS_WAIT_INFO)
+    {
+        uint32_t type = (uint32_t)(first >> 32), id = (uint32_t)first;
+        if (type != SYSCALL_PROCESS_WAIT_ALL && type != SYSCALL_PROCESS_WAIT_PID &&
+            type != SYSCALL_PROCESS_WAIT_PGID) return -EINVAL;
+        if (!(third & SYSCALL_PROCESS_WAIT_EXITED)) return -EINVAL;
+        if (third & ~(uint64_t)(SYSCALL_PROCESS_WAIT_EXITED | SYSCALL_PROCESS_NOHANG |
+                               SYSCALL_PROCESS_WAIT_NOWAIT)) return -ENOTSUP;
+        if (type == SYSCALL_PROCESS_WAIT_PGID) return -ENOTSUP;
+        if (type == SYSCALL_PROCESS_WAIT_PID && (!id || id > INT32_MAX)) return -EINVAL;
+        return child_wait(type == SYSCALL_PROCESS_WAIT_ALL ? -1 : (int64_t)id, (void *)second,
+                          third & SYSCALL_PROCESS_NOHANG, true, (third & SYSCALL_PROCESS_WAIT_NOWAIT) != 0);
+    }
     return -EINVAL;
 }

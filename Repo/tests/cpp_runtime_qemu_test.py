@@ -490,8 +490,9 @@ def run_native_elf(binary_name, markers, log_path, label, timeout_seconds=40,
                         if response.strip():
                             raise RuntimeError(f"post-breakpoint command failed: {response}")
                     breakpoint_actions_done = True
-                if not gui_launch:
-                    return command_complete(log, offset)
+                # Terminal redraws can publish prompt-shaped lines while QMP
+                # is still typing a command. Completion requires the actual
+                # fixture PID's retirement for console and GUI launches alike.
                 phase = log[offset:]
                 initial = re.search(r"\[process\] alloc detail[^\n]* name=/tmp/test\.elf pid=0x([0-9a-fA-F]+)", phase)
                 return initial is not None and any(int(pid, 16) == int(initial.group(1), 16)

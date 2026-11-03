@@ -1,0 +1,20 @@
+--- a/netwerk/socket/neqo_glue/src/lib.rs
++++ b/netwerk/socket/neqo_glue/src/lib.rs
+@@ -366,7 +366,7 @@
+ 
+ type SetTimerFunc = extern "C" fn(context: *mut c_void, timeout: u64);
+ 
+-#[cfg(unix)]
++#[cfg(any(unix, target_os = "alix"))]
+ type BorrowedSocket = std::os::fd::BorrowedFd<'static>;
+ #[cfg(windows)]
+ type BorrowedSocket = std::os::windows::io::BorrowedSocket<'static>;
+@@ -405,7 +405,7 @@
+ 
+         let socket = socket
+             .map(|socket| {
+-                #[cfg(unix)]
++                #[cfg(any(unix, target_os = "alix"))]
+                 let borrowed = {
+                     use std::os::fd::{BorrowedFd, RawFd};
+                     if socket == -1 {

@@ -164,8 +164,9 @@ static void __attribute__((noreturn)) fatal(const char *message) { fprintf(stder
     code += without_includes((ROOT / "src/kernel/fd/table.c").read_text()) + "\n"
     code += without_includes(staged["src/kernel/io/request.c"]) + "\n"
     code += "static wait_queue_t g_io_completion_queue={.initialized=true};\n"
+    code += "static wait_queue_t g_io_cleanup_queue={.initialized=true};\n"
     glue = (ROOT / "src/kernel/process/process_io.c").read_text()
-    for signature in ("void process_io_notify_completion(", "int process_io_complete_request("):
+    for signature in ("void process_io_notify_completion(", "void process_io_notify_cleanup(", "int process_io_complete_request("):
         code += function_definition(glue, signature) + "\n"
     code += without_includes(staged["src/kernel/io/service.c"]) + r'''
 

@@ -14,6 +14,7 @@
 #include "user_atk_host.h"
 #include "shell_service.h"
 #include "net/interface.h"
+#include "net/route.h"
 #include "net/dns.h"
 #include "net/tcp.h"
 #include "user_copy.h"
@@ -251,6 +252,26 @@ static int64_t syscall_do_proc_snapshot(syscall_process_info_t *buffer, size_t c
     free(out_buf);
     free(tmp);
     return copied ? (int64_t)count : -1;
+}
+
+static int64_t syscall_do_net_route(uint64_t destination, void *output, size_t bytes)
+{
+    _Static_assert(sizeof(alix_net_route_info_t) == 24, "native route snapshot ABI");
+    if (destination > UINT32_MAX || bytes < sizeof(alix_net_route_info_t)) return -EINVAL;
+    if (!output || !user_ptr_range_valid(output, sizeof(alix_net_route_info_t))) return -EFAULT;
+    /* All work is bounded and synchronous. Free the heap snapshot before a
+     * pending cancellation can retire this thread; no worker borrows its stack. */
+    spinlock_preempt_disable();
+    alix_net_route_info_t *snapshot = calloc(1, sizeof(*snapshot));
+    int64_t result = -ENOMEM;
+    if (snapshot)
+    {
+        if (!net_route_ipv4_snapshot((uint32_t)destination, snapshot)) result = -ENETUNREACH;
+        else result = user_copy_to_user(output, snapshot, sizeof(*snapshot)) ? 0 : -EFAULT;
+        free(snapshot);
+    }
+    spinlock_preempt_enable();
+    return result;
 }
 
 static int64_t syscall_do_net_snapshot(syscall_net_stats_t *buffer, size_t capacity)
@@ -1113,6 +1134,8 @@ uint64_t syscall_dispatch(syscall_frame_t *frame, uint64_t vector)
             result = process_signal_sigaction((int)frame->rdi, frame->rsi, frame->rdx, frame->r10); break;
         case SYSCALL_SIGPROCMASK:
             result = process_signal_sigprocmask((int)frame->rdi, frame->rsi, frame->rdx); break;
+        case SYSCALL_SIGWAIT:
+            result = process_signal_wait(frame->rdi, frame->rsi, frame->rdx, frame->r10); break;
         case SYSCALL_SIGALTSTACK:
             result = process_signal_sigaltstack(frame->rdi, frame->rsi, frame->rdx, frame->rsp); break;
         case SYSCALL_SIGRETURN:
@@ -1164,6 +1187,9 @@ uint64_t syscall_dispatch(syscall_frame_t *frame, uint64_t vector)
             break;
         case SYSCALL_FILE_IO:
             result = io_user_file_dispatch((uint32_t)frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
+            break;
+        case SYSCALL_NET_ROUTE:
+            result = syscall_do_net_route(frame->rdi, (void *)frame->rsi, (size_t)frame->rdx);
             break;
         case SYSCALL_OPEN:
             result = syscall_do_open((const char *)frame->rdi, frame->rsi);
@@ -1520,6 +1546,13 @@ uint64_t syscall_dispatch(syscall_frame_t *frame, uint64_t vector)
             result = process_vm_protect(process_current(), (uintptr_t)frame->rdi,
                                         (size_t)frame->rsi, (uint32_t)frame->rdx);
             break;
+        case SYSCALL_VM_FILE_MAP:
+            result = io_user_file_map((uintptr_t)frame->rdi,(size_t)frame->rsi,
+                (uint32_t)frame->rdx,(uint32_t)frame->r10,(int)frame->r8,(int64_t)frame->r9);
+            break;
+        case SYSCALL_VM_SYNC:
+            result = io_user_file_msync((uintptr_t)frame->rdi,(size_t)frame->rsi,(uint32_t)frame->rdx);
+            break;
         case SYSCALL_VM_UNMAP:
             result = process_vm_unmap(process_current(), (uintptr_t)frame->rdi, (size_t)frame->rsi);
             break;
@@ -1577,7 +1610,9 @@ uint64_t syscall_dispatch(syscall_frame_t *frame, uint64_t vector)
             result = (int64_t)process_current_uptime_ns();
             break;
         case SYSCALL_RESOURCE_USAGE:
-            result = process_user_resource_usage((int)frame->rdi, frame->rsi, (size_t)frame->rdx);
+            if (frame->rdi == SYSCALL_USAGE_CLOCK_PROCESS || frame->rdi == SYSCALL_USAGE_CLOCK_THREAD)
+                result = process_user_cpu_clock((int)frame->rdi, frame->rsi, (size_t)frame->rdx);
+            else result = process_user_resource_usage((int)frame->rdi, frame->rsi, (size_t)frame->rdx);
             break;
         case SYSCALL_GETPID:
             spinlock_preempt_disable();

@@ -18,8 +18,7 @@ AlixFS2 is intentionally small and pragmatic:
 Non-goals (current):
 
 - No journaling.
-- No permissions or ACLs.
-- No timestamps.
+- No ACLs, set-ID execution or sticky-directory policy.
 - No hardlinks.
 - No checksums or corruption hardening.
 - No multi-extent / sparse files.
@@ -94,6 +93,16 @@ Each allocated node ID points to a payload chunk containing:
    - `ctime`: status change time in UTC seconds (version `4+`)
 2. `name[name_len]`
 3. `data[data_len]` (only meaningful for file/symlink)
+4. Optional 16-byte mode extension: 64-bit `ALIXMODE` tag, uint32 version `1`
+   and uint32 permission bits (`0777`). It follows the data, so existing header,
+   name and file-data offsets are unchanged. Records without the extension use
+   the previous defaults: files `0666`, directories/symlinks `0777`, blocks `0600`.
+
+The versioned extension works with filesystem versions 2, 3 and 4. New writes
+include it; existing records are read without rewriting them. Unknown or invalid
+extensions fail loading rather than silently granting default permissions.
+Older kernels can read the unchanged file payload but ignore the extension and
+may discard modes when rewriting a record.
 
 Directory membership is implicit via `parent_id`; directories do not store their own child lists on disk.
 
@@ -110,7 +119,19 @@ Mounting is initiated by VFS:
 3. For each chunk entry with `capacity != 0`:
    - Read `entry->length` bytes from `entry->offset`
    - Parse the payload header and create/initialise a `vfs_node_t`
-4. Second pass: re-read each node header to link nodes into the VFS tree using `parent_id`.
+   - Retain `parent_id` in mount-only heap metadata
+4. Link nodes into the VFS tree using the retained parent IDs, without more disk reads.
+
+Mount reads share a 64 KiB, sector-aligned read-ahead window for small adjacent
+records. Larger records bypass it. The window is clipped to the device boundary;
+failed speculative reads fall back to the requested record. All scratch memory
+is heap-owned and released before mount returns. This avoids thousands of tiny
+AHCI requests and the former second read of every complete file payload.
+
+The VFS tree lock still protects mount publication, so `/proc` process
+registration and `/dev` USB registration wait for this load. That contention
+made a slow root mount appear to hang audio and USB initialization together.
+Boot logs now report the fstab mount start, result and elapsed milliseconds.
 
 The mount point directory in VFS (`mount->mount_point`) is treated as the on-disk root node (`root_id`).
 
@@ -187,9 +208,11 @@ Files and symlinks store their contents inline in the node payload chunk. When c
 
 Content changes still rewrite the whole file payload (no streaming or partial
 data updates). Metadata-only updates such as access time or ownership write
-only the node header/name prefix, preserving the existing data and chunk-table
-entry. Reading an 8 MiB file therefore requires a 512-byte metadata write when
-its access time changes, rather than rewriting 8 MiB of unchanged contents.
+only the node header/name prefix and mode trailer, preserving the existing data
+and chunk-table entry. An 8 MiB file therefore needs two 512-byte metadata writes
+when its access time changes, rather than rewriting its unchanged contents.
+Partial metadata-write failures retain dirty state for retry. A record without
+the trailer is rewritten once in full when first changed, retaining its payload.
 
 On growth, the old extent remains allocated until the replacement payload is
 successfully written. An allocation or write failure retains the old chunk
@@ -207,7 +230,7 @@ Supported:
 Current limitations (important for expectations):
 
 - Fixed maximum node count per filesystem (`node_capacity`)
-- No metadata beyond name/type/parent + uid/gid + file bytes
+- No extended attributes or ACLs
 - No integrity features (checksums, journal, fsck)
 - Not hardened against media corruption (assumes trusted storage and relatively clean shutdown)
 

@@ -2,6 +2,7 @@
 #define FCNTL_H
 
 #include "syscall_defs.h"
+#include "sys/types.h"
 
 #define O_RDONLY SYSCALL_OPEN_READ
 #define O_WRONLY SYSCALL_OPEN_WRITE
@@ -23,11 +24,24 @@
 #define F_GETFL 3
 #define F_SETFL 4
 #define F_DUPFD_CLOEXEC 1030
+#define F_GETLK SYSCALL_F_GETLK
+#define F_SETLK SYSCALL_F_SETLK
+#define F_SETLKW SYSCALL_F_SETLKW
+#define F_RDLCK SYSCALL_F_RDLCK
+#define F_WRLCK SYSCALL_F_WRLCK
+#define F_UNLCK SYSCALL_F_UNLCK
+struct flock
+{
+    off_t l_start, l_len;
+    pid_t l_pid;
+    short l_type, l_whence;
+};
 
 #ifdef __cplusplus
 extern "C" {
 #endif
-int open(const char *path, uint64_t flags, ...);
+int open(const char *path, uint64_t flags, ...) __asm__("alix_open_v2");
+int creat(const char *path, mode_t mode);
 int fcntl(int fd, int command, ...);
 #ifdef __cplusplus
 }

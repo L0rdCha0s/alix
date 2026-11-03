@@ -13,9 +13,14 @@
 #define PROT_WRITE SYSCALL_VM_PROT_WRITE
 #define PROT_EXEC SYSCALL_VM_PROT_EXEC
 #define MAP_PRIVATE SYSCALL_VM_MAP_PRIVATE
+#define MAP_SHARED SYSCALL_VM_MAP_SHARED
+#define MS_ASYNC SYSCALL_MS_ASYNC
+#define MS_INVALIDATE SYSCALL_MS_INVALIDATE
+#define MS_SYNC SYSCALL_MS_SYNC
 #define MAP_ANONYMOUS SYSCALL_VM_MAP_ANONYMOUS
 #define MAP_ANON MAP_ANONYMOUS
 #define MAP_FIXED SYSCALL_VM_MAP_FIXED
+#define MAP_NORESERVE SYSCALL_VM_MAP_NORESERVE
 #define MAP_FIXED_NOREPLACE SYSCALL_VM_MAP_FIXED_NOREPLACE
 #define MAP_FAILED ((void *)-1)
 
@@ -34,9 +39,12 @@ extern "C" {
 
 /* Anonymous, process-private pages. PROT_NONE reservations do not allocate
  * physical backing; protection can commit them or temporarily hide contents.
- * File-backed/shared mappings are unsupported. x86 write/execute permission
+ * Regular-file mappings use the owned descriptor runtime. x86 write/execute permission
  * implies read permission; all defined PROT combinations, including RWX, work. */
 void *mmap(void *address, size_t length, int protection, int flags, int fd, off_t offset);
+int shm_open(const char *name, int flags, mode_t mode);
+int shm_unlink(const char *name);
+int msync(void *address, size_t length, int flags);
 int mprotect(void *address, size_t length, int protection);
 int munmap(void *address, size_t length);
 /* Anonymous discard releases backing after TLB acknowledgement. The address

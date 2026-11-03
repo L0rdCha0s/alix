@@ -1,0 +1,132 @@
+--- a/third_party/rust/quinn-udp/src/lib.rs
++++ b/third_party/rust/quinn-udp/src/lib.rs
+@@ -28,7 +28,7 @@
+ #![warn(clippy::use_self)]
+ 
+ use core::time::Duration;
+-#[cfg(any(unix, target_os = "wasi"))]
++#[cfg(any(unix, target_os = "wasi", target_os = "alix"))]
+ use std::os::fd::AsFd;
+ #[cfg(windows)]
+ use std::os::windows::io::AsSocket;
+@@ -52,6 +52,10 @@
+ 
+ #[cfg(any(unix, windows))]
+ mod cmsg;
++
++#[cfg(target_os = "alix")]
++#[path = "alix.rs"]
++mod imp;
+ 
+ #[cfg(unix)]
+ #[path = "unix.rs"]
+@@ -246,7 +250,7 @@
+ /// distinct from the MSVCRT `errno.h` EMSGSIZE value of 115, which is
+ /// never actually populated by socket operations).
+ pub fn is_msg_size_err(err: &io::Error) -> bool {
+-    #[cfg(unix)]
++    #[cfg(any(unix, target_os = "alix"))]
+     {
+         err.raw_os_error() == Some(libc::EMSGSIZE)
+     }
+@@ -254,7 +258,7 @@
+     {
+         err.raw_os_error() == Some(WinSock::WSAEMSGSIZE)
+     }
+-    #[cfg(not(any(unix, windows)))]
++    #[cfg(not(any(unix, windows, target_os = "alix")))]
+     {
+         false
+     }
+@@ -321,7 +325,7 @@
+     }
+ }
+ 
+-#[cfg(any(unix, target_os = "wasi"))]
++#[cfg(any(unix, target_os = "wasi", target_os = "alix"))]
+ impl<'s, S> From<&'s S> for UdpSockRef<'s>
+ where
+     S: AsFd,
+--- /dev/null
++++ b/third_party/rust/quinn-udp/src/alix.rs
+@@ -0,0 +1,74 @@
++//! Native Alix datagrams with real per-packet ECN and endpoint metadata.
++use std::{io::{self, IoSliceMut}, net::{IpAddr, Ipv4Addr, SocketAddr}, os::fd::AsRawFd,
++    sync::Mutex, time::Instant};
++use super::{EcnCodepoint, IO_ERROR_LOG_INTERVAL, RecvMeta, Transmit, UdpSockRef, log_sendmsg_error};
++
++#[repr(C)]
++struct PacketInfo {
++    version: u32, source: u32, destination: u32, length: u32, interface_index: u32,
++    source_port: u16, tos: u8, ttl: u8,
++}
++const _: () = assert!(std::mem::size_of::<PacketInfo>() == 24);
++unsafe extern "C" {
++    fn alix_udp_send(fd: i32, data: *const u8, length: usize, destination: *const core::ffi::c_void,
++                     destination_length: u32, tos: i32, source_ipv4: u32) -> isize;
++    fn alix_udp_recv(fd: i32, data: *mut u8, length: usize, info: *mut PacketInfo, flags: i32) -> isize;
++}
++#[derive(Debug)]
++pub struct UdpSocketState { last_send_error: Mutex<Instant> }
++impl UdpSocketState {
++    pub fn new(socket: UdpSockRef<'_>) -> io::Result<Self> {
++        socket.set_nonblocking(true)?;
++        let now = Instant::now();
++        Ok(Self { last_send_error: Mutex::new(now.checked_sub(2 * IO_ERROR_LOG_INTERVAL).unwrap_or(now)) })
++    }
++    #[deprecated(note = "silences I/O errors; use UdpSocketState::try_send instead")]
++    pub fn send(&self, socket: UdpSockRef<'_>, transmit: &Transmit<'_>) -> io::Result<()> {
++        match self.try_send(socket, transmit) {
++            Ok(()) => Ok(()),
++            Err(error) if error.kind() == io::ErrorKind::WouldBlock => Err(error),
++            Err(error) => { log_sendmsg_error(&self.last_send_error, error, transmit); Ok(()) }
++        }
++    }
++    pub fn try_send(&self, socket: UdpSockRef<'_>, transmit: &Transmit<'_>) -> io::Result<()> {
++        if !transmit.destination.is_ipv4() {
++            return Err(io::Error::new(io::ErrorKind::Unsupported, "Alix has no IPv6 datagram transport"));
++        }
++        if transmit.effective_segment_size().is_some() {
++            return Err(io::Error::new(io::ErrorKind::Unsupported, "Alix has no UDP segmentation offload"));
++        }
++        let source = match transmit.src_ip {
++            Some(IpAddr::V4(ip)) => ip.to_bits(), None => 0,
++            _ => return Err(io::Error::new(io::ErrorKind::Unsupported, "IPv6 datagram source")),
++        };
++        let address = socket2::SockAddr::from(transmit.destination);
++        let count = unsafe { alix_udp_send(socket.0.as_raw_fd(), transmit.contents.as_ptr(), transmit.contents.len(),
++            address.as_ptr().cast(), address.len(), transmit.ecn.map_or(0, |ecn| ecn as i32), source) };
++        if count < 0 { return Err(io::Error::last_os_error()); }
++        if count as usize != transmit.contents.len() { return Err(io::Error::new(io::ErrorKind::WriteZero, "short native datagram")); }
++        Ok(())
++    }
++    pub fn recv(&self, socket: UdpSockRef<'_>, bufs: &mut [IoSliceMut<'_>], meta: &mut [RecvMeta]) -> io::Result<usize> {
++        if bufs.is_empty() || meta.is_empty() { return Err(io::ErrorKind::InvalidInput.into()); }
++        let mut info = std::mem::MaybeUninit::<PacketInfo>::uninit();
++        let count = unsafe { alix_udp_recv(socket.0.as_raw_fd(), bufs[0].as_mut_ptr(), bufs[0].len(), info.as_mut_ptr(), 0) };
++        if count < 0 { return Err(io::Error::last_os_error()); }
++        let info = unsafe { info.assume_init() };
++        if info.version != 1 || count as u32 != info.length {
++            return Err(io::Error::new(io::ErrorKind::InvalidData, "truncated/invalid native datagram metadata"));
++        }
++        meta[0] = RecvMeta { addr: SocketAddr::from((Ipv4Addr::from_bits(info.source), info.source_port)),
++            len: count as usize, stride: count as usize, ecn: EcnCodepoint::from_bits(info.tos),
++            dst_ip: Some(Ipv4Addr::from_bits(info.destination).into()),
++            interface_index: Some(info.interface_index), timestamp: None };
++        Ok(1)
++    }
++    pub fn max_gso_segments(&self) -> usize { 1 }
++    pub fn gro_segments(&self) -> usize { 1 }
++    pub fn may_fragment(&self) -> bool { false }
++    pub fn set_send_buffer_size(&self, socket: UdpSockRef<'_>, bytes: usize) -> io::Result<()> { socket.0.set_send_buffer_size(bytes) }
++    pub fn set_recv_buffer_size(&self, socket: UdpSockRef<'_>, bytes: usize) -> io::Result<()> { socket.0.set_recv_buffer_size(bytes) }
++    pub fn send_buffer_size(&self, socket: UdpSockRef<'_>) -> io::Result<usize> { socket.0.send_buffer_size() }
++    pub fn recv_buffer_size(&self, socket: UdpSockRef<'_>) -> io::Result<usize> { socket.0.recv_buffer_size() }
++}
++pub(crate) const BATCH_SIZE: usize = 1;
+--- a/third_party/rust/quinn-udp/.cargo-checksum.json
++++ b/third_party/rust/quinn-udp/.cargo-checksum.json
+@@ -1 +1 @@
+-{"files":{".cargo_vcs_info.json":"2b79de480c15c980a1aebbae948c52d2a644c9ea65664b417b24b7800e957d3c","Cargo.lock":"553a014e7cafc5e409fd7aa1cc752b03ed70046a52c5f63439991e055b04af11","Cargo.toml":"7b93c89a61ea4d625d3c366db3505ddb7edccf9bade269e5f1eb0ed97d7909cb","Cargo.toml.orig":"ce6ba0e26f6c740fc696f146530088e3ee82a102fc3d53bd1c62d7c7aef05190","LICENSE-APACHE":"c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4","LICENSE-MIT":"4b2d0aca6789fa39e03d6738e869ea0988cceba210ca34ebb59c15c463e93a04","benches/throughput.rs":"2a0bca7615b0f79758ac8f521a95ad78d7a0ebc15eacd755b5351c2316165e85","build.rs":"a7046e2c7818b6680b85745b769759a83ceff89b3c61815157893182d96acd15","src/apple_fast.rs":"e797ab2a9d639aeed71d04f330889374b90425d17c575a0bf82a34357b793f24","src/cmsg/mod.rs":"b72ecda119cfca27ff8d9440200f5ad7450095ccd91e948920db7fc4550fbacf","src/cmsg/unix.rs":"1a4089e5e61536a3c370c6b1bc891036ec2d0e2e78105fbb5b8227705e905d34","src/cmsg/windows.rs":"dcd42e3855bd03296c27944c7911dbe04df8bcc1e1b9a25269f39f5a23a04d66","src/lib.rs":"500c187fcb5ea941898ceb56d51c447ce00cfe8df8fa76ef1110b719134b8ec3","src/linux.rs":"efaf1600fa9b90a607d74bd0d33d3ab8cb88c5371a14402d1390da903a1b57f4","src/unix.rs":"2b9a32b1e9bf7e8f4e451e4ed2a8d9cb930a0032abe9092be2cd3c35b2b4a929","src/wasi.rs":"16e6c01240bddda81b4c02d72ce70fbbc15bb824ac42a5b168cebb4dc5d8ea13","src/windows.rs":"d71ad1e3b741c2b8187013662e31c7e56df6a72895ee9fe23ead97b625e74cd2","tests/tests.rs":"71bb3b0f0dab2c4913cbc4abf88f7c3a141cdf5c406cc0cc21656f1b5dd1115d"},"package":"3ca72c3f2792761ab5fa848490694cbc728c7f659669ed4320c4c79c12150966"}
+\ No newline at end of file
++{"files":{".cargo_vcs_info.json":"2b79de480c15c980a1aebbae948c52d2a644c9ea65664b417b24b7800e957d3c","Cargo.lock":"553a014e7cafc5e409fd7aa1cc752b03ed70046a52c5f63439991e055b04af11","Cargo.toml":"7b93c89a61ea4d625d3c366db3505ddb7edccf9bade269e5f1eb0ed97d7909cb","Cargo.toml.orig":"ce6ba0e26f6c740fc696f146530088e3ee82a102fc3d53bd1c62d7c7aef05190","LICENSE-APACHE":"c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4","LICENSE-MIT":"4b2d0aca6789fa39e03d6738e869ea0988cceba210ca34ebb59c15c463e93a04","benches/throughput.rs":"2a0bca7615b0f79758ac8f521a95ad78d7a0ebc15eacd755b5351c2316165e85","build.rs":"a7046e2c7818b6680b85745b769759a83ceff89b3c61815157893182d96acd15","src/apple_fast.rs":"e797ab2a9d639aeed71d04f330889374b90425d17c575a0bf82a34357b793f24","src/cmsg/mod.rs":"b72ecda119cfca27ff8d9440200f5ad7450095ccd91e948920db7fc4550fbacf","src/cmsg/unix.rs":"1a4089e5e61536a3c370c6b1bc891036ec2d0e2e78105fbb5b8227705e905d34","src/cmsg/windows.rs":"dcd42e3855bd03296c27944c7911dbe04df8bcc1e1b9a25269f39f5a23a04d66","src/lib.rs":"de45cf8c9074d1e6c22aa524fc185957a3008b4fecd207932350dbcb139d4def","src/linux.rs":"efaf1600fa9b90a607d74bd0d33d3ab8cb88c5371a14402d1390da903a1b57f4","src/unix.rs":"2b9a32b1e9bf7e8f4e451e4ed2a8d9cb930a0032abe9092be2cd3c35b2b4a929","src/wasi.rs":"16e6c01240bddda81b4c02d72ce70fbbc15bb824ac42a5b168cebb4dc5d8ea13","src/windows.rs":"d71ad1e3b741c2b8187013662e31c7e56df6a72895ee9fe23ead97b625e74cd2","tests/tests.rs":"71bb3b0f0dab2c4913cbc4abf88f7c3a141cdf5c406cc0cc21656f1b5dd1115d","src/alix.rs":"6de1099bddf9c2a14fb9b5dc3bd0379a091f2900cf337746709b457e75508a1f"},"package":"3ca72c3f2792761ab5fa848490694cbc728c7f659669ed4320c4c79c12150966"}

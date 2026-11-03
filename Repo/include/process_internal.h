@@ -342,6 +342,10 @@ struct thread
     int signal_fault_number;
     bool signal_onstack,signal_sleeping,signal_sleep_interrupted;
     wait_queue_t signal_wait_queue;
+    alix_sigset_t sigwait_mask;
+    bool sigwait_active;
+    wait_queue_t sigwait_queue;
+    fd_description_t *vm_file_prepare; /* Caller-independent ownership until VM publication. */
 };
 
 struct process
@@ -376,6 +380,7 @@ struct process
     int stdout_fd;
     uint32_t uid;
     uint32_t gid;
+    uint32_t creation_mask;
     uint64_t runtime_ticks;
     bool is_user;
     spinlock_t usage_lock;
@@ -745,7 +750,7 @@ typedef struct
 {
     fd_description_t *cwd;
     fd_table_t *files;
-    uint32_t uid, gid;
+    uint32_t uid, gid, creation_mask;
     uint64_t parent_pid;
     const char *const *environment;
     size_t environment_count;

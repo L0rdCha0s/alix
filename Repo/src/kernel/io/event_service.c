@@ -1,4 +1,5 @@
 #include "io_event_service.h"
+#include "io_record_lock.h"
 #include "process_internal.h"
 #include "heap.h"
 #include "errno.h"
@@ -74,17 +75,29 @@ static void io_event_entry(void *context)
     __atomic_store_n(&service->worker_alive, false, __ATOMIC_RELEASE);
 }
 
+static bool io_event_cleanup_ready(void *context)
+{
+    io_event_service_t *service = context;
+    io_queue_status_t status;
+    if (io_queue_snapshot(service->queue, &status)) fatal("event cleanup lost its queue");
+    return status.cleanup || (__atomic_load_n(&service->stopping, __ATOMIC_ACQUIRE) &&
+        !__atomic_load_n(&service->worker_alive, __ATOMIC_ACQUIRE));
+}
 static void io_event_cleanup_entry(void *context)
 {
     io_event_service_t *service = context;
     for (;;)
     {
-        (void)io_queue_drain(service->queue, 64);
+        size_t drained = io_queue_drain(service->queue, 64);
+        (void)io_record_lock_drain(64);
+        if (drained) process_io_notify_cleanup();
         io_queue_status_t status;
         if (io_queue_snapshot(service->queue, &status)) fatal("event cleanup lost its queue");
         if (__atomic_load_n(&service->stopping, __ATOMIC_ACQUIRE) &&
             !__atomic_load_n(&service->worker_alive, __ATOMIC_ACQUIRE) && !status.live) break;
-        process_sleep_ms(1);
+        /* Request retirement wakes us immediately. The bounded timer also
+         * collects records retired by an allocation-free descriptor close. */
+        (void)process_io_wait_cleanup(io_event_cleanup_ready, service, 1);
     }
 }
 

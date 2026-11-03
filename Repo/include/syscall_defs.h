@@ -81,6 +81,10 @@ typedef enum
     SYSCALL_PROCESS = 72,
     SYSCALL_UI_CONTROL = 73,
     SYSCALL_MEMORY_PAGES = 74,
+    SYSCALL_SIGWAIT = 75,
+    SYSCALL_VM_FILE_MAP = 76,
+    SYSCALL_VM_SYNC = 77,
+    SYSCALL_NET_ROUTE = 78,
 } syscall_id_t;
 
 /* Physical RAM counts in 4096-byte pages. TOTAL is the boot E820 usable RAM
@@ -95,11 +99,19 @@ typedef enum
 #define SYSCALL_PROCESS_SPAWN_EX 2u
 #define SYSCALL_PROCESS_EXECUTABLE_PATH 3u
 #define SYSCALL_PROCESS_GETGID 4u
+#define SYSCALL_PROCESS_WAIT_INFO 5u
+#define SYSCALL_PROCESS_UMASK 6u
+#define SYSCALL_PROCESS_WAIT_ALL 0u
+#define SYSCALL_PROCESS_WAIT_PID 1u
+#define SYSCALL_PROCESS_WAIT_PGID 2u
+#define SYSCALL_PROCESS_WAIT_EXITED 4u
+#define SYSCALL_PROCESS_WAIT_NOWAIT 0x01000000u
 #define SYSCALL_EXECUTABLE_PATH_MAX 4096u
 #define SYSCALL_SPAWN_VERSION 1u
 #define SYSCALL_SPAWN_SETSIGMASK 1u
 #define SYSCALL_SPAWN_SETSIGDEF 2u
 #define SYSCALL_SPAWN_RESETIDS 4u
+#define SYSCALL_SPAWN_CLOEXEC_DEFAULT 0x4000u
 #define SYSCALL_SPAWN_SEARCH_PATH 0x10000u
 #define SYSCALL_SPAWN_CLOSE 0u
 #define SYSCALL_SPAWN_DUP2 1u
@@ -140,8 +152,44 @@ typedef enum
     SYSCALL_FILE_DNS_RESOLVE, SYSCALL_FILE_SYNC, SYSCALL_FILE_SELECT,
     SYSCALL_FILE_TRUNCATE, SYSCALL_FILE_REALPATH, SYSCALL_FILE_MKDIR, SYSCALL_FILE_FLOCK,
     SYSCALL_FILE_IOCTL, SYSCALL_FILE_SYSTEM_INFO, SYSCALL_FILE_HOSTNAME,
-    SYSCALL_FILE_GET_LIMIT, SYSCALL_FILE_SET_LIMIT
+    SYSCALL_FILE_GET_LIMIT, SYSCALL_FILE_SET_LIMIT, SYSCALL_FILE_WRITEV,
+    SYSCALL_FILE_NET_SENDMSG, SYSCALL_FILE_NET_RECVMSG,
+    SYSCALL_FILE_NET_BIND, SYSCALL_FILE_DATAGRAM,
+    SYSCALL_FILE_STAT_INFO, SYSCALL_FILE_PATH_INFO, SYSCALL_FILE_CHOWN, SYSCALL_FILE_CHMOD,
+    SYSCALL_FILE_RECORD_LOCK, SYSCALL_FILE_SET_TIMES,
+    SYSCALL_FILE_SHM_OPEN, SYSCALL_FILE_SHM_UNLINK,
+    SYSCALL_FILE_OPEN_MODE, SYSCALL_FILE_MKDIR_MODE
 } syscall_file_operation_t;
+#define SYSCALL_F_GETLK 5
+#define SYSCALL_F_SETLK 6
+#define SYSCALL_F_SETLKW 7
+#define SYSCALL_F_RDLCK 0
+#define SYSCALL_F_WRLCK 1
+#define SYSCALL_F_UNLCK 2
+typedef struct
+{
+    int64_t start, length;
+    int32_t pid;
+    int16_t type, whence;
+} syscall_record_lock_t;
+typedef struct { int64_t access_seconds, access_microseconds, modify_seconds, modify_microseconds; } syscall_file_times_t;
+#define SYSCALL_IOV_MAX 1024u
+typedef struct { uint64_t base, length; } syscall_iovec_t;
+typedef struct
+{
+    uint64_t name;
+    uint32_t name_length, reserved;
+    uint64_t vectors, vector_count, control, control_length;
+    int32_t flags;
+    uint32_t padding;
+} syscall_msghdr_t;
+typedef struct
+{
+    uint64_t data, length, address, address_length, packet_info, address_length_pointer;
+    uint32_t flags;
+    int32_t tos;
+    uint32_t source_ipv4, reserved;
+} syscall_udp_request_t;
 #define SYSCALL_RESOURCE_NOFILE 7u
 #define SYSCALL_RESOURCE_AS 9u
 #define SYSCALL_DUP_CHECK_MINIMUM 1u
@@ -244,6 +292,9 @@ typedef struct
 
 #define SYSCALL_USAGE_VERSION 1u
 #define SYSCALL_USAGE_SELF 0
+#define SYSCALL_USAGE_CLOCK_PROCESS 0x100
+#define SYSCALL_USAGE_CLOCK_THREAD 0x101
+typedef struct { uint64_t ticks; uint32_t tick_frequency, reserved; } syscall_cpu_clock_t;
 typedef struct
 {
     uint32_t version, size;
@@ -293,8 +344,13 @@ typedef struct syscall_timezone_info
 #define SYSCALL_VM_PROT_WRITE 2u
 #define SYSCALL_VM_PROT_EXEC 4u
 #define SYSCALL_VM_MAP_PRIVATE 0x02u
+#define SYSCALL_VM_MAP_SHARED 0x01u
+#define SYSCALL_MS_ASYNC 1u
+#define SYSCALL_MS_INVALIDATE 2u
+#define SYSCALL_MS_SYNC 4u
 #define SYSCALL_VM_MAP_FIXED 0x10u
 #define SYSCALL_VM_MAP_ANONYMOUS 0x20u
+#define SYSCALL_VM_MAP_NORESERVE 0x4000u
 #define SYSCALL_VM_MAP_FIXED_NOREPLACE 0x100000u
 #define SYSCALL_VM_ADVICE_DONTNEED 4u
 #define SYSCALL_VM_ADVICE_POSIX 0x100u
@@ -411,6 +467,18 @@ typedef struct
     uint64_t mtime;
     uint64_t ctime;
 } syscall_stat_t;
+
+/* Versioned full metadata. The original syscall_stat_t and operation numbers
+ * remain unchanged. This layout matches the new public struct stat exactly. */
+typedef struct
+{
+    uint64_t size_bytes;
+    uint32_t mode, type;
+    uint64_t atime, mtime, ctime;
+    uint64_t device, inode, links;
+    uint32_t uid, gid;
+    int64_t block_size, blocks;
+} syscall_stat_info_t;
 
 typedef enum
 {

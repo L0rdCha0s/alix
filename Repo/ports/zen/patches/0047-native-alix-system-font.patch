@@ -1,0 +1,12 @@
+--- a/layout/base/nsLayoutUtils.cpp
++++ b/layout/base/nsLayoutUtils.cpp
+@@ -9891,6 +9891,9 @@
+   // UI font-size.
+   aName = u"sans-serif"_ns;
+   aStyle.size = 15;
++#elif defined(MOZ_WIDGET_ALIX)
++  aName = u"sans-serif"_ns;
++  aStyle.size = 14;
+ #else
+ #  error "Unknown platform"
+ #endif

@@ -56,5 +56,6 @@ void alixfs_mount_snapshot(const alixfs_mount_t *fs, bool *header_dirty);
 
 /* True when the on-disk format supports atime/mtime/ctime. */
 bool alixfs_mount_supports_times(const alixfs_mount_t *fs);
+bool alixfs_mount_supports_ownership(const alixfs_mount_t *fs);
 
 #endif /* ALIXFS_H */

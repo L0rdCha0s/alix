@@ -35,17 +35,18 @@ void net_if_init(void)
 
 static net_interface_t *net_if_allocate(void)
 {
-    if (g_interface_count >= NET_MAX_INTERFACES)
+    if (net_if_count() >= NET_MAX_INTERFACES)
     {
         return NULL;
     }
-    net_interface_t *iface = &g_interfaces[g_interface_count++];
+    net_interface_t *iface = &g_interfaces[net_if_count()];
     memset(iface, 0, sizeof(*iface));
     return iface;
 }
 
 net_interface_t *net_if_register(const char *name, const uint8_t mac[6])
 {
+    uint64_t flags = net_config_lock();
     net_interface_t *existing = net_if_by_name(name);
     if (existing)
     {
@@ -54,12 +55,14 @@ net_interface_t *net_if_register(const char *name, const uint8_t mac[6])
             memcpy(existing->mac, mac, 6);
             existing->present = true;
         }
+        net_config_unlock(flags);
         return existing;
     }
 
     net_interface_t *iface = net_if_allocate();
     if (!iface)
     {
+        net_config_unlock(flags);
         return NULL;
     }
 
@@ -75,6 +78,7 @@ net_interface_t *net_if_register(const char *name, const uint8_t mac[6])
     iface->ipv4_addr = 0;
     iface->ipv4_netmask = 0;
     iface->ipv4_gateway = 0;
+    iface->mtu = NET_ETHERNET_MTU;
     iface->send = NULL;
     if (mac)
     {
@@ -84,6 +88,8 @@ net_interface_t *net_if_register(const char *name, const uint8_t mac[6])
     {
         memset(iface->mac, 0, 6);
     }
+    __atomic_add_fetch(&g_interface_count, 1, __ATOMIC_RELEASE);
+    net_config_unlock(flags);
     return iface;
 }
 
@@ -93,7 +99,7 @@ net_interface_t *net_if_by_name(const char *name)
     {
         return NULL;
     }
-    for (size_t i = 0; i < g_interface_count; ++i)
+    for (size_t i = 0; i < net_if_count(); ++i)
     {
         if (strcmp(g_interfaces[i].name, name) == 0)
         {
@@ -105,12 +111,12 @@ net_interface_t *net_if_by_name(const char *name)
 
 size_t net_if_count(void)
 {
-    return g_interface_count;
+    return __atomic_load_n(&g_interface_count, __ATOMIC_ACQUIRE);
 }
 
 net_interface_t *net_if_at(size_t index)
 {
-    if (index >= g_interface_count)
+    if (index >= net_if_count())
     {
         return NULL;
     }
@@ -123,31 +129,14 @@ void net_if_set_link_up(net_interface_t *iface, bool up)
     {
         return;
     }
+    uint64_t flags = net_config_lock();
     iface->link_up = up;
+    net_config_unlock(flags);
 }
 
 void net_if_set_ipv4(net_interface_t *iface, uint32_t addr, uint32_t netmask, uint32_t gateway)
 {
-    if (!iface)
-    {
-        return;
-    }
-    __atomic_store_n(&iface->ipv4_addr, addr, __ATOMIC_RELEASE);
-    iface->ipv4_netmask = netmask;
-    iface->ipv4_gateway = gateway;
-
-    if (gateway != 0)
-    {
-        net_route_set_default(iface, gateway);
-    }
-    else
-    {
-        net_interface_t *default_iface = NULL;
-        if (net_route_get_default(&default_iface, NULL) && default_iface == iface)
-        {
-            net_route_clear_default();
-        }
-    }
+    net_route_configure_ipv4(iface, addr, netmask, gateway);
 }
 
 void net_if_set_tx_handler(net_interface_t *iface, bool (*handler)(net_interface_t *, const uint8_t *, size_t))

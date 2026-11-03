@@ -175,8 +175,16 @@ The process subsystem contains multiple safety mechanisms:
 
 User libc exposes `mmap`, `mprotect` and `munmap` through `<sys/mman.h>` and
 syscalls 48–50. The current backend supports process-private anonymous mappings,
-`MAP_FIXED_NOREPLACE`, and atomic `MAP_FIXED` replacement. File-backed and shared
-mappings remain unsupported. The caller must pass `fd=-1` and `offset=0`.
+`MAP_FIXED_NOREPLACE`, and atomic `MAP_FIXED` replacement. Anonymous callers pass
+`fd=-1` and `offset=0`. The owned FD runtime additionally supports regular-file
+shared mappings and private snapshots; see [file mappings](file_mappings.md) for
+cache coherence, `msync`, ownership and current EOF/truncation restrictions.
+
+`MAP_NORESERVE` is accepted for anonymous and file mappings. Alix has no swap
+reservation mechanism, so this selects its existing reservation policy rather
+than introducing a separate backing store. `PROT_NONE` intervals remain sparse;
+granting access still commits pages as described below. The native VM fixture
+checks an 8 GiB reservation, bounded physical usage and a committed high page.
 
 `PROT_NONE` reserves an interval without physical backing. Granting access
 commits zeroed pages; removing all access from an already committed mapping

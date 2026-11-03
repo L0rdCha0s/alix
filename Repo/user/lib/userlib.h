@@ -8,7 +8,11 @@
 extern "C" {
 #endif
 
+#ifdef TTF_HOST_BUILD
 int open(const char *path, uint64_t flags, ...);
+#else
+int open(const char *path, uint64_t flags, ...) __asm__("alix_open_v2");
+#endif
 int socket_open(const char *iface_name);
 int socket_connect(int fd, const char *ipv4_text, uint16_t port);
 void *sbrk(int64_t increment);

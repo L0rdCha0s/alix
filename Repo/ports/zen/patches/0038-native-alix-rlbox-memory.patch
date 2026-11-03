@@ -1,0 +1,32 @@
+--- a/third_party/rlbox_wasm2c_sandbox/src/wasm2c_rt_mem.c
++++ b/third_party/rlbox_wasm2c_sandbox/src/wasm2c_rt_mem.c
+@@ -312,7 +312,7 @@
+   return ret;
+ }
+ 
+-#elif !defined(_WIN32) && (defined(__unix__) || defined(__unix) ||             \
++#elif !defined(_WIN32) && (defined(__ALIX__) || defined(__unix__) || defined(__unix) ||             \
+                            (defined(__APPLE__) && defined(__MACH__)))
+ 
+ #  include <sys/mman.h>
+@@ -340,6 +340,11 @@
+ {
+   int map_prot = PROT_NONE;
+   int map_flags = MAP_ANONYMOUS | MAP_PRIVATE;
++#if defined(__ALIX__)
++  // The native user address arena begins above 4 GiB. A low-32-bit request
++  // cannot be satisfied by substituting an unrelated high address.
++  if (flags & MMAP_MAP_32BIT) { errno = ENOTSUP; return NULL; }
++#endif
+   uint64_t request_size, page_size;
+   void* addr;
+ 
+@@ -364,7 +369,7 @@
+     map_prot |= PROT_EXEC;
+ 
+ #  if defined(BUILD_TARGET_X86_64) || defined(BUILD_TARGET_AMD_64)
+-#    ifndef __APPLE__
++#    if !defined(__APPLE__) && !defined(__ALIX__)
+   if (flags & MMAP_MAP_32BIT)
+     map_flags |= MAP_32BIT;
+ #    endif

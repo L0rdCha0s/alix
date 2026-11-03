@@ -117,12 +117,12 @@
     },
     {
       "file": "0009-validate-alix-static-elf.patch",
-      "sha256": "ce396be00361c4f7bc6dd273fbdb09e8722cdd2f4307bf409233d619f65afeb0",
+      "sha256": "d90a75623fa1c4d2a003d02e0d22f45c3fedeaec7f5efc821eaa1477feef7cbc",
       "files": [
         {
           "path": "python/mozbuild/mozbuild/action/check_binary.py",
           "before": "2bcb667c2652afe1e08d681d7a6acd75bb15889dc57ec3fd359e5ca8ef650983",
-          "after": "728219c5b44060d623ddd451ead9edd53042d9908859201339ff0b7352f49d73"
+          "after": "7f15a562ada0026b805ebbc03b9aca851c17424ac038deffc40dc187308e7239"
         }
       ]
     },
@@ -139,12 +139,12 @@
     },
     {
       "file": "0011-native-alix-widget-toolkit.patch",
-      "sha256": "dd3d234f479f3990887053c635b9985895745ae568270192f90ce36fd4b854ec",
+      "sha256": "280de6396e922fe76cf1f53d27a2f6d4df6633ce8a4f6eefa3c886def5602591",
       "files": [
         {
           "path": "toolkit/moz.configure",
           "before": "32e5e3334abde7be8b62d946fc5f2cd16627dbd776c133dafad3c0e2eac65202",
-          "after": "fdb45e25774b132273cc04d9ec008e66fecd393639b2042a338dc855c6905098"
+          "after": "fd776efe7e05d7595c2b8a49839612d8c7901121ad9eb35a1fbf67db2d8078bd"
         }
       ]
     },
@@ -330,7 +330,7 @@
     },
     {
       "file": "0017-native-alix-rust-libc.patch",
-      "sha256": "89d0004e1bd37e1e17c602725ff1d4d02f840a8af08b2200fea9985dfa01481f",
+      "sha256": "ff39b9e3f19d5369cf6b8f9a8ce805227c6b060e2e8dea871ea0402a0ebf4032",
       "files": [
         {
           "path": "third_party/rust/libc/src/lib.rs",
@@ -340,12 +340,17 @@
         {
           "path": "third_party/rust/libc/src/alix/mod.rs",
           "before": null,
-          "after": "816de269d87f7046117b92f028da64943a0d787107dce150f061a1fd24988646"
+          "after": "25dcfae19c0628937869c9125850d2353c7eb59ee3741dfa8249900ee1eaad8a"
         },
         {
           "path": "third_party/rust/libc/.cargo-checksum.json",
           "before": "3ede211a3962476250d3e11d268aedd1bcfa53c6c1a1e701d04d2d4da6d20ccc",
-          "after": "21f82e353e59acf49c116b4a30b28b8b5a014cd075094615ba3e9ebaa2ab79e0"
+          "after": "917723227766fceb98b65b778a02013a975bcfc7ff21f86b4fc7cd95fa9344c9"
+        },
+        {
+          "path": "third_party/rust/libc/src/alix/sdk.rs",
+          "before": null,
+          "after": "ec33d99541ff18c69f7f2cf68886b52b8c8ae38795e04e007b2ae7be2cdb50bd"
         }
       ]
     },
@@ -534,7 +539,7 @@
     },
     {
       "file": "0026-native-alix-nspr-file-abi.patch",
-      "sha256": "a9dee982bc8653a97c3e4362340fe090328431cb9bd71441fb03577c46b9a765",
+      "sha256": "7edf15e5b9d9b2c98c9b535b351b56649c002a2ebe24d56165dade9b9e3f696b",
       "files": [
         {
           "path": "nsprpub/pr/include/md/_unixos.h",
@@ -544,7 +549,7 @@
         {
           "path": "nsprpub/pr/src/md/unix/unix.c",
           "before": "500e140dbc4d0da66782b9e5e1d8a42c24311effbfb132426ce123a309c4eec7",
-          "after": "23a78bf294dba9bf61c7b3c9b63acc3dcc602f373546f39e89f6c6340b123e9a"
+          "after": "7f7de717486edafe063c651512ea1a079cf0629694455be7c6739bdbfacc8edb"
         }
       ]
     },
@@ -583,6 +588,399 @@
           "path": "nsprpub/pr/src/md/unix/uxproces.c",
           "before": "67c1f286ec3348dcc9c41d510048ade47fc12f292457a45e32766141444d7291",
           "after": "b644c6dbcecc9c2bfb53e64425b598e6f2de410efdfd97601aa99a7ac86a69f2"
+        }
+      ]
+    },
+    {
+      "file": "0030-native-alix-nspr-scheduler-header.patch",
+      "sha256": "2f17ca0fd63674bccb160d11b294dcc89ccbbc56c4a75123549a09ed76fa6030",
+      "files": [
+        {
+          "path": "nsprpub/pr/src/pthreads/ptthread.c",
+          "before": "317b83080ec7dbf1716cf9b8698e3c1a2cfa5fa80716717d4377c3270646efe5",
+          "after": "19e4957e0fef65f22843a7e903d3c7670f8b8613243e1742709653eab9c33dfb"
+        }
+      ]
+    },
+    {
+      "file": "0031-native-alix-runtime-imports.patch",
+      "sha256": "668e138806ae30f92274866c6940b8f2499927822a56800f45ab00ff5afc9dee",
+      "files": [
+        {
+          "path": "build/moz.configure/flags.configure",
+          "before": "4bc8079c91509250dbabfd3efbab422bbb1aff8cfefa6de1ef4ca66b98a32493",
+          "after": "203c38a5e1af7a584b02b3f62a2a23285e36d2f939e33488ccffa2e246b46365"
+        },
+        {
+          "path": "nsprpub/pr/src/misc/prenv.c",
+          "before": "b0728891e3cec070bd35b266cdb96ad8f4e45344da55a505b0d8ba72c2b24fc6",
+          "after": "c16a10e64eb0e7a8ffd74b677977b98dc430476f26ef180eba81330ddb19c04e"
+        }
+      ]
+    },
+    {
+      "file": "0032-native-alix-rust-dynamic-loading.patch",
+      "sha256": "ad89d105f47b0d7454c85bb5a2bc6e8255af6e958806ac82ff79139508a7498e",
+      "files": [
+        {
+          "path": "third_party/rust/libloading/Cargo.toml",
+          "before": "d4cf414be22ce0ddce103d5896f58c24c472910d48fea40490b084802869656d",
+          "after": "7f8d7b450e425e16e1ba976a4caf48aef75c259e00823c2d81dc973118094879"
+        },
+        {
+          "path": "third_party/rust/libloading/src/lib.rs",
+          "before": "0142a630bb27d1443a8a79d1d5559ea10e859d587442c596d2be7d837507afa0",
+          "after": "2a33223fbd0624f3c9f56b70767fdeb18c96d339796af4156692a6cfe7f539d1"
+        },
+        {
+          "path": "third_party/rust/libloading/src/os/mod.rs",
+          "before": "6c59ef8c1120953ae6b6c32f27766c643ca90d85075c49c3545d2fe1ed82cedd",
+          "after": "bdd535f347d20628fe339d07407a15b691339ab054a1a0c1fee0505b772bb7a1"
+        },
+        {
+          "path": "third_party/rust/libloading/src/os/unix/mod.rs",
+          "before": "26bfefa0a41b67fb0c24aff5be012858cbf323c98aa1d619c63dac92211f3b17",
+          "after": "f7cd0cce6c9699be4e54dd8cbc6c60dcdb573bce3fb24be40e70575ac9f44e89"
+        },
+        {
+          "path": "third_party/rust/libloading/src/os/unix/consts.rs",
+          "before": "e726edbfe8295ac7053b6a8082b2c9f1deb32d24000301b69f185c45aa3bcff5",
+          "after": "78ca11e3a508bf64e95be75b5f0f0056914ce4cab984f4b74ba2e1e4b579db31"
+        },
+        {
+          "path": "third_party/rust/libloading/src/safe.rs",
+          "before": "0dc4c28f22e14832fb1a0ee003a66845dc5d5c6ecce2288e386e64ed9989e027",
+          "after": "1b1854ac47d3f52a9dd884fb3091f645e25f00f0722939797e6237d21e38144d"
+        },
+        {
+          "path": "third_party/rust/libloading/.cargo-checksum.json",
+          "before": "d0caf54d2ec03ed7c53f2cc0984e2491525384a76bd2a072e20b1856b6b9d07a",
+          "after": "a9cae257adadfc99cfbdfcf0fbdb00059e8139bfe802e0b28e4ea0d6770612ed"
+        },
+        {
+          "path": "third_party/rust/ash/src/entry.rs",
+          "before": "3f238f6177cdd62581e021edac2e75cdc6a2a8936e225fb2fa25f631b0bc430a",
+          "after": "b18ada66d5659d869aafe77f7ec49442e0323c6785a39dcafccd692b82f7c9ee"
+        },
+        {
+          "path": "third_party/rust/ash/.cargo-checksum.json",
+          "before": "6f5d8eb02eb12ff457d353fa1bbc20092dbdd3584b01a02905d3f8717eb949d2",
+          "after": "861c3409ee139015b7935844caf548ef171c88919a583b8bf1af245cc938de23"
+        }
+      ]
+    },
+    {
+      "file": "0033-native-alix-rust-network-descriptors.patch",
+      "sha256": "64cc24c59ea6df86df3bca67284513a25e4bf5e0edaad6ffffdd737b8bdaa81c",
+      "files": [
+        {
+          "path": "third_party/rust/rustix/src/maybe_polyfill/std/mod.rs",
+          "before": "d0261b88ece984c9947896a89d7f3ff3470603e5bb5681169ebdb56cbd98a9a6",
+          "after": "75e796d9bf600c2c0c57af73b73e96385f42a04060a579c45bb01c536ab012ce"
+        },
+        {
+          "path": "third_party/rust/rustix/.cargo-checksum.json",
+          "before": "9422cda26c3e5b1c41484d06ffe642b282130b1345ae4314498a91d265104d4d",
+          "after": "38de882bf5d090a93386e39d19f6a3b4f0c5c7829128108658885eb4e4d80521"
+        },
+        {
+          "path": "third_party/rust/rustix/src/maybe_polyfill/no_std/os/mod.rs",
+          "before": "27dab639a765827644005d5f2fcc7c825310606b889cc8dd83f54c9528350dc0",
+          "after": "1b6b752416aad954bd5fb25ae6490e1b102b125095c4b5610c64cde908919b77"
+        }
+      ]
+    },
+    {
+      "file": "0034-native-alix-webrender-freetype.patch",
+      "sha256": "98b36ea081a0085200a81aebccbf9293549633d047e0a640ddf905fc1f6ef643",
+      "files": [
+        {
+          "path": "gfx/wr/wr_glyph_rasterizer/Cargo.toml",
+          "before": "50d5d2bb2d4e1e5fee6204c98066106cc465d4fabf17d6f0ab8526a9235b6c0e",
+          "after": "a51f276f310c81ec6e8ee75d1eb155685dc1f82eafb03ddcc67cc9d70c153f4f"
+        },
+        {
+          "path": "gfx/wr/wr_glyph_rasterizer/src/lib.rs",
+          "before": "a41ef9e48d612a6e0bf351420b6e12181754ddd92451dd14a6abb3b950d3cdd3",
+          "after": "f3b723a40e023f826009c1d4859f9f6d14434fa17132ea6ad368255d6213ff57"
+        },
+        {
+          "path": "gfx/wr/wr_glyph_rasterizer/src/platform/unix/font.rs",
+          "before": "3ce6dc840a53c814b8305f4c7d2e57ca76c81cb3ccda806aba61003318db6ef0",
+          "after": "28b0a885438f54d9bcaf67f07756f591f595c43a20b23530a61a34ac3050892a"
+        }
+      ]
+    },
+    {
+      "file": "0035-scope-neqo-rustix-to-apple-probe.patch",
+      "sha256": "b927b7001b43b67d32eb252569d46facdb72a307ed5dca009999174aa37f8a54",
+      "files": [
+        {
+          "path": "netwerk/socket/neqo_glue/Cargo.toml",
+          "before": "b4503e4e113e89083761ed160aa49777bf923b1ecd5b4b4f3bc5eb7c573deef2",
+          "after": "4af726766bae56a972398b88cbd9daa16efab9d1c85d9f1b3200cb67b2be3e8f"
+        }
+      ]
+    },
+    {
+      "file": "0036-native-alix-route-mtu.patch",
+      "sha256": "73ebed6f41d2b3cd7b92a6e1b7d1214655920ff935c377afc701af9c723b8e2b",
+      "files": [
+        {
+          "path": "third_party/rust/mtu/src/lib.rs",
+          "before": "9695266e369a668575f36e4dd39666ad50b91d66d35eaf760bbc1c12a41dc27a",
+          "after": "4c5e8a66400771a28c46d2a221bc0a49cde79204f4909772a40f34c4f25fcf33"
+        },
+        {
+          "path": "third_party/rust/mtu/src/alix.rs",
+          "before": null,
+          "after": "14d4a02f41ddca7672dffd15da00a553a250d2cdd71e0b0902509a9872132fc0"
+        },
+        {
+          "path": "third_party/rust/mtu/.cargo-checksum.json",
+          "before": "b509289ea3d1443db802a89756e3d29cb4be5eff8ca360465dc3005efb77f9e9",
+          "after": "16e7b5f68a2dcee05e27fad799a31d1fec969698f49fa9d39d8d8621f7d63314"
+        }
+      ]
+    },
+    {
+      "file": "0037-native-alix-socket2.patch",
+      "sha256": "d846ed9a853b86cb6aceb976d6c5ac2cebd719461799c5e8933af3e4316b9a9f",
+      "files": [
+        {
+          "path": "third_party/rust/socket2/Cargo.toml",
+          "before": "8b7a9083b19569241428e9d486fbf4f461b03ff004e4ec8cea9563a687877329",
+          "after": "98e3ffff6e28cd9a60c3281b2f597c74adf2e4e69d2a6b729b0cdf9a3663a15d"
+        },
+        {
+          "path": "third_party/rust/socket2/src/lib.rs",
+          "before": "90e5edbced9a2eba7d7c46c66fd1b7a462a2a6dbe0c38ad04ace081a9093f11a",
+          "after": "de79d87dc7785314539008abc2d4785d9bb1146e8b3027067c14b0a387921f4d"
+        },
+        {
+          "path": "third_party/rust/socket2/src/sys/unix.rs",
+          "before": "dc648e4ebbaabe77f7cbcfa85a22d79fe599b47c4a06e9b2fcc87ad164bb9be7",
+          "after": "bdfbdef55f45979120546875a0dd119c6b1a7987923ae7035fd2d9f4ce0b5a12"
+        },
+        {
+          "path": "third_party/rust/socket2/src/sockaddr.rs",
+          "before": "1eb260befdb62a53a1dc940a4c0863b1774ce7fa0daf3045154e42f6f477ecbd",
+          "after": "e9242439bfc38350ad58bb5c0d637b9d79ca7df512547c1fe04ab51cf6acf566"
+        },
+        {
+          "path": "third_party/rust/socket2/.cargo-checksum.json",
+          "before": "da8ad9a7f635362747e8c3312f7dd39c828eda9ac4fa774be17f9454730bbe90",
+          "after": "d4aed408031c5048add13eb0cd54015224d96785506a9ef87da79cb03e2a2a6c"
+        },
+        {
+          "path": "third_party/rust/socket2/src/socket.rs",
+          "before": "1d60e8c2729bf1d19a0852b1ec39c8c6224355abeab9e361a0c694419367fe62",
+          "after": "f331051948661bdf3f42d0df8c3fa2a64ca9ea8527175b916c4a21d2daf0db89"
+        },
+        {
+          "path": "third_party/rust/socket2/src/sockref.rs",
+          "before": "0dbb3de3b6fb457330c09b88ca2c3777a3d1b57a7a91946afac8f5f313e30aa4",
+          "after": "c16dd58f0843a93e697c4f3c34092a385ec68e854ca3c103a493be4a855240eb"
+        }
+      ]
+    },
+    {
+      "file": "0038-native-alix-rlbox-memory.patch",
+      "sha256": "a15c5b61172a920bcfba29ef9d8e55f33602331dd288a0bf61accb337d3a8c7e",
+      "files": [
+        {
+          "path": "third_party/rlbox_wasm2c_sandbox/src/wasm2c_rt_mem.c",
+          "before": "4bacb71f7e509c153f999cd022a2edfeb721be6505b2f0cb5c9d1fab9a6b7000",
+          "after": "56ec67d236d4ddcbe35491872cc954ddc035ce029c0a17f1c89d35e4c41f7b01"
+        }
+      ]
+    },
+    {
+      "file": "0039-native-alix-wabt-signal-context.patch",
+      "sha256": "989c6e8948278968453f8da464af9eae8e3b9e1a431a525eeb027a01dca22402",
+      "files": [
+        {
+          "path": "third_party/wasm2c/wasm2c/wasm-rt.h",
+          "before": "c728b9467fd367db3efa866167a7be3b74fa99234c431a4d44e664c8e7641056",
+          "after": "4e12935633b1f12af10a90b8d21dee078a139b3196c570124cc10ee52c0d3156"
+        }
+      ]
+    },
+    {
+      "file": "0040-native-alix-quinn-udp.patch",
+      "sha256": "8298977e2f52d6fd303af91d5e05d1899f3b1618404327ae6804da2c2a61a768",
+      "files": [
+        {
+          "path": "third_party/rust/quinn-udp/src/lib.rs",
+          "before": "500c187fcb5ea941898ceb56d51c447ce00cfe8df8fa76ef1110b719134b8ec3",
+          "after": "de45cf8c9074d1e6c22aa524fc185957a3008b4fecd207932350dbcb139d4def"
+        },
+        {
+          "path": "third_party/rust/quinn-udp/src/alix.rs",
+          "before": null,
+          "after": "6de1099bddf9c2a14fb9b5dc3bd0379a091f2900cf337746709b457e75508a1f"
+        },
+        {
+          "path": "third_party/rust/quinn-udp/.cargo-checksum.json",
+          "before": "35d187a6c51e446d1d9642a4c540b8f6ba653f58e89f074e55edadfeb3edd46c",
+          "after": "cc4bdd40d7519b1b8ff7443a62c4e8d57b82eb1882633e91122bc959ff9c0c95"
+        }
+      ]
+    },
+    {
+      "file": "0041-native-alix-neqo-udp.patch",
+      "sha256": "c34d9b73993a6aecf24568302171fd66f968eea16f5119f24c99d0022c450b87",
+      "files": [
+        {
+          "path": "third_party/rust/neqo-udp/src/lib.rs",
+          "before": "c76c2fdd06870e6727134ce00511a11e4a99f058b183af8909b0fcedeff7ac30",
+          "after": "285b1db1501c374c09991c9bb9e42e7d3eb6175f5dafe55a992580d844182c67"
+        },
+        {
+          "path": "third_party/rust/neqo-udp/Cargo.toml",
+          "before": "89cdd16fe435ee404acb7d77a8cc2a5838019bcb34ee3e1df77ed25299aed632",
+          "after": "5d2cf50f62f659202dcd66863ab25b26fc34a309e861712c4814d4f40e0759df"
+        },
+        {
+          "path": "third_party/rust/neqo-udp/.cargo-checksum.json",
+          "before": "3eeb499ab679bc9098ea7d729eafa24ee3de590352f7c96f2cd97b3569d8734f",
+          "after": "105452258869e9cc735a0f8beace0ef31a047e532ebd4eec355d56a243f06145"
+        }
+      ]
+    },
+    {
+      "file": "0042-native-alix-neqo-glue-socket.patch",
+      "sha256": "a029ad25c4c50ace796e2a8c195f545ab7a008dda8480cab84cebd9378eb1f99",
+      "files": [
+        {
+          "path": "netwerk/socket/neqo_glue/src/lib.rs",
+          "before": "39015871f3cf48cb16fa5aa7f596246d8c88db244cdbe703970fa9011fba5bcd",
+          "after": "be9d16dbc28e53dec06857c65643145e7022841497476a445c49e37df934b458"
+        }
+      ]
+    },
+    {
+      "file": "0043-native-alix-webrender-font-paths.patch",
+      "sha256": "103352294f3b9bfe33f73eeee1e7004d037bc44fac270cdb075009d1f2da1964",
+      "files": [
+        {
+          "path": "gfx/webrender_bindings/src/bindings.rs",
+          "before": "be3f9be6a0c9a0b4497ce9ff337ab4c9aab607f2f53a83ec2885ec983f0707b0",
+          "after": "4298f687671cd99b8a4aadf15902559c46c69ef816c807f5d5b33cf7326a587f"
+        },
+        {
+          "path": "gfx/webrender_bindings/src/moz2d_renderer.rs",
+          "before": "d77b228dc157f39301e818ace62ef2fd87a39976d00b09a0b4750e4647aeaa7e",
+          "after": "9f30804f6be7d12ee90a92522df580d572155311091005b0f94fcf65ecd261b6"
+        }
+      ]
+    },
+    {
+      "file": "0044-native-alix-graphics-platforms.patch",
+      "sha256": "014696c83341c83f3a4bd1e0a2fc2977eafa57e01a00ca46c2d4e998c3cbbb6d",
+      "files": [
+        {
+          "path": "gfx/skia/skia/include/private/base/SkFeatures.h",
+          "before": "d20d246f13400fe5a0e9f335611d825f936fa469e043e967849db673476196d1",
+          "after": "c15f8e9edae1a0697b2219229249972742fdff3620adef7b0846bd3928bdb49d"
+        },
+        {
+          "path": "gfx/skia/moz.build",
+          "before": "213135d266dd55aaab2e213264962ae666c8a8ecaa1a30692f8e1ab1b51e6c90",
+          "after": "1c03fb4cc9ff60c7d323eb912492fac0ddff7f01075825913787ee14b471d5e4"
+        },
+        {
+          "path": "gfx/skia/generate_mozbuild.py",
+          "before": "b2218f48ce61a748e9895537a3bee3707068c6ae4003aa641892264292464494",
+          "after": "e1bda3ec644c0971470d98a1f4a70ee5a625cd32735340773135e4e5b8746584"
+        },
+        {
+          "path": "gfx/2d/moz.build",
+          "before": "5a61e353f667293bf838b82207450d2363ee69aa18790e5852e40220a7d4d1eb",
+          "after": "3d3c6b9fed74bd918773cdf6e3ae1084df696571460f82655cebee0540e638f9"
+        },
+        {
+          "path": "widget/generic/PCompositorWidget.ipdl",
+          "before": "72b54b6031b08a1a7fe385b7bdd8e1c8248a5e2e41db4bd89702120dcc93cda4",
+          "after": "9bf2f9539f30227adc7857de5540f988172240b36c82657f2b27752a3e1132de"
+        },
+        {
+          "path": "modules/libpref/init/StaticPrefList.yaml",
+          "before": "d52399cc74e28bb91ec40cc83b57834ce6127452635a8d2a3e3e60a7af2fe330",
+          "after": "aa38a385b70c97878c7ef56e7267e3ad0f2bea337c99329edb0b845233590b53"
+        },
+        {
+          "path": "gfx/webrender_bindings/moz.build",
+          "before": "0402305e5e52eaa3faceb0bc923e5a0e03963db30240a667e52b363fb2430156",
+          "after": "dff5789f9c65b9b18109a136f67a01c96f67e6decd949a10dd7d3906a54eedcc"
+        },
+        {
+          "path": "gfx/webrender_bindings/Moz2DImageRenderer.cpp",
+          "before": "b033627089540258bde23708c1cfef160a77505aa1321148ae1ec8458a8af76c",
+          "after": "40178206d53d40005d96daef610293e999ca66cde1856215c36d07c5839b47d4"
+        }
+      ]
+    },
+    {
+      "file": "0045-native-alix-process-launcher.patch",
+      "sha256": "e1dc8ea358d9f1f258eece4ed62b6d92d27916615ed7551e6c6f621fd7b93dfa",
+      "files": [
+        {
+          "path": "ipc/chromium/moz.build",
+          "before": "614598f486815bd0556264213511fa11fee8afb126d84995f5a9417457e1d68f",
+          "after": "d4c8eacff294567ae7eff72de3bf075e59ed687e3ccb6c0bafff3a666799c15e"
+        },
+        {
+          "path": "ipc/chromium/src/base/process_util_posix.cc",
+          "before": "b32cca5a5ac65adc2a635cf579bf077508418e2c486aa21b196d99127809bc6a",
+          "after": "1d0b93672f57baf6c37609f41d27aeeb58cddedf5c0ff1771d786ed98b975a02"
+        },
+        {
+          "path": "ipc/glue/GeckoChildProcessHost.cpp",
+          "before": "4d754c105d8893e0c95e781996cca68b60e0550fb8048716a904efa18929e0a8",
+          "after": "76f7bf6cccfddda40a8d2783ec746cbdc974c0b9910712acbd33b27f49240c03"
+        },
+        {
+          "path": "ipc/chromium/src/base/process_util_alix.cc",
+          "before": null,
+          "after": "8a28ed1d1136510f881b8e141a6e4a3b938c01fb88043187204742d0a2358099"
+        }
+      ]
+    },
+    {
+      "file": "0046-native-alix-libevent.patch",
+      "sha256": "1e6c03a19d5df756b260c0c348a0202317cbbcbbf614b78c48b5cbd65c57c6ba",
+      "files": [
+        {
+          "path": "ipc/chromium/src/third_party/libeventcommon.mozbuild",
+          "before": "d986dcbcb7ae0c187992a315816512f3111756eebd288e8aa810d15b33287f6d",
+          "after": "9f5d7ecad510c3dcc502be49c74b5cf8ef8001de9c52a1dc9ce2feb036e28c40"
+        },
+        {
+          "path": "ipc/chromium/src/third_party/libevent/alix/event2/event-config.h",
+          "before": null,
+          "after": "d7148b5f473ce2bc1d800d1ed893412f7ba3241d3f516d58b3778c37ce0e4b04"
+        },
+        {
+          "path": "ipc/chromium/src/third_party/libevent/arc4random.c",
+          "before": "eedd93aa557c195e8a94b58202012b1dc33f682e06ce56ada8bf6028ebe76144",
+          "after": "d616f3b3137f09051450f47bbca167b1efbce14e16dcb4402a7b227a1c8cebe7"
+        },
+        {
+          "path": "ipc/chromium/src/third_party/libevent/select.c",
+          "before": "7ca34229e0c83581700f680be4e2d04b435b6e6ec2673d3003b84027c0b0a314",
+          "after": "15fbc864c521c8abee0583a01cf15cb448a930c287176a8551b5a93f16b5d534"
+        }
+      ]
+    },
+    {
+      "file": "0047-native-alix-system-font.patch",
+      "sha256": "2d09cd708ad42333dfeaf2ad793c14b1d092b5bc5f49e820b2607d538ea58c18",
+      "files": [
+        {
+          "path": "layout/base/nsLayoutUtils.cpp",
+          "before": "0b57e04efeffb6ad97fd57bcaeb1dd167fd30542c1b61db015f9081cc5ca30f3",
+          "after": "dd516b1e762f4592ed089665cf95b0aae609f82a5c094918546d5fd676af1a4b"
         }
       ]
     }

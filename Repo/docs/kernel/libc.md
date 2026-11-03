@@ -19,6 +19,22 @@ limits, while the ordinary runtime rejects private FD-limit operations.
 Both profiles query the current address-space quota through checked kernel
 metadata copies. See [descriptor limits](descriptor_limits.md).
 
+Native ELF shared libraries, symbol lookup and dynamic TLS now have real
+eight-CPU execution evidence. See [dynamic loading](dynamic_loading.md) for
+the executable export contract, lifetime rules and remaining ABI limits.
+
+Native `sigwait` accepts blocked signals through the shared kernel registry,
+including competing waiters and use inside a signal handler. Its error-number,
+mask and checked-copy contracts are documented in [signals](signals.md).
+
+The owned runtime also supplies regular-file shared/private mappings and
+`msync`. The same ABI is available through Gecko's vendored Rust libc; see
+[file mappings](file_mappings.md) for lifetime, persistence and current limits.
+
+Native `writev` gathers checked inputs into one owned write request, preserving
+the backend's pipe atomicity and append/offset serialization. See
+[vectored I/O](vectored_io.md).
+
 `user/lib/libc.c` retains the native allocator, byte streams, formatting, process
 lifecycle and blocking primitives. Additional modules provide calendar/timezone,
 locales, wide characters, strings, file management, generic atomic operations,
@@ -43,6 +59,13 @@ round through double. The native `frexpl` ABI helper remains in `user/lib/math.c
 The compiler's complex multiply/divide helpers are extracted from its native
 libgcc archive into a regular ELF object, preserving the runtime-object manifest
 contract. See [the numeric port notes](../../ports/zen/libm/README.md).
+
+The POSIX `random`, `srandom`, `initstate` and `setstate` family uses pinned musl
+1.2.5 code with Alix's existing mutex. Its 31-bit stream is separate from `rand`.
+State buffers remain caller-owned and must stay live while active. Native
+eight-CPU acceptance covers concurrent generation, reseeding, state restoration,
+range and independent `rand` state; run `make zen-random-qemu-test`. These are
+deterministic generators. `getrandom`/`getentropy` provide the kernel entropy API.
 
 The numeric library advertises `math_errhandling == MATH_ERREXCEPT`; native
 `sqrtf` and `scalbnf` also preserve their existing errno contracts. Environment
@@ -145,6 +168,15 @@ production environment and semaphore implementations. Native evidence is
 20,000 tokens, payload handoffs, timeouts, signals, spawn snapshots and `_exit`.
 Run `make zen-posix-runtime-qemu-test` to reproduce it.
 
+`sleep` is declared in `unistd.h` and uses the existing interruptible
+`nanosleep` timer path. It returns unslept whole seconds on interruption,
+preserves errno after a completed wait, and accepts the full unsigned-second
+range without millisecond overflow. It does not install an alarm or change
+signal dispositions. `make zen-sleep-qemu-test` checks eight pinned CPUs,
+one-second waits, sixteen signal interruptions with and without SA_RESTART,
+UINT_MAX durations and zero waits. The host sanitizer contract also checks
+fractional remaining time, timer failures and chunked large durations.
+
 `sched.h` exposes scheduler yielding and current CPU queries through the real
 native thread syscalls. The C++ fixture checks both after pinning workers to all
 eight CPUs. This does not implement POSIX realtime scheduling policies.
@@ -194,8 +226,29 @@ AlixFS two-boot test now adds a file shrunk from six to three bytes, regrown to
 8192 bytes, synced and read back with its zero-fill intact after remount.
 The upstream Rust File/OwnedFd, directory/path and pipe backends now use the
 native libc boundary and pass `make zen-rust-runtime-qemu-test` in eight-CPU
-Alix. Unsupported byte-range fcntl locking, permission/time changes, copying, link creation and
+Alix. Unsupported Rust permission/time mutation, copying, link creation and
 recursive removal still report errors explicitly.
+
+New `struct stat` records are 88 bytes and add device/inode/link identity,
+owner/group, preferred I/O size and a size-based 512-byte block count. The public
+stat/lstat/fstat declarations bind to `alix_stat_v2`, `alix_lstat_v2` and
+`alix_fstat_v2`. Original ELF symbols keep their 40-byte records for installed
+programs and the current Rust std backend. The native owned profile obtains
+full replies directly through checked kernel copying; the global-descriptor
+profile retains its older size/type/timestamp result with zero extra fields.
+The actual Gecko Rust libc bindings use the new layout and versioned symbols.
+
+`fchown` now changes owned regular-file credentials through protected storage
+requests. It preserves identity/content and supports the unchanged-field
+sentinel. Caller authorization and independent disk readback are covered by
+the [VFS identity and ownership tests](vfs.md#file-identity-and-ownership).
+`fchmod` now changes/persists basic `0777` bits for an owned regular file, with
+owner/root authorization and captured heap requests. File-type bits are ignored;
+set-ID/sticky modes fail explicitly until their policies exist. The authorization
+matches the owner/superuser rule in the [fchmod reference](https://man.openbsd.org/chmod.2).
+The native C/Rust fixture checks mode `0640`, and the separate-boot disk fixture
+reads it back. Creation modes/umask and full path-search enforcement remain work.
+Native C fcntl byte-range locks and utimes have separate acceptance below.
 
 Owned-profile flock now supplies shared/exclusive whole-file advisory locks,
 nonblocking attempts and allocation-free unlock. Open-description ownership
@@ -203,7 +256,16 @@ survives dup and inheritance; separate opens conflict across CPUs/processes.
 Pending event-driven acquisitions use cancellable reservations and live-caller
 commit. Native C and Rust tests cover close/reuse, rename, signal interruption
 and killed-owner cleanup. See [whole-file locks](flock.md) for conversion,
-retirement and the remaining process-owned byte-range-locking work.
+retirement and the separately implemented process-owned byte-range locks.
+
+`utimes` captures a path and optional pair of 16-byte timevals in registered
+storage requests. Explicit times require owner/root; NULL selects the current
+time and also permits a nonowner with write access. The filesystem stores whole
+seconds, rounding down microseconds. Invalid fractions/pre-epoch seconds fail;
+old mounted formats without timestamp storage return ENOTSUP. Content and mode
+are unchanged. The independent disk fixture now reads back explicit access and
+modification times, and actual Gecko Rust libc calls utimes and the 24-byte
+record-lock API in Alix.
 
 Owned-profile `mkdir` uses a registered heap-owned path/cwd/credential request
 and one VFS tree transaction. Existing files, directories and symlinks return

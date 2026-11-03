@@ -21,14 +21,21 @@ const _: [(); 4] = [(); core::mem::size_of::<libc::uid_t>()];
 const _: [(); 4] = [(); core::mem::size_of::<libc::gid_t>()];
 const _: [(); 16] = [(); core::mem::size_of::<libc::rlimit>()];
 const _: [(); 8] = [(); core::mem::size_of::<libc::ip_mreq>()];
+const _: [(); 8] = [(); core::mem::size_of::<libc::sigset_t>()];
+const _: [(); 88] = [(); core::mem::size_of::<libc::stat>()];
+const _: [(); 24] = [(); core::mem::size_of::<libc::flock>()];
+const _: () = assert!(core::mem::offset_of!(libc::flock,l_type)==20 && core::mem::offset_of!(libc::flock,l_whence)==22);
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo<'_>) -> ! { unsafe { libc::abort() } }
 unsafe extern "C" {
+    fn alix_rust_stat_abi(bytes:size_t,inode:size_t,owner:size_t,blocks:size_t)->c_int;
     fn alix_rust_ioctl_abi(readable:c_ulong,nonblock:c_ulong,set_close:c_ulong,clear_close:c_ulong,win_size:size_t)->c_int;
     fn alix_rust_identity_abi(size:size_t,machine_offset:size_t,uid:libc::uid_t,gid:libc::gid_t)->c_int;
     fn alix_rust_sync_abi(flags:u64)->c_int;
     fn alix_rust_limit_abi(bytes:size_t,nofile:c_int,address:c_int,infinity:libc::rlim_t,multicast:size_t)->c_int;
+    fn alix_rust_signal_abi(bytes:size_t,block:c_int,unblock:c_int,setmask:c_int)->c_int;
+    fn alix_rust_mapping_abi(shared:c_int,private:c_int,sync:c_int,asynchronous:c_int,invalidate:c_int)->c_int;
 }
 
 struct Memory(*mut c_void);
@@ -50,6 +57,20 @@ pub unsafe extern "C" fn alix_rust_libc_ffi_test(
     if replacement.is_null() { return 3; }
     memory.0 = replacement;
     let bytes = memory.0.cast::<u8>();
+    if alix_rust_stat_abi(core::mem::size_of::<libc::stat>(), core::mem::offset_of!(libc::stat,st_ino),
+        core::mem::offset_of!(libc::stat,st_uid), core::mem::offset_of!(libc::stat,st_blocks)) != 1 {return 60;}
+    if alix_rust_signal_abi(core::mem::size_of::<libc::sigset_t>(),libc::SIG_BLOCK,
+        libc::SIG_UNBLOCK,libc::SIG_SETMASK)!=1 {return 43;}
+    let signal_set=bytes.add(13000).cast::<libc::sigset_t>();
+    let old_mask=signal_set.add(1);
+    let signal_number=old_mask.add(1).cast::<c_int>();
+    *signal_set=1u64 << (libc::SIGUSR1-1);
+    if libc::sigprocmask(libc::SIG_BLOCK,signal_set,old_mask)!=0 ||
+        libc::raise(libc::SIGUSR1)!=0 {return 44;}
+    *libc::__errno_location()=libc::EDOM;
+    if libc::sigwait(signal_set,signal_number)!=0 || *signal_number!=libc::SIGUSR1 ||
+        *libc::__errno_location()!=libc::EDOM ||
+        libc::sigprocmask(libc::SIG_SETMASK,old_mask,core::ptr::null_mut())!=0 {return 45;}
     for index in 0..8192 { *bytes.add(index) = (index % 251) as u8; }
     libc::memset(bytes.add(8192).cast(), 0, 8192);
     if alix_rust_identity_abi(core::mem::size_of::<libc::utsname>(),
@@ -85,6 +106,17 @@ pub unsafe extern "C" fn alix_rust_libc_ffi_test(
         libc::ftello(stream.0) != 8192 || libc::fseeko(stream.0, 0, libc::SEEK_SET) != 0 ||
         libc::fread(bytes.add(8192).cast(), 1, 8192, stream.0) != 8192 ||
         libc::memcmp(bytes.cast(), bytes.add(8192).cast(), 8192) != 0 { return 8; }
+    if alix_rust_mapping_abi(libc::MAP_SHARED,libc::MAP_PRIVATE,libc::MS_SYNC,
+        libc::MS_ASYNC,libc::MS_INVALIDATE)!=1 {return 46;}
+    let mapped=libc::mmap(core::ptr::null_mut(),8192,libc::PROT_READ|libc::PROT_WRITE,
+        libc::MAP_SHARED,libc::fileno(stream.0),0);
+    let peer=libc::mmap(core::ptr::null_mut(),4096,libc::PROT_READ,
+        libc::MAP_SHARED,libc::fileno(stream.0),4096);
+    if mapped==libc::MAP_FAILED || peer==libc::MAP_FAILED {return 47;}
+    *mapped.cast::<u8>().add(4096+123)=0x5b;
+    if *peer.cast::<u8>().add(123)!=0x5b || libc::msync(mapped,8192,libc::MS_SYNC)!=0 ||
+        libc::mprotect(mapped,4096,libc::PROT_READ)!=0 ||
+        libc::munmap(mapped,8192)!=0 || libc::munmap(peer,4096)!=0 {return 48;}
     let far = (1 << 33) + 7;
     if libc::fseeko(stream.0, far, libc::SEEK_SET) != 0 || libc::ftello(stream.0) != far ||
         libc::fileno(stream.0) < 0 { return 9; }
@@ -103,6 +135,26 @@ pub unsafe extern "C" fn alix_rust_libc_ffi_test(
         libc::pread(fd, bytes.add(8192).cast(), 1024, 8192) != 1024 { return 27; }
     for index in 8192..9216 { if *bytes.add(index) != 0 { return 28; } }
     if libc::ftruncate(fd, 3) != 0 { return 29; }
+    let info = bytes.add(10000).cast::<libc::stat>();
+    let peer_info = info.add(1);
+    if libc::fstat(fd, info) != 0 || libc::stat(path, peer_info) != 0 ||
+        (*info).st_ino == 0 || (*info).st_dev == 0 || (*info).st_nlink != 1 || (*info).st_size != 3 ||
+        (*peer_info).st_ino != (*info).st_ino || (*peer_info).st_dev != (*info).st_dev ||
+        (*info).st_blksize != 4096 || (*info).st_blocks != 1 {return 61;}
+    if libc::fchown(fd, u32::MAX, u32::MAX) != 0 || libc::lstat(path, peer_info) != 0 ||
+        (*peer_info).st_uid != (*info).st_uid || (*peer_info).st_gid != (*info).st_gid {return 62;}
+    if libc::fchmod(fd, libc::S_IRUSR|libc::S_IWUSR|libc::S_IRGRP) != 0 || libc::fstat(fd,info) != 0 ||
+        (*info).st_mode & 0o777 != 0o640 {return 63;}
+    let record=bytes.add(10400).cast::<libc::flock>();
+    *record=libc::flock{l_start:1,l_len:2,l_pid:123,l_type:libc::F_WRLCK as i16,l_whence:libc::SEEK_SET as i16};
+    if libc::fcntl(fd,libc::F_SETLK,record)!=0 || libc::fcntl(fd,libc::F_GETLK,record)!=0 ||
+        (*record).l_type!=libc::F_UNLCK as i16 || (*record).l_pid!=123 {return 64;}
+    (*record).l_start=0;(*record).l_len=0;
+    if libc::fcntl(fd,libc::F_SETLK,record)!=0 {return 65;}
+    let times=bytes.add(10200).cast::<libc::timeval>();
+    *times=libc::timeval{tv_sec:123456789,tv_usec:0};*times.add(1)=libc::timeval{tv_sec:123456790,tv_usec:0};
+    if libc::utimes(path,times)!=0 || libc::stat(path,peer_info)!=0 ||
+        (*peer_info).st_atime!=123456789 || (*peer_info).st_mtime!=123456790 {return 66;}
     let readable=bytes.add(8192).cast::<c_int>();let nonblock=readable.add(1);*nonblock=1;
     if libc::ioctl(fd,libc::FIONREAD,readable)!=0 || *readable!=0 ||
         libc::ioctl(fd,libc::FIONBIO,nonblock)!=0 || libc::fcntl(fd,libc::F_GETFL)&libc::O_NONBLOCK==0 {return 34;}

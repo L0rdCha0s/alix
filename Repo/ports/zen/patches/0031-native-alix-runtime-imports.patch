@@ -1,0 +1,46 @@
+--- a/build/moz.configure/flags.configure
++++ b/build/moz.configure/flags.configure
+@@ -408,7 +408,9 @@
+         # linked against executables, so we must allow undefined
+         # symbols for shared objects in some cases.
+         if not use_sanitizer_runtime:
+-            if target.os != "WINNT":
++            # Alix resolves native runtime imports from the executable export
++            # namespace. Its loader rejects unresolved strong imports at load.
++            if target.os not in ("WINNT", "Alix"):
+                 # Don't allow undefined symbols in libraries
+                 ldopts.append("-Wl,-z,defs")
+
+--- a/nsprpub/pr/src/misc/prenv.c
++++ b/nsprpub/pr/src/misc/prenv.c
+@@ -6,6 +6,9 @@
+ #include <stdlib.h>
+ #include "primpl.h"
+ #include "prmem.h"
++#if defined(ALIX)
++#include "alix_process.h"
++#endif
+
+ #if defined(XP_UNIX)
+ #include <unistd.h>
+@@ -145,7 +148,19 @@
+     return result ? PR_FAILURE : PR_SUCCESS;
+ }
+
+-#if defined(XP_UNIX) && (!defined(DARWIN) || defined(HAVE_CRT_EXTERNS_H))
++#if defined(ALIX)
++PR_IMPLEMENT(char**)
++PR_DuplicateEnvironment(void)
++{
++    /* Snapshot the native environment under its own libc lock, including
++     * changes made outside NSPR. The result uses the shared native allocator. */
++    char** result = alix_environment_copy();
++    if (result == NULL) {
++        PR_SetError(PR_OUT_OF_MEMORY_ERROR, ENOMEM);
++    }
++    return result;
++}
++#elif defined(XP_UNIX) && (!defined(DARWIN) || defined(HAVE_CRT_EXTERNS_H))
+ PR_IMPLEMENT(char**)
+ PR_DuplicateEnvironment(void)
+ {

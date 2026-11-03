@@ -16,6 +16,21 @@ typedef struct stat stat_t;
 #define S_IFCHR  0020000u
 #define S_IFIFO  0010000u
 #define S_IFSOCK 0140000u
+#define S_IRUSR 0400u
+#define S_IWUSR 0200u
+#define S_IXUSR 0100u
+#define S_IRGRP 0040u
+#define S_IWGRP 0020u
+#define S_IXGRP 0010u
+#define S_IROTH 0004u
+#define S_IWOTH 0002u
+#define S_IXOTH 0001u
+#define S_IRWXU 0700u
+#define S_IRWXG 0070u
+#define S_IRWXO 0007u
+#define S_ISUID 04000u
+#define S_ISGID 02000u
+#define S_ISVTX 01000u
 #define S_ISREG(mode)  (((mode) & S_IFMT) == S_IFREG)
 #define S_ISDIR(mode)  (((mode) & S_IFMT) == S_IFDIR)
 #define S_ISBLK(mode)  (((mode) & S_IFMT) == S_IFBLK)
@@ -32,15 +47,27 @@ typedef struct stat
     uint64_t st_atime;
     uint64_t st_mtime;
     uint64_t st_ctime;
+    uint64_t st_dev;
+    uint64_t st_ino;
+    uint64_t st_nlink;
+    uint32_t st_uid;
+    uint32_t st_gid;
+    int64_t st_blksize;
+    int64_t st_blocks;
 } stat_t;
 
 #ifndef KERNEL_BUILD
 #ifdef __cplusplus
 extern "C" {
 #endif
-int fstat(int fd, struct stat *st);
-int stat(const char *path, struct stat *st);
-int lstat(const char *path, struct stat *st);
+/* The unsuffixed ELF symbols retain the original 40-byte ABI for installed
+ * programs and the existing Rust std runtime. New callers use the full record. */
+int fstat(int fd, struct stat *st) __asm__("alix_fstat_v2");
+int stat(const char *path, struct stat *st) __asm__("alix_stat_v2");
+int lstat(const char *path, struct stat *st) __asm__("alix_lstat_v2");
+int fchmod(int fd, mode_t mode);
+mode_t umask(mode_t mask);
+int mkdir(const char *path, mode_t mode);
 #ifdef __cplusplus
 }
 #endif

@@ -10,6 +10,7 @@
 #include "net/dns.h"
 #include "net/ntp.h"
 #include "net/tcp.h"
+#include "net/udp.h"
 #include "interrupts.h"
 #include "timer.h"
 #include "spinlock.h"
@@ -947,6 +948,7 @@ static void igb_dispatch_ipv4(net_interface_t *iface, uint8_t *frame, uint16_t f
             break;
         case 17:
         {
+            if (net_udp_handle_frame(iface, frame, frame_len)) break;
             if (total_len < ip_hlen + 8)
             {
                 break;

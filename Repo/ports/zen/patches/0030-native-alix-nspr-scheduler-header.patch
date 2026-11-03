@@ -1,0 +1,12 @@
+--- a/nsprpub/pr/src/pthreads/ptthread.c
++++ b/nsprpub/pr/src/pthreads/ptthread.c
+@@ -15,6 +15,9 @@
+ #include "prpdce.h"
+ 
+ #include <pthread.h>
++#if defined(ALIX)
++#include <sched.h>
++#endif
+ #include <unistd.h>
+ #include <string.h>
+ #include <signal.h>

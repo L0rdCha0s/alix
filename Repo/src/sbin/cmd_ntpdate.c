@@ -220,7 +220,8 @@ try_server:
     write_be16(udp + 6, udp_sum);
 
     net_ntp_clear_pending();
-    net_ntp_set_pending(sec_part, frac_part_scaled, local_port, server_ip);
+    if (!net_ntp_set_pending(sec_part, frac_part_scaled, local_port, server_ip))
+        return shell_output_error(out, "UDP source port is already in use");
 
     if (!net_if_send_copy(iface, frame, frame_len))
     {

@@ -1,0 +1,83 @@
+--- a/gfx/wr/wr_glyph_rasterizer/Cargo.toml
++++ b/gfx/wr/wr_glyph_rasterizer/Cargo.toml
+@@ -38,7 +38,7 @@
+ rayon = "1"
+ winit = "0.30"
+ 
+-[target.'cfg(any(target_os = "android", all(unix, not(any(target_os = "macos", target_os = "ios")))))'.dependencies]
++[target.'cfg(any(target_os = "alix", target_os = "android", all(unix, not(any(target_os = "macos", target_os = "ios")))))'.dependencies]
+ freetype = { version = "0.7", default-features = false }
+ libc = "0.2"
+ 
+--- a/gfx/wr/wr_glyph_rasterizer/src/lib.rs
++++ b/gfx/wr/wr_glyph_rasterizer/src/lib.rs
+@@ -41,7 +41,7 @@
+ pub mod platform {
+     #[cfg(any(target_os = "macos", target_os = "ios"))]
+     pub use crate::platform::macos::font;
+-    #[cfg(any(target_os = "android", all(unix, not(any(target_os = "ios", target_os = "macos")))))]
++    #[cfg(any(target_os = "alix", target_os = "android", all(unix, not(any(target_os = "ios", target_os = "macos")))))]
+     pub use crate::platform::unix::font;
+     #[cfg(target_os = "windows")]
+     pub use crate::platform::windows::font;
+@@ -50,7 +50,7 @@
+     pub mod macos {
+         pub mod font;
+     }
+-    #[cfg(any(target_os = "android", all(unix, not(any(target_os = "macos", target_os = "ios")))))]
++    #[cfg(any(target_os = "alix", target_os = "android", all(unix, not(any(target_os = "macos", target_os = "ios")))))]
+     pub mod unix {
+         pub mod font;
+     }
+--- a/gfx/wr/wr_glyph_rasterizer/src/platform/unix/font.rs
++++ b/gfx/wr/wr_glyph_rasterizer/src/platform/unix/font.rs
+@@ -26,13 +26,15 @@
+ use crate::rasterizer::{FontInstance, GlyphFormat, GlyphKey};
+ use crate::rasterizer::{GlyphRasterError, GlyphRasterResult, RasterizedGlyph};
+ use crate::types::FastHashMap;
+-#[cfg(any(not(target_os = "android"), feature = "dynamic_freetype"))]
++#[cfg(any(not(any(target_os = "android", target_os = "alix")), feature = "dynamic_freetype"))]
+ use libc::{dlsym, RTLD_DEFAULT};
+ use libc::free;
+ use std::{cmp, mem, ptr, slice};
+ use std::cmp::max;
+ use std::ffi::CString;
+ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
++#[cfg(target_os = "alix")]
++use std::os::alix::ffi::OsStrExt;
+ 
+ 
+ // These constants are not present in the freetype
+@@ -76,7 +78,7 @@
+ }
+ 
+ // Use dlsym to check for symbols. If not available. just return an unimplemented error.
+-#[cfg(any(not(target_os = "android"), feature = "dynamic_freetype"))]
++#[cfg(any(not(any(target_os = "android", target_os = "alix")), feature = "dynamic_freetype"))]
+ macro_rules! ft_dyn_fn {
+     ($func_name:ident($($arg_name:ident:$arg_type:ty),*) -> FT_Error) => {
+         #[allow(non_snake_case)]
+@@ -98,8 +100,8 @@
+     }
+ }
+ 
+-// On Android, just statically link in the symbols...
+-#[cfg(all(target_os = "android", not(feature = "dynamic_freetype")))]
++// Android and Alix use the bundled FreeType and link these symbols directly.
++#[cfg(all(any(target_os = "android", target_os = "alix"), not(feature = "dynamic_freetype")))]
+ macro_rules! ft_dyn_fn {
+     ($($proto:tt)+) => { extern "C" { fn $($proto)+; } }
+ }
+@@ -225,8 +227,10 @@
+                     )
+                 }
+                 FontTemplate::Native(NativeFontHandle { ref path, index }) => {
+-                    let str = path.as_os_str().to_str().unwrap();
+-                    let cstr = CString::new(str).unwrap();
++                    #[cfg(target_os = "alix")]
++                    let cstr = CString::new(path.as_os_str().as_bytes()).unwrap();
++                    #[cfg(not(target_os = "alix"))]
++                    let cstr = CString::new(path.as_os_str().to_str().unwrap()).unwrap();
+                     FT_New_Face(
+                         self.lib,
+                         cstr.as_ptr(),

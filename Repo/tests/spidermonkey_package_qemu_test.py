@@ -22,6 +22,7 @@ from runtime_archive_test import verify_pair
 
 ROOT = Path(__file__).resolve().parents[1]
 CLI = "/usr/bin/js.elf"
+DEMO = "/usr/bin/wasm-demo.js"
 
 
 def require(condition, message):
@@ -52,6 +53,7 @@ def main():
     verify_pair((ROOT / "ports/zen/upstream/obj-js-alix/dist/bin/js").read_bytes(),
                 runtime.read_bytes())
     digest = hashlib.sha1(runtime.read_bytes()).hexdigest()
+    demo_digest = hashlib.sha1((ROOT / "build/wasm-demo.js").read_bytes()).hexdigest()
     guest = None
     with tempfile.TemporaryDirectory(prefix="alix-js-package-") as temporary:
         temporary = Path(temporary)
@@ -63,6 +65,7 @@ def main():
         shutil.copy2(ROOT / "build/EFI/BOOT/BOOTX64.EFI", snapshot / "EFI/BOOT/BOOTX64.EFI")
         shutil.copy2(ROOT / "build/user/user-elfs.zip", http / "build/user/user-elfs.zip")
         shutil.copy2(ROOT / "build/user/runtime/unzip.elf", http / "build/user/runtime/unzip.elf")
+        shutil.copy2(ROOT / "build/wasm-demo.js", http / "build/wasm-demo.js")
         shutil.copy2(ROOT / "tests/spidermonkey_runtime_test.js", http / "runtime.js")
         (http / "helper.js").write_text("function answer() { return 6 * 7; }\n")
         (http / "example.js").write_text(
@@ -79,10 +82,12 @@ def main():
             _, text = guest.command("/usr/bin/dl.sh", timeout=300)
             (out / "dl-install.log").write_text(text)
             require([item["path"] for item in Handler.records] == [
-                "/build/user/runtime/unzip.elf", "/build/user/user-elfs.zip"],
-                "dl.sh did not use exactly the shipped bootstrap and archive")
+                "/build/user/runtime/unzip.elf", "/build/user/user-elfs.zip", "/build/wasm-demo.js"],
+                "dl.sh did not fetch the shipped bootstrap, archive and demo")
             _, text = guest.command(f"sha1sum {CLI}")
             require(digest in text, "installed SpiderMonkey differs from the packaged runtime ELF")
+            _, text = guest.command(f"sha1sum {DEMO}")
+            require(demo_digest in text, "installed demo differs from the published source")
 
             def execute(command, markers=(), status=0):
                 _, text = guest.command(command, timeout=180)
@@ -102,6 +107,16 @@ def main():
                 "ALIX_SPIDERMONKEY_RUNTIME: GC PASS roots=10000 cycles=8",
                 "ALIX_SPIDERMONKEY_RUNTIME: WASM PASS value=42 bounds_trap=1",
                 "ALIX_SPIDERMONKEY_RUNTIME: WORKER PASS shared_atomics=1"))
+            for flags in ("", "--ion-eager --ion-offthread-compile=off "):
+                text = execute("js " + flags + DEMO + (" --require-ion" if flags else ""), (
+                    "PASS WASM MANDELBROT", "PASS WASM I64 / BIGINT", "PASS WASM MEMORY / TRAPS",
+                    "PASS JIT HOT LOOP", "PASS MODERN JAVASCRIPT", "PASS GC ROOT SURVIVAL",
+                    "PASS PROMISE MICROTASKS", "PASS NATIVE WORKER / ATOMICS", "ALIX_DEMO: PASS"))
+                summary = re.search(r"ALIX_DEMO: PASS passed=(\d+) failed=0 skipped=(\d+)", text)
+                require(summary is not None and sum(map(int, summary.groups())) == 9,
+                        "demo did not account for every feature stage")
+                if flags:
+                    require("ion=1" in text, "demo did not observe Ion with eager compilation")
             execute("js -e throw(42)", status=3 << 8)
             execute("js -e quit(7)", status=7 << 8)
             guest.shutdown()
@@ -112,13 +127,17 @@ def main():
             guest = Guest(temporary, snapshot, out, False, "reboot")
             _, text = guest.command(f"sha1sum {CLI}")
             require(digest in text, "installed CLI changed across a cold boot")
+            _, text = guest.command(f"sha1sum {DEMO}")
+            require(demo_digest in text, "installed demo changed across a cold boot")
             execute(CLI + " -e print(" + encoded_marker("ALIX_JS_PACKAGE: REBOOT PASS value=") + "+6*7)",
                     ("ALIX_JS_PACKAGE: REBOOT PASS value=42",))
             guest.shutdown()
             (out / "result.json").write_text(json.dumps({
                 "cpus": 8, "installed_sha1": digest, "native_wait_status": 0,
+                "demo_sha1": demo_digest,
                 "features": ["dl.sh installation", "inline JS", "script/load/arguments",
                              "Ion JIT", "GC", "Wasm traps", "worker Atomics",
+                             "installed compute demo with default and eager Ion options",
                              "runtime error status 3", "quit status 7", "cold-boot persistence"],
                 "http_requests": [item["path"] for item in Handler.records],
             }, indent=2) + "\n")

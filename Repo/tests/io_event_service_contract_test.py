@@ -23,9 +23,27 @@ def main():
                  'include/io_event_service.h','src/kernel/fd/table.c','src/kernel/io/request.c'):
         code += stripped(ROOT / path) + '\n'
     code += 'static wait_queue_t g_io_completion_queue={.initialized=true};\n'
+    code += 'static wait_queue_t g_io_cleanup_queue={.initialized=true};\n'
+    code += 'static bool wait_queue_wait_timeout(wait_queue_t*,wait_queue_predicate_t,void*,uint64_t);\n'
     glue = (ROOT / 'src/kernel/process/process_io.c').read_text()
-    for signature in ('void process_io_notify_completion(', 'int process_io_complete_request('):
+    for signature in ('void process_io_notify_completion(', 'void process_io_notify_cleanup(',
+                      'bool process_io_wait_cleanup(', 'int process_io_complete_request('):
         code += function_definition(glue, signature) + '\n'
+    # No record locks are present in this executor-only fixture. Their real
+    # engine/retirement integration has a separate production contract test.
+    code += r'''
+static size_t io_record_lock_drain(size_t budget){(void)budget;return 0;}
+static bool wait_queue_wait_timeout(wait_queue_t *queue,wait_queue_predicate_t predicate,void *context,uint64_t ticks){
+    CHECK(queue->initialized&&!held_locks&&!prep_guard&&heap_contains(context,1));
+    struct timespec deadline;CHECK(!clock_gettime(CLOCK_REALTIME,&deadline));
+    deadline.tv_nsec+=(long)ticks*10000000;deadline.tv_sec+=deadline.tv_nsec/1000000000;deadline.tv_nsec%=1000000000;
+    CHECK(!pthread_mutex_lock(&wait_lock));++held_locks;
+    bool ready;
+    while(!(ready=predicate(context))){--held_locks;int rc=pthread_cond_timedwait(&wait_changed,&wait_lock,&deadline);++held_locks;
+        CHECK(!rc||rc==ETIMEDOUT);if(rc==ETIMEDOUT)break;}
+    --held_locks;CHECK(!pthread_mutex_unlock(&wait_lock));return ready;
+}
+'''
     code += stripped(ROOT / 'src/kernel/io/event_service.c') + r'''
 
 typedef struct {

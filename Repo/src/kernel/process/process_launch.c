@@ -13,6 +13,7 @@ process_t *process_create_user_elf_prepared(const char *name, const uint8_t *ima
     __atomic_store_n(&watch->pid, process->pid, __ATOMIC_RELEASE);
     __atomic_store_n(&watch->owner, process, __ATOMIC_RELEASE);
     process->uid = context->uid; process->gid = context->gid;
+    process->creation_mask = context->creation_mask;
     if (context->executable_path)
     {
         size_t length = strnlen(context->executable_path, sizeof(process->executable_path));

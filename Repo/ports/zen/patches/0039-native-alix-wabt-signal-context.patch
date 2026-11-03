@@ -1,0 +1,17 @@
+--- a/third_party/wasm2c/wasm2c/wasm-rt.h
++++ b/third_party/wasm2c/wasm2c/wasm-rt.h
+@@ -583,8 +583,14 @@
+ typedef struct {
+   /** Is the jmp buf intialized? */
+   bool initialized;
++  /** Alix has distinct plain and signal-aware context records. Match the
++   * sigsetjmp/siglongjmp API selected below on this non-Windows target. */
++#if defined(__ALIX__)
++  sigjmp_buf buffer;
++#else
+   /** jmp_buf contents */
+   jmp_buf buffer;
++#endif
+ } wasm_rt_jmp_buf;
+ 
+ #ifndef _WIN32

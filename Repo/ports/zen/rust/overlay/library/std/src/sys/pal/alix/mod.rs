@@ -2,6 +2,7 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
 pub mod ffi;
+pub mod net_ffi;
 pub mod futex;
 
 pub unsafe fn init(argc: isize, argv: *const *const u8, _sigpipe: u8) {

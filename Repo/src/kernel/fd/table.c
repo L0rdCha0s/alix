@@ -46,6 +46,8 @@ struct fd_table
     size_t capacity, soft_limit, hard_limit;
     uint64_t next_ticket;
     bool closed;
+    fd_table_close_observer_t close_observer;
+    void *close_context;
     fd_table_entry_t entries[];
 };
 
@@ -353,6 +355,26 @@ int fd_table_set_limits(fd_table_t *table, uint64_t soft, uint64_t hard, bool ra
     return result;
 }
 
+int fd_table_observe_closes(fd_table_t *table, fd_table_close_observer_t observer, void *context)
+{
+    if (!table || !observer) return -EINVAL;
+    spinlock_lock(&table->lock);
+    int result = table->closed ? -EBADF : table->close_observer &&
+        (table->close_observer != observer || table->close_context != context) ? -EBUSY : 0;
+    if (!result) { table->close_observer = observer; table->close_context = context; }
+    spinlock_unlock(&table->lock);
+    return result;
+}
+
+bool fd_table_closed(fd_table_t *table)
+{
+    if (!table) return true;
+    spinlock_lock(&table->lock);
+    bool closed = table->closed;
+    spinlock_unlock(&table->lock);
+    return closed;
+}
+
 void fd_table_shutdown(fd_table_t *table)
 {
     if (!table)
@@ -369,7 +391,10 @@ void fd_table_shutdown(fd_table_t *table)
         return;
     }
     table->closed = true;
+    fd_table_close_observer_t observer = table->close_observer;
+    void *observer_context = table->close_context;
     spinlock_unlock(&table->lock);
+    if (observer) observer(observer_context, NULL);
     /* This caller exclusively owns draining after setting closed. Every
      * other operation checks closed under the lock before touching entries;
      * repeated shutdown calls return without touching them. No allocation or
@@ -584,6 +609,8 @@ static int fd_table_remove(fd_table_t *table, int fd, fd_description_t *expected
     bool deferred = table->retirement_queue != NULL;
     if (deferred) spinlock_preempt_disable();
     fd_description_t *description = NULL;
+    fd_table_close_observer_t observer = NULL;
+    void *observer_context = NULL;
     int result = -EBADF;
     spinlock_lock(&table->lock);
     if (!table->closed && table->entries[fd].description)
@@ -595,12 +622,14 @@ static int fd_table_remove(fd_table_t *table, int fd, fd_description_t *expected
         else
         {
             description = table->entries[fd].description;
+            observer = table->close_observer; observer_context = table->close_context;
             table->entries[fd].description = NULL;
             table->entries[fd].flags = 0;
             result = 0;
         }
     }
     spinlock_unlock(&table->lock);
+    if (description && observer) observer(observer_context, description);
     result = description ? fd_description_put(description) : result;
     if (deferred) spinlock_preempt_enable();
     return result;
@@ -677,6 +706,8 @@ static int fd_table_duplicate_to(fd_table_t *table, int source, int destination,
     if (deferred) spinlock_preempt_disable();
     int result = -EBADF;
     fd_description_t *previous = NULL;
+    fd_table_close_observer_t observer = NULL;
+    void *observer_context = NULL;
     spinlock_lock(&table->lock);
     if (!table->closed && table->entries[source].description)
     {
@@ -700,6 +731,7 @@ static int fd_table_duplicate_to(fd_table_t *table, int source, int destination,
         else
         {
             previous = table->entries[destination].description;
+            observer = table->close_observer; observer_context = table->close_context;
             table->entries[destination].description = description;
             table->entries[destination].flags = flags;
             result = destination;
@@ -708,6 +740,7 @@ static int fd_table_duplicate_to(fd_table_t *table, int source, int destination,
     spinlock_unlock(&table->lock);
     /* POSIX dup2/dup3 atomically replace the descriptor and do not return a
      * replaced description's final-close error. */
+    if (previous && observer) observer(observer_context, previous);
     fd_description_put(previous);
     if (deferred) spinlock_preempt_enable();
     return result;

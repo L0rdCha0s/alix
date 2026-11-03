@@ -1,0 +1,125 @@
+--- a/third_party/rust/mtu/src/lib.rs
++++ b/third_party/rust/mtu/src/lib.rs
+@@ -52,7 +52,7 @@
+     net::IpAddr,
+ };
+ 
+-#[cfg(not(target_os = "windows"))]
++#[cfg(not(any(target_os = "windows", target_os = "alix")))]
+ macro_rules! asserted_const_with_type {
+     ($name:ident, $t1:ty, $e:expr, $t2:ty) => {
+         #[allow(
+@@ -72,16 +72,21 @@
+ #[cfg(any(target_os = "linux", target_os = "android"))]
+ mod linux;
+ 
++#[cfg(target_os = "alix")]
++mod alix;
++
+ #[cfg(target_os = "windows")]
+ mod windows;
+ 
+-#[cfg(not(target_os = "windows"))]
++#[cfg(not(any(target_os = "windows", target_os = "alix")))]
+ mod routesocket;
+ 
+ #[cfg(any(target_os = "macos", bsd))]
+ use bsd::interface_and_mtu_impl;
+ #[cfg(any(target_os = "linux", target_os = "android"))]
+ use linux::interface_and_mtu_impl;
++#[cfg(target_os = "alix")]
++use alix::interface_and_mtu_impl;
+ #[cfg(target_os = "windows")]
+ use windows::interface_and_mtu_impl;
+ 
+@@ -91,14 +96,14 @@
+ }
+ 
+ /// Prepare an error for cases that "should never happen".
+-#[cfg(not(target_os = "windows"))]
++#[cfg(not(any(target_os = "windows", target_os = "alix")))]
+ fn unlikely_err(msg: String) -> Error {
+     debug_assert!(false, "{msg}");
+     Error::other(msg)
+ }
+ 
+ /// Align `size` to the next multiple of `align` (which needs to be a power of two).
+-#[cfg(not(target_os = "windows"))]
++#[cfg(not(any(target_os = "windows", target_os = "alix")))]
+ const fn aligned_by(size: usize, align: usize) -> usize {
+     if size == 0 {
+         align
+@@ -203,7 +208,7 @@
+     }
+ 
+     #[test]
+-    #[cfg(not(target_os = "windows"))]
++    #[cfg(not(any(target_os = "windows", target_os = "alix")))]
+     fn aligned_by() {
+         for (size, align, expected) in [
+             (0, 8, 8),
+@@ -225,7 +230,7 @@
+         match res {
+             Ok(res) => assert_eq!(res, INET),
+             Err(e) => {
+-                #[cfg(not(target_os = "windows"))]
++                #[cfg(not(any(target_os = "windows", target_os = "alix")))]
+                 let no_ipv6 = matches!(e.raw_os_error(), Some(libc::ENETUNREACH | libc::ESRCH));
+                 #[cfg(target_os = "windows")]
+                 let no_ipv6 = e.raw_os_error()
+@@ -253,7 +258,7 @@
+ 
+     #[test]
+     #[should_panic(expected = "test error")]
+-    #[cfg(not(target_os = "windows"))]
++    #[cfg(not(any(target_os = "windows", target_os = "alix")))]
+     #[cfg(debug_assertions)]
+     fn unlikely_error_panics() {
+         crate::unlikely_err("test error".to_string());
+--- /dev/null
++++ b/third_party/rust/mtu/src/alix.rs
+@@ -0,0 +1,38 @@
++// Native Alix route snapshots. No route socket or foreign OS ABI is selected.
++use std::{io::{self, Error, ErrorKind}, net::IpAddr};
++
++#[repr(C)]
++struct RouteInfo {
++    version: u32,
++    mtu: u32,
++    source_ipv4: u32,
++    next_hop_ipv4: u32,
++    interface_name: [u8; 8],
++}
++const _: () = assert!(std::mem::size_of::<RouteInfo>() == 24);
++const _: () = assert!(std::mem::offset_of!(RouteInfo, interface_name) == 16);
++unsafe extern "C" {
++    fn alix_net_route_ipv4(destination: u32, info: *mut RouteInfo) -> core::ffi::c_int;
++}
++
++pub fn interface_and_mtu_impl(remote: IpAddr) -> io::Result<(String, usize)> {
++    let IpAddr::V4(remote) = remote else {
++        return Err(Error::new(ErrorKind::Unsupported, "Alix has no IPv6 route interface"));
++    };
++    let mut info = std::mem::MaybeUninit::<RouteInfo>::uninit();
++    // This bounded synchronous call copies a kernel-owned value to the caller.
++    // No worker retains the pointer or borrows the caller's stack.
++    if unsafe { alix_net_route_ipv4(remote.to_bits(), info.as_mut_ptr()) } != 0 {
++        return Err(Error::last_os_error());
++    }
++    let info = unsafe { info.assume_init() };
++    if info.version != 1 || info.mtu < 68 {
++        return Err(Error::new(ErrorKind::InvalidData, "Invalid native route snapshot"));
++    }
++    let end = info.interface_name.iter().position(|&byte| byte == 0)
++        .filter(|&end| end > 0)
++        .ok_or_else(|| Error::new(ErrorKind::InvalidData, "Invalid native interface name"))?;
++    let name = String::from_utf8(info.interface_name[..end].to_vec())
++        .map_err(|_| Error::new(ErrorKind::InvalidData, "Invalid native interface name"))?;
++    Ok((name, info.mtu as usize))
++}
+--- a/third_party/rust/mtu/.cargo-checksum.json
++++ b/third_party/rust/mtu/.cargo-checksum.json
+@@ -1 +1 @@
+-{"files":{".clippy.toml":"993a239afe67626230020a264a03ed4f641c80fcac76236508a613d1821828c6","Cargo.toml":"dfbe1745c2857dc057f25f7f3f727501d4cb37ca2a97951eeaab408663d06526","LICENSE-APACHE":"a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2","LICENSE-MIT":"4ad721b5b6a3d39ca3e2202f403d897c4a1d42896486dd58963a81f8e64ef61d","README.md":"707c9a5f055ee7c2a85140672e43068d9a1f681c178d76a09a87c8c5d615e0f5","SECURITY.md":"18eb8093a3cff5b669bd106a725fed662f789c3df67ed13cb82366c881d52400","build.rs":"5a35ca3d830cc51b0c9c4db82ba1828860d7d17855d7ce82fd7b8f4000f49ea1","src/bin/mtu-lookup.rs":"9ff9ae9873d1f6faeacf45d8ab5924d3ec680a9c51976538aa15bbe304a228c6","src/bindings/bsd.h":"706ea0ae2f03755db5f8dfa9dbc8dd2492e626e3868f44641c64022b19fc4e1d","src/bindings/freebsd.rs":"fce9e954ef2ab9dd97196a823055517e7dc5fe692bfd4865bae6c4ae9e34bdba","src/bindings/linux.h":"792c428866f989130e5bd96aee2bb3976bdaf26dbf81a9e2a129dc5a39c82a56","src/bindings/linux.rs":"71cab85a4aa9ea3fc09947d19ceb6e1c72febcc99a69d16ce0719961699c2422","src/bindings/macos.rs":"5cfd0310a2bd411743166fe3e4b5235f36931840edb864581a59ae83e7bcc3a7","src/bindings/netbsd.rs":"ffc9689baca349ecae41251c6e98a1947e9bad232b167caa1ba586dfef5fa457","src/bindings/openbsd.rs":"3b112faaf7a24fbe781908f32ece6e08d6c62ef2d317bd0cb851bbd2a6c89ddd","src/bindings/solaris.rs":"3c44a1ba295913c82f3bed0bf4cb1845c805a306cf3503303b1df4822e887cc3","src/bsd.rs":"097ee3dfd29414dfa6d7010eeaa7706d45f85e48cd28c3073e576beb92e2089e","src/lib.rs":"9695266e369a668575f36e4dd39666ad50b91d66d35eaf760bbc1c12a41dc27a","src/linux.rs":"7acfd90efcf65d4ca303225bce98603a06876e24bbb0c485b7b09854a3037a1b","src/routesocket.rs":"ac369a7f5304c54f24b452be465a9a243f5b39b56e713b58fd9064aff240470c","src/windows.rs":"96b833f13dba872c0894fe4f4e3779de73d747a29f8d51733ea46fd3deb3ab59","tests/netns.rs":"83dbd5e4d935642d99e5f88b209949fc4ac6c736d049d15c4ecc757a24f604da"},"package":null}
+\ No newline at end of file
++{"files":{".clippy.toml":"993a239afe67626230020a264a03ed4f641c80fcac76236508a613d1821828c6","Cargo.toml":"dfbe1745c2857dc057f25f7f3f727501d4cb37ca2a97951eeaab408663d06526","LICENSE-APACHE":"a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2","LICENSE-MIT":"4ad721b5b6a3d39ca3e2202f403d897c4a1d42896486dd58963a81f8e64ef61d","README.md":"707c9a5f055ee7c2a85140672e43068d9a1f681c178d76a09a87c8c5d615e0f5","SECURITY.md":"18eb8093a3cff5b669bd106a725fed662f789c3df67ed13cb82366c881d52400","build.rs":"5a35ca3d830cc51b0c9c4db82ba1828860d7d17855d7ce82fd7b8f4000f49ea1","src/bin/mtu-lookup.rs":"9ff9ae9873d1f6faeacf45d8ab5924d3ec680a9c51976538aa15bbe304a228c6","src/bindings/bsd.h":"706ea0ae2f03755db5f8dfa9dbc8dd2492e626e3868f44641c64022b19fc4e1d","src/bindings/freebsd.rs":"fce9e954ef2ab9dd97196a823055517e7dc5fe692bfd4865bae6c4ae9e34bdba","src/bindings/linux.h":"792c428866f989130e5bd96aee2bb3976bdaf26dbf81a9e2a129dc5a39c82a56","src/bindings/linux.rs":"71cab85a4aa9ea3fc09947d19ceb6e1c72febcc99a69d16ce0719961699c2422","src/bindings/macos.rs":"5cfd0310a2bd411743166fe3e4b5235f36931840edb864581a59ae83e7bcc3a7","src/bindings/netbsd.rs":"ffc9689baca349ecae41251c6e98a1947e9bad232b167caa1ba586dfef5fa457","src/bindings/openbsd.rs":"3b112faaf7a24fbe781908f32ece6e08d6c62ef2d317bd0cb851bbd2a6c89ddd","src/bindings/solaris.rs":"3c44a1ba295913c82f3bed0bf4cb1845c805a306cf3503303b1df4822e887cc3","src/bsd.rs":"097ee3dfd29414dfa6d7010eeaa7706d45f85e48cd28c3073e576beb92e2089e","src/lib.rs":"4c5e8a66400771a28c46d2a221bc0a49cde79204f4909772a40f34c4f25fcf33","src/linux.rs":"7acfd90efcf65d4ca303225bce98603a06876e24bbb0c485b7b09854a3037a1b","src/routesocket.rs":"ac369a7f5304c54f24b452be465a9a243f5b39b56e713b58fd9064aff240470c","src/windows.rs":"96b833f13dba872c0894fe4f4e3779de73d747a29f8d51733ea46fd3deb3ab59","tests/netns.rs":"83dbd5e4d935642d99e5f88b209949fc4ac6c736d049d15c4ecc757a24f604da","src/alix.rs":"14d4a02f41ddca7672dffd15da00a553a250d2cdd71e0b0902509a9872132fc0"},"package":null}

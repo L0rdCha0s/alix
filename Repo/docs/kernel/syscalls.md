@@ -29,6 +29,24 @@ Its protected worker resolves/canonicalizes copied path bytes using a retained
 cwd, then the live caller performs the checked output copy. REMOVE mode 2 is
 directory-only; modes 0/1 retain the earlier unlink/C-remove behavior.
 
+`SYSCALL_FILE_STAT_INFO` takes a private fd and an 88-byte metadata output;
+its last two arguments are zero. `SYSCALL_FILE_PATH_INFO` takes a path, that
+output, the existing NOFOLLOW flag and a zero fourth argument. Both capture
+inputs/ownership into registered storage requests and copy results only in the
+live caller. The original 40-byte STAT/STAT_PATH operations remain unchanged.
+`SYSCALL_FILE_CHOWN` takes a private fd and two uint32 owner/group values; its
+fourth argument is zero. UINT32_MAX retains that field. The storage worker uses
+captured credentials for authorization, updates metadata and preserves file
+contents/identity. See [VFS identity](vfs.md#file-identity-and-ownership).
+`SYSCALL_FILE_CHMOD` takes a private fd and uint32 mode, followed by two zero
+arguments. It shares the captured storage path, enforces owner/root authority
+and persists the basic permission bits through the AlixFS mode extension.
+`SYSCALL_FILE_SET_TIMES` takes a captured path and nullable pointer to two native
+timevals (32 bytes), followed by zero arguments. Whole seconds persist where
+the mounted format supports timestamps. Explicit times require owner/root;
+NULL also permits a writer to set current time. Only the storage worker
+mutates metadata; no user pointer or caller stack is retained.
+
 `SYSCALL_FILE_MKDIR` takes an input path and three zero arguments. A registered
 storage request captures its path, cwd and uid/gid. One VFS tree transaction
 creates the directory with those credentials or returns EEXIST for an existing
@@ -39,7 +57,13 @@ create-or-return behavior. Mode/ACL enforcement remains unimplemented.
 flags and two zero arguments. Acquisition uses registered heap-owned leases on
 the event executor and a live-caller reservation commit. Unlock is immediate
 without queue admission. See [whole-file locks](flock.md) for duplicate/close,
-conversion and cancellation semantics. Byte-range fcntl locks remain pending.
+conversion and cancellation semantics.
+
+`SYSCALL_FILE_RECORD_LOCK` takes a private fd, GETLK/SETLK/SETLKW selector,
+24-byte flock pointer and zero fourth argument. Input is captured once; only
+GETLK copies an output. Process-owned ranges use separate leases and FD-table
+close notifications. Relative offsets resolve through protected storage before
+event-driven contention waits. See [record locks](flock.md#process-owned-byte-range-locks).
 
 `SYSCALL_FILE_IOCTL` takes fd, native request number, user pointer and payload
 size. FIONBIO/FIONREAD require exactly four bytes; FIOCLEX/FIONCLEX require a
@@ -250,6 +274,15 @@ wire layout, initialization and failure cleanup under sanitizers. This snapshot
 supplies configured rules or a data identifier; historical timezone conversion
 still needs the user library's timezone implementation and its data files.
 
+## Native file mappings
+
+Regular-file mapping syscall 76 takes address, length, protection, flags,
+private FD and signed file offset in RDI/RSI/RDX/R10/R8/R9. The worker prepares
+owned backing before the caller publishes it through the VM transaction path.
+Syscall 77 takes address, length and sync flags in RDI/RSI/RDX, validates complete
+mapping coverage and submits an owned backing bundle to the storage worker.
+See [file mappings](file_mappings.md) for capabilities, persistence and limits.
+
 ## Native signals and interruptible sleep
 
 These are native Alix calls, not Linux signal layouts. Public libc wrappers
@@ -267,6 +300,7 @@ validation, limits and native acceptance.
 | 63 | `sys_raise(number, tid)` | Queue to a same-process native TID; tid=0 selects the caller. Signal zero probes target existence. |
 | 64 | `sys_kill(pid, number)` | Post to a positive user PID with ownership checks; group/job-control forms return `-ENOTSUP`. |
 | 65 | `sys_sleep_interruptible(milliseconds, remaining)` | Wait with signal interruption; optional remaining output is captured before delivery and bounded by the original milliseconds. |
+| 75 | `sys_sigwait(set, number, size, flags)` | Capture an eight-byte blocked signal set and atomically accept one pending signal after a checked four-byte output copy. Size must be 8 and flags 0. Raw errors are negative; libc returns positive errors and retries internal EINTR. |
 
 Unmasked pending signals deliver at full syscall return frames and timer-preempt
 SYS_YIELD returns. The latter reconstruct the original user PC/RSP and GPRs from

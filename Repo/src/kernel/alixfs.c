@@ -1,5 +1,6 @@
 #include "alixfs.h"
 #include "vfs_internal.h"
+#include "vfs_mapping.h"
 #include "heap.h"
 #include "libc.h"
 #include "serial.h"
@@ -100,6 +101,16 @@ typedef struct __attribute__((packed))
     uint64_t ctime;
 } alixfs_node_disk_v4_t;
 
+/* Optional versioned tail after name/data. Older records end before this
+ * extension; existing header and file-data offsets remain unchanged. */
+#define ALIXFS_MODE_MAGIC UINT64_C(0x45444f4d58494c41)
+typedef struct __attribute__((packed))
+{
+    uint64_t magic;
+    uint32_t version, permissions;
+} alixfs_mode_disk_t;
+_Static_assert(sizeof(alixfs_mode_disk_t) == 16, "AlixFS mode extension ABI");
+
 struct alixfs_mount
 {
     block_device_t *device;
@@ -133,6 +144,11 @@ static uint64_t alixfs_align_u64(uint64_t value, uint64_t align)
     }
     uint64_t mask = align - 1;
     return (value + mask) & ~mask;
+}
+
+bool alixfs_mount_supports_ownership(const alixfs_mount_t *fs)
+{
+    return fs && fs->header.version >= ALIXFS2_VERSION_OWNERSHIP;
 }
 
 static bool alixfs_version_has_ownership(uint32_t version)
@@ -422,6 +438,7 @@ static vfs_node_t *alixfs_new_node(vfs_node_type_t type)
     node->allow_mutation = true;
     node->uid = VFS_UID_ROOT;
     node->gid = VFS_GID_ROOT;
+    node->permissions = type == VFS_NODE_FILE ? 0666u : type == VFS_NODE_BLOCK ? 0600u : 0777u;
     node->refcount = 1;
     node->pending_dirty_bytes = 0;
     spinlock_init(&node->data_lock);
@@ -524,7 +541,7 @@ static bool alixfs_serialize_node(vfs_node_t *node,
 {
     /*
      * Serialize a VFS node into the on-disk payload format:
-     *   [alixfs_node_disk_v*][name bytes][data bytes]
+     *   [alixfs_node_disk_v*][name bytes][data bytes][mode extension]
      *
      * - `name_len` does not include a NUL terminator.
      * - `data_len` is `node->size` for files/symlinks, 0 otherwise.
@@ -542,7 +559,12 @@ static bool alixfs_serialize_node(vfs_node_t *node,
         data_len = node->size;
     }
     size_t header_size = alixfs_node_disk_header_size(version);
-    size_t total = header_size + name_len + (metadata_only ? 0 : data_len);
+    size_t total, full_size;
+    if (__builtin_add_overflow(header_size, name_len, &full_size) ||
+        __builtin_add_overflow(full_size, data_len, &full_size) ||
+        __builtin_add_overflow(full_size, sizeof(alixfs_mode_disk_t), &full_size) || full_size > UINT32_MAX)
+        return false;
+    total = metadata_only ? header_size + name_len + sizeof(alixfs_mode_disk_t) : full_size;
     uint8_t *buffer = (uint8_t *)malloc(total);
     if (!buffer)
     {
@@ -601,6 +623,9 @@ static bool alixfs_serialize_node(vfs_node_t *node,
     {
         memcpy(buffer + offset, node->data, data_len);
     }
+    if (!metadata_only) offset += data_len;
+    alixfs_mode_disk_t *mode = (void *)(buffer + offset);
+    *mode = (alixfs_mode_disk_t){ .magic = ALIXFS_MODE_MAGIC, .version = 1, .permissions = node->permissions & 0777u };
     *out_buf = buffer;
     *out_len = total;
     return true;
@@ -627,6 +652,7 @@ static bool alixfs_write_node(alixfs_mount_t *fs, vfs_node_t *node, bool force_a
     bool metadata_only = false;
 
     spinlock_lock(&node->data_lock);
+    vfs_mapping_pull_locked(node);
     bool dirty = force_all;
     if (!dirty)
     {
@@ -654,7 +680,11 @@ static bool alixfs_write_node(alixfs_mount_t *fs, vfs_node_t *node, bool force_a
     size_t name_len = alixfs_node_name_length(node);
     size_t data_len = (node->type == VFS_NODE_FILE || node->type == VFS_NODE_SYMLINK)
         ? node->size : 0;
-    size_t stored_len = alixfs_node_disk_header_size(fs->header.version) + name_len + data_len;
+    size_t stored_len;
+    if (__builtin_add_overflow(alixfs_node_disk_header_size(fs->header.version), name_len, &stored_len) ||
+        __builtin_add_overflow(stored_len, data_len, &stored_len) ||
+        __builtin_add_overflow(stored_len, sizeof(alixfs_mode_disk_t), &stored_len) || stored_len > UINT32_MAX)
+    { spinlock_unlock(&node->data_lock); return false; }
     /* Timestamp/ownership changes must not copy and rewrite an unchanged file. */
     metadata_only = !force_all && !node->disk_data_dirty && !node->disk_name_dirty &&
         entry->capacity > 0 && entry->length == stored_len;
@@ -683,7 +713,10 @@ static bool alixfs_write_node(alixfs_mount_t *fs, vfs_node_t *node, bool force_a
                               fs->sector_size,
                               next_offset,
                               payload,
-                              payload_len))
+                              metadata_only ? payload_len - sizeof(alixfs_mode_disk_t) : payload_len) ||
+        (metadata_only && !alixfs_device_write(fs->device, fs->sector_size,
+            next_offset + stored_len - sizeof(alixfs_mode_disk_t),
+            payload + payload_len - sizeof(alixfs_mode_disk_t), sizeof(alixfs_mode_disk_t))))
     {
         if (relocated)
         {
@@ -943,6 +976,67 @@ static bool alixfs_load_chunk_table(alixfs_mount_t *fs)
     return true;
 }
 
+/* Mount-only scratch stays on the heap, never on a process/DMA stack. Small
+ * adjacent records share a bounded read-ahead window; large file payloads go
+ * directly to their destination. Remember parent IDs from that first read so
+ * linking the tree does not read every complete file a second time. */
+#define ALIXFS_MOUNT_READ_AHEAD (64u * 1024u)
+typedef struct
+{
+    vfs_node_t *node;
+    uint32_t parent_id;
+} alixfs_load_node_t;
+
+typedef struct
+{
+    uint64_t offset;
+    size_t length;
+    uint8_t data[ALIXFS_MOUNT_READ_AHEAD];
+    alixfs_load_node_t nodes[];
+} alixfs_load_state_t;
+
+static bool alixfs_mount_read(alixfs_mount_t *fs, alixfs_load_state_t *load,
+                              uint64_t offset, void *buffer, size_t length)
+{
+    if (offset >= load->offset && offset - load->offset <= load->length &&
+        length <= load->length - (size_t)(offset - load->offset))
+    {
+        memcpy(buffer, load->data + (size_t)(offset - load->offset), length);
+        return true;
+    }
+
+    size_t sector_size = fs->sector_size;
+    uint64_t device_bytes;
+    if (!sector_size || sector_size > sizeof(load->data) ||
+        __builtin_mul_overflow(fs->device->sector_count, (uint64_t)sector_size, &device_bytes))
+    {
+        return alixfs_device_read(fs->device, sector_size, offset, buffer, length);
+    }
+    uint64_t start = offset - offset % sector_size;
+    size_t prefix = (size_t)(offset - start);
+    size_t span = sizeof(load->data) / sector_size * sector_size;
+    if (length > span - prefix)
+    {
+        return alixfs_device_read(fs->device, sector_size, offset, buffer, length);
+    }
+    if (start >= device_bytes || length > device_bytes - offset)
+    {
+        return false;
+    }
+    if (span > device_bytes - start) span = (size_t)(device_bytes - start);
+    load->length = 0;
+    if (!alixfs_device_read(fs->device, sector_size, start, load->data, span))
+    {
+        /* Read-ahead is speculative: an error beyond the requested record
+         * must not make a previously readable filesystem fail to mount. */
+        return alixfs_device_read(fs->device, sector_size, offset, buffer, length);
+    }
+    load->offset = start;
+    load->length = span;
+    memcpy(buffer, load->data + prefix, length);
+    return true;
+}
+
 /*
  * Load filesystem metadata from disk and populate the mounted VFS subtree.
  *
@@ -965,7 +1059,7 @@ bool alixfs_mount_load(alixfs_mount_t *fs, vfs_mount_t *mount)
         (version != ALIXFS2_VERSION &&
          version != ALIXFS2_VERSION_OWNERSHIP &&
          version != ALIXFS2_VERSION_LEGACY) ||
-        fs->header.node_capacity == 0)
+        fs->header.node_capacity == 0 || fs->header.root_id >= fs->header.node_capacity)
     {
         return false;
     }
@@ -977,12 +1071,15 @@ bool alixfs_mount_load(alixfs_mount_t *fs, vfs_mount_t *mount)
     {
         return false;
     }
-    vfs_node_t **nodes = (vfs_node_t **)calloc(fs->header.node_capacity, sizeof(vfs_node_t *));
-    if (!nodes)
+    size_t nodes_bytes;
+    if (__builtin_mul_overflow((size_t)fs->header.node_capacity, sizeof(alixfs_load_node_t), &nodes_bytes) ||
+        nodes_bytes > SIZE_MAX - sizeof(alixfs_load_state_t))
     {
         return false;
     }
-    nodes[fs->header.root_id] = mount->mount_point;
+    alixfs_load_state_t *load = calloc(1, sizeof(*load) + nodes_bytes);
+    if (!load) return false;
+    load->nodes[fs->header.root_id].node = mount->mount_point;
     vfs_node_t *mount_root = mount->mount_point;
     spinlock_lock(&mount_root->data_lock);
     mount_root->disk_id = fs->header.root_id;
@@ -990,6 +1087,7 @@ bool alixfs_mount_load(alixfs_mount_t *fs, vfs_mount_t *mount)
     mount_root->allow_mutation = true;
     mount_root->uid = VFS_UID_ROOT;
     mount_root->gid = VFS_GID_ROOT;
+    mount_root->permissions = 0777u;
     mount_root->atime = 0;
     mount_root->mtime = 0;
     mount_root->ctime = 0;
@@ -1011,17 +1109,13 @@ bool alixfs_mount_load(alixfs_mount_t *fs, vfs_mount_t *mount)
         uint8_t *buffer = (uint8_t *)malloc(entry->length);
         if (!buffer)
         {
-            free(nodes);
+            free(load);
             return false;
         }
-        if (!alixfs_device_read(fs->device,
-                                 fs->sector_size,
-                                 entry->offset,
-                                 buffer,
-                                 entry->length))
+        if (!alixfs_mount_read(fs, load, entry->offset, buffer, entry->length))
         {
             free(buffer);
-            free(nodes);
+            free(load);
             return false;
         }
         alixfs_node_disk_v2_t disk_common;
@@ -1066,24 +1160,41 @@ bool alixfs_mount_load(alixfs_mount_t *fs, vfs_mount_t *mount)
             free(buffer);
             continue;
         }
-        vfs_node_t *node = nodes[id];
+        size_t content_end;
+        if (__builtin_add_overflow(node_header_size, (size_t)disk_common.name_len, &content_end) ||
+            __builtin_add_overflow(content_end, (size_t)disk_common.data_len, &content_end) || content_end > entry->length)
+        { free(buffer); free(load); return false; }
+        uint32_t permissions = disk_common.type == VFS_NODE_FILE ? 0666u :
+                               disk_common.type == VFS_NODE_BLOCK ? 0600u : 0777u;
+        if (entry->length != content_end)
+        {
+            if (entry->length - content_end != sizeof(alixfs_mode_disk_t))
+            { free(buffer); free(load); return false; }
+            const alixfs_mode_disk_t *mode = (const void *)(buffer + content_end);
+            if (mode->magic != ALIXFS_MODE_MAGIC || mode->version != 1 || (mode->permissions & ~0777u))
+            { free(buffer); free(load); return false; }
+            permissions = mode->permissions;
+        }
+        vfs_node_t *node = load->nodes[id].node;
         if (!node)
         {
             node = alixfs_new_node((vfs_node_type_t)disk_common.type);
             if (!node)
             {
                 free(buffer);
-                free(nodes);
+                free(load);
                 return false;
             }
-            nodes[id] = node;
+            load->nodes[id].node = node;
         }
+        load->nodes[id].parent_id = disk_common.parent_id;
         spinlock_lock(&node->data_lock);
         node->disk_id = id;
         node->mount = mount;
         node->allow_mutation = true;
         node->uid = node_uid;
         node->gid = node_gid;
+        node->permissions = permissions;
         node->atime = node_atime;
         node->mtime = node_mtime;
         node->ctime = node_ctime;
@@ -1095,7 +1206,7 @@ bool alixfs_mount_load(alixfs_mount_t *fs, vfs_mount_t *mount)
             {
                 spinlock_unlock(&node->data_lock);
                 free(buffer);
-                free(nodes);
+                free(load);
                 return false;
             }
             memcpy(name, buffer + offset, disk_common.name_len);
@@ -1116,7 +1227,7 @@ bool alixfs_mount_load(alixfs_mount_t *fs, vfs_mount_t *mount)
             {
                 spinlock_unlock(&node->data_lock);
                 free(buffer);
-                free(nodes);
+                free(load);
                 return false;
             }
             memcpy(node->data, buffer + offset, disk_common.data_len);
@@ -1139,40 +1250,17 @@ bool alixfs_mount_load(alixfs_mount_t *fs, vfs_mount_t *mount)
 
     for (uint32_t id = 0; id < fs->header.node_capacity; ++id)
     {
-        vfs_node_t *node = nodes[id];
+        vfs_node_t *node = load->nodes[id].node;
         if (!node || id == fs->header.root_id)
         {
             continue;
         }
-        alixfs2_chunk_entry_t *entry = &fs->chunks[id];
-        if (entry->capacity == 0 || entry->length < node_header_size)
+        uint32_t parent_id = load->nodes[id].parent_id;
+        if (parent_id >= fs->header.node_capacity)
         {
             continue;
         }
-        uint8_t *buffer = (uint8_t *)malloc(entry->length);
-        if (!buffer)
-        {
-            free(nodes);
-            return false;
-        }
-        if (!alixfs_device_read(fs->device,
-                                 fs->sector_size,
-                                 entry->offset,
-                                 buffer,
-                                 entry->length))
-        {
-            free(buffer);
-            free(nodes);
-            return false;
-        }
-        alixfs_node_disk_v2_t disk;
-        memcpy(&disk, buffer, sizeof(disk));
-        free(buffer);
-        if (disk.parent_id >= fs->header.node_capacity)
-        {
-            continue;
-        }
-        vfs_node_t *parent = nodes[disk.parent_id];
+        vfs_node_t *parent = load->nodes[parent_id].node;
         if (!parent)
         {
             continue;
@@ -1182,7 +1270,7 @@ bool alixfs_mount_load(alixfs_mount_t *fs, vfs_mount_t *mount)
         parent->first_child = node;
     }
 
-    free(nodes);
+    free(load);
     return true;
 }
 

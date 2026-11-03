@@ -53,6 +53,43 @@ implemented default actions terminate the whole process with status
 `SIGABRT`; an ignored disposition or returning handler is followed by raw process
 exit with status 134.
 
+## Synchronous signal waiting
+
+`sigwait(set, number)` uses native syscall 75. The requested set must be blocked
+in the calling thread. The kernel atomically accepts one pending signal from the
+thread or process and writes its number as a four-byte integer. Standard signals
+coalesce, and competing waiters accept each queued signal at most once. Acceptance
+does not run a handler, reset its disposition, or change the caller's mask.
+
+The syscall captures the eight-byte input mask before registering the wait. Its
+embedded queue and mask belong to the heap-owned thread. Registration, pending
+selection and sender wakeup share the scheduler lock; no worker retains the
+caller's output pointer. A checked output copy precedes pending-bit consumption,
+so `EFAULT` preserves the selected signal. Termination removes the waiter without
+making an exited thread runnable again.
+
+The libc function returns zero or a positive error number and preserves `errno`.
+An unrelated caught signal interrupts the internal wait; libc retries after its
+handler returns. Empty, unknown, unsupported job-control or unblocked requested
+sets return `EINVAL`; bad user memory returns `EFAULT`. `SIGKILL` and `SIGSTOP`
+are removed from the set. Existing ignored-signal behavior is unchanged: ignored
+signals are discarded, so callers should install a disposition before waiting
+for one of those signals. `sigwait` can also wait inside an NSPR-style signal
+handler whose action mask blocks the requested signal.
+
+The acceptance and competing-waiter behavior follows the
+[sigwait interface contract](https://man.openbsd.org/sigwait.3). Timed signal
+waiting and `sigsuspend` remain separate work.
+
+`make zen-sigwait-qemu-test` passed in an eight-CPU guest. Its
+`build/test-out/sigwait-qemu.log` records 512 directed waits, eight competing
+process waiters, coalescing, protected and cross-page output failures, argument
+validation, preserved dispositions/masks/errno, unrelated-signal retry, nested
+handler waiting and killing a blocked waiter. Gecko's actual vendored Rust libc
+also passes mask layout, block/raise/wait and mask restoration in
+`rust-libc-ffi-native-qemu.log`. These are component results; complete NSPR and
+Zen startup remain unverified.
+
 ## Hardware faults and editable contexts
 
 Exception entry preserves all 15 general registers and the CPU return frame.
@@ -145,16 +182,17 @@ lifetime violations remain undefined behavior; the kernel cannot detect all of
 them. See `ports/zen/signal_jump/ABI_PLAN.md` for the native 128-byte ABI.
 
 Process groups, job-control stop/continue, real-time queued signals,
-`sigwait`/`sigsuspend` and XSAVE/AVX contexts remain unimplemented.
+timed signal waiting, `sigsuspend` and XSAVE/AVX contexts remain unimplemented.
 
 ## Validation
 
 The full integrated build and active production host tests passed.
-`tests/signal_contract_test.py` runs 172 plain and ASan/UBSan assertions against
+`tests/signal_contract_test.py` runs 201 plain and ASan/UBSan assertions against
 the production module, plus mapping/guard/heap classification checks. It covers
 one-shot selection interleavings, edited-RSP/stale-stack state, masks, nested
 frames, forged returns, FP validation, allocation/copy failure, I/O deferral,
-interrupted sleep and cleanup. Futex, pthread and libc++ threading contracts
+interrupted sleep, synchronous wait publication/cancellation, failed output
+preservation and cleanup. Futex, pthread and libc++ threading contracts
 also pass. Guest-evidence parser tests reject wrong process/status/vector/site
 and a real ELF copy whose expected UD2 is replaced with NOP.
 

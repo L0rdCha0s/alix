@@ -25,6 +25,8 @@
 typedef struct
 {
     unsigned wakeups;
+    int lock;
+    struct thread *head,*tail;
 } wait_queue_t;
 typedef int spinlock_t;
 typedef struct process process_t;
@@ -35,6 +37,7 @@ typedef struct thread
     bool is_user, exited, pending_destroy;
     uint64_t tid;
     void *io_request;
+    bool io_interruptible;
     bool futex_waiting, futex_interrupted, futex_notified;
     wait_queue_t futex_queue;
     unsigned time_slice_remaining;
@@ -45,9 +48,15 @@ typedef struct thread
     uint64_t signal_sequence;
     uint64_t signal_jump_epoch;
     uint32_t signal_depth;
-    int signal_fault_status;
+    int signal_fault_number;
     bool signal_onstack, signal_sleeping, signal_sleep_interrupted;
     wait_queue_t signal_wait_queue;
+    alix_sigset_t sigwait_mask;
+    bool sigwait_active;
+    wait_queue_t sigwait_queue;
+    wait_queue_t *waiting_queue;
+    struct thread *wait_queue_next;
+    unsigned state;
     uint8_t fpu_state[512] __attribute__((aligned(16)));
 } thread_t;
 struct process
@@ -64,6 +73,18 @@ struct process
     alix_siginfo_t signal_info[ALIX_SIGNAL_COUNT];
 };
 static thread_t *model_current;
+#define THREAD_STATE_BLOCKED 1u
+static bool thread_in_run_queue_load(const thread_t *thread) { (void)thread; return false; }
+static void remove_from_run_queue_locked(thread_t *thread) { (void)thread; }
+static void thread_remove_from_wait_queue(thread_t *thread) { thread->waiting_queue=NULL; }
+static void (*model_schedule_hook)(void);
+static void scheduler_schedule(bool force)
+{
+    (void)force;
+    assert(model_schedule_hook);
+    model_schedule_hook();
+}
+static void process_io_cancel_thread_locked(thread_t *thread) { (void)thread; abort(); }
 static process_t *g_process_list;
 static spinlock_t g_process_lock;
 static uint64_t model_flags = RFLAGS_DEFAULT;
@@ -206,7 +227,7 @@ static void spinlock_preempt_enable(void)
 }
 static void wait_queue_init(wait_queue_t *q)
 {
-    q->wakeups = 0;
+    memset(q, 0, sizeof(*q));
 }
 static void wait_queue_wake_all_locked(wait_queue_t *q)
 {
@@ -227,10 +248,11 @@ static _Noreturn void process_exit(int n)
     model_exit_status = n;
     longjmp(model_exit_jump, 1);
 }
-static bool process_kill(process_t *p, int n)
+static _Noreturn void process_exit_signal(int number) { process_exit(128+number); }
+static bool process_kill_signal(process_t *p, int n)
 {
     p->state = PROCESS_STATE_ZOMBIE;
-    model_kill_status = n;
+    model_kill_status = 128+n;
     return true;
 }
 static void process_release_reference(process_t *p)

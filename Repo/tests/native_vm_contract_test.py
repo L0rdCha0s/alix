@@ -18,6 +18,7 @@ def main():
 #include <stdlib.h>
 #include <string.h>
 #include <setjmp.h>
+#include <errno.h>
 #define CHECK(c) do { if (!(c)) { fprintf(stderr,"native VM check failed line %d: %s\n",__LINE__,#c); exit(1); } } while (0)
 #define PAGE_SIZE_BYTES_LOCAL 4096UL
 #define USER_HEAP_BASE (USER_DEFAULT_POINTER_BASE+USER_DEFAULT_HEAP_BASE_OFFSET)
@@ -28,13 +29,19 @@ def main():
 #define SYSCALL_VM_PROT_READ 1u
 #define SYSCALL_VM_PROT_WRITE 2u
 #define SYSCALL_VM_PROT_EXEC 4u
+#define SYSCALL_VM_MAP_SHARED 1u
+#define SYSCALL_MS_ASYNC 1u
+#define SYSCALL_MS_INVALIDATE 2u
+#define SYSCALL_MS_SYNC 4u
 #define SYSCALL_VM_MAP_PRIVATE 2u
 #define SYSCALL_VM_MAP_ANONYMOUS 32u
+#define SYSCALL_VM_MAP_NORESERVE 0x4000u
 #define SYSCALL_VM_MAP_FIXED 16u
 #define SYSCALL_VM_MAP_FIXED_NOREPLACE 0x100000u
 #define SYSCALL_VM_ADVICE_DONTNEED 4u
 #define SYSCALL_VM_ADVICE_POSIX 0x100u
 typedef uintptr_t paddr_t;
+typedef struct fd_description {unsigned refs;bool writable,bundle;size_t count;paddr_t pages[3];struct fd_description *children[3];} fd_description_t;
 typedef struct { unsigned unused; } paging_space_t;
 typedef struct { uint64_t generation; uint32_t cpu_mask; } paging_tlb_ticket_t;
 struct process_vm_area;
@@ -118,12 +125,28 @@ static void process_sleep_ms(uint32_t ms) {
     }
     acknowledged=generation;
 }
+static fd_description_t *model_file_create(void) {return calloc(1,sizeof(fd_description_t));}
+static bool fd_description_get(fd_description_t *f) {CHECK(f && f->refs);++f->refs;return true;}
+static void fd_description_put(fd_description_t *f) {
+    if(!f || --f->refs)return;
+    if(f->bundle)for(size_t i=0;i<f->count;++i)fd_description_put(f->children[i]);
+    else for(size_t i=0;i<f->count;++i)user_memory_free_page(f->pages[i]);
+    free(f);
+}
+static bool io_vfs_mapping_writable(const fd_description_t *f) {return f->writable;}
+static paddr_t io_vfs_mapping_page(const fd_description_t *f,size_t index) {return index<f->count?f->pages[index]:0;}
+static fd_description_t *io_vfs_sync_bundle_create(size_t capacity) {
+    CHECK(capacity<=3);fd_description_t *f=calloc(1,sizeof(*f));CHECK(f);f->refs=1;f->bundle=true;return f;
+}
+static bool io_vfs_sync_bundle_add(fd_description_t *b,fd_description_t *f) {
+    CHECK(b->count<3);fd_description_get(f);b->children[b->count++]=f;return true;
+}
 #define malloc checked_malloc
 #define calloc checked_calloc
 #define free checked_free
 '''
     program += production + r'''
-static const uint32_t anonymous_flags=SYSCALL_VM_MAP_PRIVATE|SYSCALL_VM_MAP_ANONYMOUS;
+static const uint32_t anonymous_flags=SYSCALL_VM_MAP_PRIVATE|SYSCALL_VM_MAP_ANONYMOUS|SYSCALL_VM_MAP_NORESERVE;
 static void clear_process(void) {
     quiescent=true; process_vm_destroy(&process); quiescent=false;
     CHECK(!metadata_live && !physical_live && !memory_locks && irq_flags==512);
@@ -158,10 +181,14 @@ int main(void) {
     CHECK(process_vm_map(&process,0,0,3,anonymous_flags)==-22);
     CHECK(process_vm_map(&process,0,4096,0x80,anonymous_flags)==-22);
     CHECK(process_vm_map(&process,0,4096,3,2)==-22);
+    CHECK(process_vm_map(&process,0,4096,3,anonymous_flags|0x80000000u)==-22);
     CHECK(process_vm_map(&process,0,4096,3,anonymous_flags|0x100000)==-22);
     CHECK(process_vm_map(&process,0x100000000,4096,3,anonymous_flags|16)==-22);
     CHECK(process_vm_map(&process,0,SIZE_MAX,0,anonymous_flags)==-22);
     CHECK(metadata_live==0 && physical_live==0);
+    CHECK(process_vm_map(&process,0,4096,3,anonymous_flags & ~SYSCALL_VM_MAP_NORESERVE)>0);
+    CHECK(physical_live==1);
+    clear_process();
     /* Advisory hints must never make a legal nonfixed reservation fail. */
     const uintptr_t hints[]={1,USER_HEAP_BASE,USER_STUB_CODE_BASE,UINTPTR_MAX};
     for(unsigned i=0;i<sizeof(hints)/sizeof(hints[0]);++i) {
@@ -403,7 +430,37 @@ int main(void) {
     }
     CHECK(!process.vm_areas && !process.vm_pending && !physical_live && !metadata_live);
     clear_process();
-    puts("native VM sparse reserve/discard/fault/protection/split/OOM/delayed-ack/cancellation tests passed");
+    /* File descriptor references, rather than the VMA, own shared physical pages.
+     * Splits, replacement, rollback and delayed acknowledgement retain them. */
+    fd_description_t *file=model_file_create();CHECK(file);file->refs=1;file->count=3;
+    for(size_t i=0;i<3;++i)CHECK(user_memory_alloc_page(&file->pages[i]));
+    base=(uintptr_t)process_vm_map_file(&process,0,12288,1,1,file);
+    CHECK(base==vm_arena_start() && file->refs==2 && physical_live==3);
+    CHECK(process_vm_protect(&process,base,4096,3)==-EACCES && file->refs==2);
+    CHECK(process_vm_advise(&process,base,4096,4)==-ENOTSUP);
+    CHECK(process_vm_protect(&process,base+4096,4096,0)==0 && file->refs==4);
+    CHECK(process_vm_protect(&process,base+4096,4096,1)==0 && file->refs==4);
+    fd_description_t *bundle=NULL;
+    CHECK(process_vm_sync_prepare(&process,base,12288,4,&bundle)==0 && bundle);
+    fd_description_put(bundle);
+    CHECK(process_vm_unmap(&process,base+4096,4096)==0 && physical_live==3);
+    CHECK(process_vm_sync_prepare(&process,base,12288,4,&bundle)==-ENOMEM && !bundle);
+    CHECK(process_vm_map(&process,base,4096,3,anonymous_flags|16)==(int64_t)base);
+    CHECK(physical_live==4 && file->refs==2);
+    CHECK(process_vm_unmap(&process,base,12288)==0 && file->refs==1 && physical_live==3);
+    fd_description_put(file);clear_process();
+    for(int point=0;point<5;++point) {
+        file=model_file_create();CHECK(file);file->refs=1;file->count=1;
+        CHECK(user_memory_alloc_page(&file->pages[0]));
+        fail_metadata=point;
+        int64_t mapped=process_vm_map_file(&process,0,4096,1,1,file);
+        fail_metadata=-1;
+        CHECK(mapped==-ENOMEM || mapped==(int64_t)vm_arena_start());
+        CHECK(physical_live==1);
+        if(mapped>0)CHECK(process_vm_unmap(&process,(uintptr_t)mapped,4096)==0);
+        CHECK(file->refs==1);fd_description_put(file);clear_process();
+    }
+    puts("native VM anonymous/file ownership/split/OOM/delayed-ack/cancellation tests passed");
     return 0;
 }
 '''

@@ -76,7 +76,48 @@ must return to zero.
 
 NSPR's Alix selector now chooses its existing BSD flock implementation, and
 Gecko-vendored Rust libc declares the native function/constants. NSPR's complete
-unix.c compilation still requires the missing ioctl and other OS interfaces.
-POSIX byte-range/process-owned fcntl locks remain unimplemented and are still
-required for SQLite and the broader platform port. These results do not prove
-a complete Gecko link or a running Zen browser.
+unix.c compilation and full NSPR runtime now have separate native acceptance.
+These results do not prove a complete Gecko link or a running Zen browser.
+
+## Process-owned byte-range locks
+
+`fcntl` now implements F_GETLK, F_SETLK and F_SETLKW using the native 24-byte
+flock record: int64 start/length, int32 PID and int16 type/whence. This registry
+is separate from BSD flock. Regular-file locks belong to the process's FD table;
+independent opens/duplicates share that owner, while native spawned processes
+do not inherit its locks. Closing any descriptor for the same node releases the
+process's ranges. Dup2 replacement and final table shutdown notify the registry
+outside FD-table locks. Held ranges retain a deferred file description, never a
+table reference that could prevent shutdown.
+
+Read ranges coexist; write ranges conflict with other owners. GETLK reports a
+conflicting PID and absolute range, or changes only type to UNLCK. It works on
+read-only descriptors too. SETLK reports EAGAIN for a conflict. SETLKW uses an
+interruptible pending event request, retaining old locks until the live caller
+commits. Split/merge, negative lengths, future-EOF ranges and SET/CUR/END offsets
+are supported. CUR/END resolution uses the protected storage worker. These are
+the process-lock rules described by the [fcntl reference](https://man.openbsd.org/fcntl.2).
+
+All asynchronous state lives in owned heap leases. The scalar query snapshot
+used before admission stays on its caller's stack and is copied into the lease;
+its address is never passed to another worker. Queue pressure from completed
+requests waits for cleanup before pinning the original file. A completed storage
+request remains registered during event-admission waits, retaining that file
+through cancellation. Active queue saturation or the 4096-record budget returns
+ENOLCK; allocation can return ENOMEM. The event executor never waits on storage
+or a competing lock. Deadlock-cycle detection is not implemented.
+
+Protected cleanup releases retired records outside leaf locks. Scheduler-locked
+request release never runs a wake callback: process I/O glue sends cleanup
+notifications after releasing scheduler_lock, and cleanup notifies admission
+waiters after reclaiming slots.
+
+`make zen-record-lock-qemu-test` passes 512 lock rounds on eight CPUs, three
+spawned children, conflict PID queries, shared/exclusive ranges, splits, relative
+offsets, close-any-FD/dup2 release, killed holders/waiters, fresh event progress
+and checked-copy failures. The actual Rust libc fixture verifies its ABI and
+calls. `tests/record_lock_contract_test.py` executes the real registry, request
+and FD-table modules under ASan/UBSan and TSan, including allocation failure,
+reservation cancellation, table shutdown and 2048 threaded lock/unlock calls.
+Evidence is `record-lock-qemu.log` and `record-lock.acceptance.json` in
+`build/test-out`.

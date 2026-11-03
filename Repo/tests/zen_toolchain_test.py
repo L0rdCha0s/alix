@@ -33,7 +33,7 @@ def main():
     dry_run = subprocess.run([str(compiler) + "++", "-###", "-x", "c++", "/dev/null"],
                              env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                              check=True).stdout
-    for required in ("-nostdlib", "-static", "user/lib/link.ld", "crt0.o", "libc++.a"):
+    for required in ("-nostdlib", "--export-dynamic", "--no-dynamic-linker", "user/lib/link.ld", "crt0.o", "libc++.a"):
         if required not in dry_run:
             raise RuntimeError(f"compiler link dry run omits native runtime input {required}")
     with tempfile.TemporaryDirectory(prefix="alix-cxx-header-order-") as directory:

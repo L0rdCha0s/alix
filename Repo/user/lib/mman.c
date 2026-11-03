@@ -4,18 +4,41 @@
 
 void *mmap(void *address, size_t length, int protection, int flags, int fd, off_t offset)
 {
-    if (!(flags & MAP_ANONYMOUS) || fd != -1 || offset != 0)
+    bool anonymous = (flags & MAP_ANONYMOUS) != 0;
+    if (anonymous && (fd != -1 || offset != 0))
     {
         errno = ENOTSUP;
         return MAP_FAILED;
     }
-    int64_t result = sys_vm_map((uintptr_t)address, length, (uint32_t)protection, (uint32_t)flags);
+    int64_t result = anonymous ? sys_vm_map((uintptr_t)address, length, (uint32_t)protection, (uint32_t)flags) :
+        sys_vm_file_map((uintptr_t)address,length,(uint32_t)protection,(uint32_t)flags,fd,offset);
     if (result < 0)
     {
         errno = (int)-result;
         return MAP_FAILED;
     }
     return (void *)(uintptr_t)result;
+}
+
+int shm_open(const char *name, int flags, mode_t mode)
+{
+    int64_t result = sys_shm_open(name, (uint32_t)flags, (uint32_t)mode);
+    if (result < 0) { errno = (int)-result; return -1; }
+    return (int)result;
+}
+
+int shm_unlink(const char *name)
+{
+    int result = sys_shm_unlink(name);
+    if (result < 0) { errno = -result; return -1; }
+    return result;
+}
+
+int msync(void *address,size_t length,int flags)
+{
+    int result=sys_vm_sync((uintptr_t)address,length,(uint32_t)flags);
+    if (result<0) {errno=-result;return -1;}
+    return 0;
 }
 
 int mprotect(void *address, size_t length, int protection)

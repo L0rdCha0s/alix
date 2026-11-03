@@ -49,6 +49,7 @@ static void reset_state(void)
     model_address_mapped = false;
     model_flags = RFLAGS_DEFAULT;
     model_interrupt_wait = false;
+    model_schedule_hook = NULL;
     model_ticks = 0;
     model_exit_status = model_kill_status = 0;
 }
@@ -242,7 +243,7 @@ static void failure_contract(void)
         model_fail_alloc = fail;
         exception_frame_t f = fault_frame(14);
         CHECK(!process_signal_fault(&f, 123));
-        CHECK(!first->signal_frames && model_live == 0 && first->signal_fault_status == 139);
+        CHECK(!first->signal_frames && model_live == 0 && first->signal_fault_number == ALIX_SIGSEGV);
     }
     reset_state();
     install_action(ALIX_SIGSEGV, 0);
@@ -381,6 +382,64 @@ static void sleep_contract(void)
     CHECK(!first->signal_sleeping && !first->signal_sleep_interrupted && first->signal_pending);
     CHECK(process_signal_sleep(10, (uintptr_t)left) == -EINTR && *left == 10);
 }
+
+/* Controlled scheduler boundaries cover publication-before-wake and teardown;
+ * the native fixture supplies actual competing eight-CPU execution. */
+static void sigwait_send_at_schedule(void)
+{
+    CHECK(!model_lock && first->sigwait_active);
+    CHECK(first->waiting_queue == &first->sigwait_queue && first->state == THREAD_STATE_BLOCKED);
+    CHECK(process_signal_raise(ALIX_SIGUSR1, 0) == 0);
+    CHECK(first->sigwait_queue.wakeups == 1);
+}
+static void sigwait_cancel_at_schedule(void)
+{
+    CHECK(!model_lock && first->waiting_queue == &first->sigwait_queue);
+    first->exited = true;
+}
+static void sigwait_contract(void)
+{
+    reset_state();
+    install_action(ALIX_SIGUSR1, ALIX_SA_RESETHAND);
+    alix_sigset_t *set = (void *)(model_user + 128);
+    int32_t *number = (void *)(model_user + 144);
+    uint64_t bit = signal_bit(ALIX_SIGUSR1);
+    *set = bit;
+    *number = -1;
+    CHECK(process_signal_wait((uintptr_t)set, (uintptr_t)number, 7, 0) == -EINVAL);
+    CHECK(process_signal_wait((uintptr_t)set, (uintptr_t)number, 8, 1) == -EINVAL);
+    CHECK(process_signal_wait(0, (uintptr_t)number, 8, 0) == -EFAULT);
+    CHECK(process_signal_wait((uintptr_t)set, (uintptr_t)number, 8, 0) == -EINVAL);
+    first->signal_mask = bit;
+    first->signal_pending = bit;
+    model_copy_fail = 1; /* Input capture succeeds; checked output fails. */
+    CHECK(process_signal_wait((uintptr_t)set, (uintptr_t)number, 8, 0) == -EFAULT);
+    CHECK(first->signal_pending == bit && *number == -1 && !first->sigwait_active);
+    model_copy_fail = -1;
+    process->signal_pending = bit;
+    CHECK(process_signal_wait((uintptr_t)set, (uintptr_t)number, 8, 0) == 0);
+    CHECK(*number == ALIX_SIGUSR1 && !first->signal_pending && process->signal_pending == bit);
+    CHECK(process_signal_wait((uintptr_t)set, (uintptr_t)number, 8, 0) == 0);
+    CHECK(!process->signal_pending && process->signal_actions[ALIX_SIGUSR1].handler);
+    first->signal_pending = signal_bit(ALIX_SIGUSR2);
+    CHECK(process_signal_wait((uintptr_t)set, (uintptr_t)number, 8, 0) == -EINTR);
+    CHECK(first->signal_pending == signal_bit(ALIX_SIGUSR2) && !first->sigwait_active);
+    first->signal_pending = 0;
+    model_schedule_hook = sigwait_send_at_schedule;
+    CHECK(process_signal_wait((uintptr_t)set, (uintptr_t)number, 8, 0) == 0);
+    CHECK(*number == ALIX_SIGUSR1 && !first->waiting_queue && !first->sigwait_mask);
+    model_schedule_hook = sigwait_cancel_at_schedule;
+    CHECK(process_signal_wait((uintptr_t)set, (uintptr_t)number, 8, 0) == -ECANCELED);
+    CHECK(first->exited && first->state == THREAD_STATE_BLOCKED && !first->waiting_queue);
+    CHECK(!first->sigwait_active && !first->sigwait_mask);
+    reset_state();
+    install_action(ALIX_SIGUSR1, 0);
+    second->signal_mask = second->sigwait_mask = bit;
+    second->sigwait_active = true;
+    CHECK(process_signal_kill(process->pid, ALIX_SIGUSR1) == 0);
+    CHECK(second->signal_pending == bit && !first->signal_pending);
+    CHECK(second->sigwait_queue.wakeups == 1);
+}
 int main(void)
 {
     model_user_size = 262144;
@@ -397,6 +456,7 @@ int main(void)
     edited_stack_contract();
     pending_allocation_contract();
     sleep_contract();
+    sigwait_contract();
     reset_state();
     CHECK(!model_live && !model_lock && !model_guard);
     free(first);
@@ -404,7 +464,7 @@ int main(void)
     free(process);
     free(model_user);
     printf("Native signal production host contracts: PASS checks=%u frames masks nesting forgery FP preempt "
-           "EINTR cleanup\n",
+           "EINTR sigwait cleanup\n",
            checks);
     return 0;
 }

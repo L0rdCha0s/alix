@@ -1,0 +1,145 @@
+--- a/gfx/skia/skia/include/private/base/SkFeatures.h
++++ b/gfx/skia/skia/include/private/base/SkFeatures.h
+@@ -26,7 +26,7 @@
+     #elif defined(linux) || defined(__linux) || defined(__FreeBSD__) || \
+           defined(__OpenBSD__) || defined(__sun) || defined(__NetBSD__) || \
+           defined(__DragonFly__) || defined(__Fuchsia__) || \
+-          defined(__GLIBC__) || defined(__GNU__) || defined(__unix__)
++          defined(__GLIBC__) || defined(__GNU__) || defined(__unix__) || defined(__ALIX__)
+         #define SK_BUILD_FOR_UNIX
+     #elif TARGET_OS_IPHONE || TARGET_IPHONE_SIMULATOR
+         #define SK_BUILD_FOR_IOS
+--- a/gfx/skia/moz.build
++++ b/gfx/skia/moz.build
+@@ -558,7 +558,7 @@
+     SOURCES += [
+         'skia/src/ports/SkTypeface_mac_ct.cpp',
+     ]
+-if CONFIG['MOZ_WIDGET_TOOLKIT'] == 'gtk':
++if CONFIG['MOZ_WIDGET_TOOLKIT'] in ('gtk', 'alix'):
+     UNIFIED_SOURCES += [
+         'skia/src/ports/SkLog_stdio.cpp',
+         'skia/src/ports/SkOSFile_posix.cpp',
+@@ -650,7 +650,7 @@
+     "/gfx/harfbuzz/src",
+ ]
+
+-if CONFIG['MOZ_WIDGET_TOOLKIT'] in ('gtk', 'android'):
++if CONFIG['MOZ_WIDGET_TOOLKIT'] in ('gtk', 'android', 'alix'):
+     LOCAL_INCLUDES += [
+         "/gfx/cairo/cairo/src",
+     ]
+--- a/gfx/skia/generate_mozbuild.py
++++ b/gfx/skia/generate_mozbuild.py
+@@ -98,7 +98,7 @@
+     "/gfx/harfbuzz/src",
+ ]
+
+-if CONFIG['MOZ_WIDGET_TOOLKIT'] in ('gtk', 'android'):
++if CONFIG['MOZ_WIDGET_TOOLKIT'] in ('gtk', 'android', 'alix'):
+     LOCAL_INCLUDES += [
+         "/gfx/cairo/cairo/src",
+     ]
+@@ -425,7 +425,7 @@
+   f.write("if CONFIG['MOZ_WIDGET_TOOLKIT'] in ('cocoa', 'uikit'):\n")
+   write_sources(f, sources['mac'], 4)
+
+-  f.write("if CONFIG['MOZ_WIDGET_TOOLKIT'] == 'gtk':\n")
++  f.write("if CONFIG['MOZ_WIDGET_TOOLKIT'] in ('gtk', 'alix'):\n")
+   write_sources(f, sources['linux'], 4)
+
+   f.write("if CONFIG['MOZ_WIDGET_TOOLKIT'] == 'windows':\n")
+--- a/gfx/2d/moz.build
++++ b/gfx/2d/moz.build
+@@ -87,7 +87,7 @@
+     ]
+     DEFINES["WIN32"] = True
+
+-if CONFIG["MOZ_WIDGET_TOOLKIT"] in ("android", "gtk"):
++if CONFIG["MOZ_WIDGET_TOOLKIT"] in ("android", "gtk", "alix"):
+     EXPORTS.mozilla.gfx += [
+         "UnscaledFontFreeType.h",
+     ]
+@@ -101,7 +101,7 @@
+         "ScaledFontFontconfig.cpp",
+     ]
+
+-if CONFIG["MOZ_WIDGET_TOOLKIT"] == "android":
++if CONFIG["MOZ_WIDGET_TOOLKIT"] in ("android", "alix"):
+     SOURCES += [
+         "ScaledFontFreeType.cpp",
+     ]
+@@ -193,12 +193,12 @@
+ for var in ("USE_CAIRO", "MOZ2D_HAS_MOZ_CAIRO"):
+     DEFINES[var] = True
+
+-if CONFIG["MOZ_WIDGET_TOOLKIT"] in ("android", "gtk"):
++if CONFIG["MOZ_WIDGET_TOOLKIT"] in ("android", "gtk", "alix"):
+     DEFINES["MOZ_ENABLE_FREETYPE"] = True
+
+ COMPILE_FLAGS["WARNINGS_CXXFLAGS"] += ["-Werror=switch"]
+
+-if CONFIG["MOZ_WIDGET_TOOLKIT"] in ("android", "gtk"):
++if CONFIG["MOZ_WIDGET_TOOLKIT"] in ("android", "gtk", "alix"):
+     CXXFLAGS += CONFIG["CAIRO_FT_CFLAGS"]
+
+ LOCAL_INCLUDES += CONFIG["SKIA_INCLUDES"]
+--- a/widget/generic/PCompositorWidget.ipdl
++++ b/widget/generic/PCompositorWidget.ipdl
+@@ -4,8 +4,11 @@
+
+ include protocol PCompositorBridge;
+
+-// This file is a stub, for platforms that do not yet support out-of-process
+-// compositing or do not need specialized types to do so.
++include "mozilla/GfxMessageUtils.h";
++
++using mozilla::LayoutDeviceIntSize from "Units.h";
++
++// Common compositor messages for platforms without native window protocol types.
+
+ namespace mozilla {
+ namespace widget {
+@@ -18,6 +21,8 @@
+ parent:
+   async __delete__();
+
++  async NotifyClientSizeChanged(LayoutDeviceIntSize aClientSize);
++
+ child:
+   async ObserveVsync();
+   async UnobserveVsync();
+--- a/modules/libpref/init/StaticPrefList.yaml
++++ b/modules/libpref/init/StaticPrefList.yaml
+@@ -7990,7 +7990,7 @@
+   value: false
+   mirror: always
+
+-#if defined(MOZ_WIDGET_GTK) || defined(MOZ_WIDGET_ANDROID)
++#if defined(MOZ_WIDGET_GTK) || defined(MOZ_WIDGET_ANDROID) || defined(MOZ_WIDGET_ALIX)
+   # -1 = disabled (no preblend, original behavior)
+   #  0 = sRGB transfer
+   # >0 = value/100.0 exponent
+--- a/gfx/webrender_bindings/moz.build
++++ b/gfx/webrender_bindings/moz.build
+@@ -107,7 +107,8 @@
+         "RenderCompositorNative.cpp",
+     ]
+
+-if CONFIG["MOZ_WIDGET_TOOLKIT"] in ("android", "gtk"):
++if CONFIG["MOZ_WIDGET_TOOLKIT"] in ("android", "gtk", "alix"):
++    DEFINES["MOZ_ENABLE_FREETYPE"] = True
+     CXXFLAGS += CONFIG["CAIRO_FT_CFLAGS"]
+
+ if CONFIG["COMPILE_ENVIRONMENT"]:
+--- a/gfx/webrender_bindings/Moz2DImageRenderer.cpp
++++ b/gfx/webrender_bindings/Moz2DImageRenderer.cpp
+@@ -181,7 +181,7 @@
+ #elif defined(XP_WIN)
+     font.mUnscaledFont = new UnscaledFontDWrite(
+         reinterpret_cast<IDWriteFontFace*>(aHandle), nullptr);
+-#elif defined(ANDROID)
++#elif defined(ANDROID) || defined(MOZ_WIDGET_ALIX)
+     font.mUnscaledFont = new UnscaledFontFreeType(
+         reinterpret_cast<const char*>(aHandle), aIndex);
+ #else

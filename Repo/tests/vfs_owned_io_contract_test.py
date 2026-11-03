@@ -63,7 +63,7 @@ uint32_t io_request_gid(const io_request_t *r) { return r->gid; }
 typedef struct { bool block,entered,resume; unsigned calls; } mock_mount_t;
 struct vfs_node {
     vfs_node_type_t type; char *name,*data; size_t size,capacity;
-    uint32_t uid,gid,refcount; bool mutable;
+    uint32_t uid,gid,refcount,permissions; bool mutable;
     vfs_read_cb_t read_cb; vfs_write_cb_t write_cb; void *callback_context;
     spinlock_t data_lock; mock_mount_t *mount;
 };
@@ -87,6 +87,9 @@ static void vfs_unlock_node_data(vfs_node_t *n) {
     if(install_callback_after_ref && n->refcount==2) { install_callback_after_ref=false; n->read_cb=forbidden_read; }
     spinlock_unlock(&n->data_lock);
 }
+/* Data-path fixtures contain no file mappings. */
+static void vfs_mapping_push_locked(vfs_node_t*n,size_t start,size_t length) { (void)start;(void)length;CHECK(n&&protected_worker&&locks); }
+static bool vfs_mapping_busy_locked(vfs_node_t*n) { CHECK(n&&protected_worker&&locks);return false; }
 void vfs_node_retain(vfs_node_t *n) { vfs_lock_node_data(n); CHECK(n->refcount && n->refcount<UINT32_MAX); ++n->refcount; vfs_unlock_node_data(n); }
 void vfs_node_release(vfs_node_t *n) { vfs_lock_node_data(n); CHECK(n->refcount); bool last=--n->refcount==0; vfs_unlock_node_data(n); if(last) { free(n->name); free(n->data); free(n); } }
 bool vfs_is_dir(const vfs_node_t *n) { return n && n->type==VFS_NODE_DIR; }
@@ -96,7 +99,7 @@ static bool split_parent_and_name(vfs_node_t *cwd,const char *path,vfs_node_t **
 }
 static vfs_node_t *vfs_find_child(vfs_node_t *parent,const char *name) { (void)parent; CHECK(tree_owned); return existing && !strcmp(existing->name,name)?existing:NULL; }
 static vfs_node_t *vfs_alloc_node(vfs_node_type_t type) {
-    if(fail_node) return NULL; vfs_node_t *n=calloc(1,sizeof(*n)); CHECK(n); n->type=type; n->refcount=1; n->mutable=true; return n;
+    if(fail_node) return NULL; vfs_node_t *n=calloc(1,sizeof(*n)); CHECK(n); n->type=type; n->refcount=1; n->mutable=true; n->permissions=type==VFS_NODE_DIR?0777:0666; return n;
 }
 static bool vfs_node_allows_mutation(const vfs_node_t *n) { return n->write_cb || n->mutable; }
 static void vfs_inherit_mutability(vfs_node_t *p,vfs_node_t *n) { n->mutable=p->mutable; }
@@ -127,9 +130,12 @@ ssize_t vfs_readlink_snapshot(vfs_node_t *cwd,const char *path,void *buffer,size
     size_t bytes=capacity<13?capacity:13; memmove(buffer,"/etc/timezone",bytes); return (ssize_t)bytes;
 }
 '''
-    vfs = (tree / "src/kernel/vfs.c").read_text()
-    for signature in ("static vfs_node_t *vfs_open_file_internal(", "vfs_node_t *vfs_open_file(",
-                      "int vfs_open_data_owned(", "static ssize_t vfs_read_at_internal(", "ssize_t vfs_read_data_at(",
+    # Always exercise current VFS data helpers. The older staged request
+    # adapter below remains a historical lifetime fixture, not current service
+    # coverage; current service behavior is verified by native guest tests.
+    vfs = (ROOT / "src/kernel/vfs.c").read_text()
+    for signature in ("static int vfs_node_access_locked(", "static vfs_node_t *vfs_open_file_internal(", "vfs_node_t *vfs_open_file(",
+                      "int vfs_open_data_owned(", "int vfs_open_data_access_owned(", "static ssize_t vfs_read_at_internal(", "ssize_t vfs_read_data_at(",
                       "ssize_t vfs_read_at(", "static ssize_t vfs_write_at_internal(", "ssize_t vfs_write_data_at(",
                       "ssize_t vfs_write_at(", "bool vfs_set_file_callbacks("):
         code += function_definition(vfs, signature) + "\n"
@@ -151,6 +157,16 @@ static void owned_open_contracts(void) {
     fail_node=true; CHECK(vfs_open_data_owned(root,"file",true,false,37,41,&node)==-ENOMEM); fail_node=false;
     CHECK(!vfs_open_data_owned(root,"file",true,false,37,41,&node)); CHECK(node==existing && node->refcount==2 && node->uid==37 && node->gid==41); vfs_node_release(node);
     CHECK(vfs_write_data_at(existing,0,"abc",3)==3);
+    existing->permissions=0400;
+    CHECK(vfs_open_data_owned(root,"file",false,true,1,2,&node)==-EACCES&&existing->size==3&&existing->refcount==1);
+    CHECK(!vfs_open_data_access_owned(root,"file",false,false,false,37,41,4,&node));vfs_node_release(node);
+    CHECK(vfs_open_data_access_owned(root,"file",false,false,false,37,41,2,&node)==-EACCES&&existing->refcount==1);
+    existing->permissions=0040;
+    CHECK(!vfs_open_data_access_owned(root,"file",false,false,false,100,41,4,&node));vfs_node_release(node);
+    CHECK(vfs_open_data_access_owned(root,"file",false,false,false,100,42,4,&node)==-EACCES);
+    root->permissions=0555;
+    CHECK(vfs_open_data_owned(root,"denied",true,false,37,41,&node)==-EACCES);
+    root->permissions=0777;existing->permissions=0666;
     vfs_set_file_callbacks(existing,forbidden_read,NULL,NULL);
     CHECK(vfs_open_data_owned(root,"file",false,true,1,2,&node)==-ENOTSUP && !node && existing->size==3 && existing->refcount==1);
     char *bytes=calloc(1,8); CHECK(bytes); CHECK(vfs_read_data_at(existing,0,bytes,3)==-ENOTSUP && vfs_write_data_at(existing,0,"x",1)==-ENOTSUP && !callback_calls);
@@ -247,7 +263,7 @@ int main(void) {
             os.environ.pop("HOST_CC", None)
         else:
             os.environ["HOST_CC"] = previous
-    print("owned VFS worker production contracts: PASS")
+    print("Current VFS data helpers and historical request adapter fixture: PASS")
 
 
 if __name__ == "__main__":

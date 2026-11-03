@@ -3,6 +3,8 @@
 #include "libc.h"
 #include "serial.h"
 #include "timekeeping.h"
+#include "net/udp.h"
+#include "spinlock.h"
 
 #define NTP_PORT 123
 #define NTP_MIN_PACKET 48
@@ -18,6 +20,7 @@ typedef struct
 } ntp_pending_t;
 
 static ntp_pending_t g_pending;
+static spinlock_t g_ntp_lock;
 static net_ntp_result_t g_result;
 static bool g_have_result = false;
 
@@ -41,33 +44,36 @@ static int64_t ntp_to_unix_us(uint32_t seconds, uint32_t fraction)
     return sec * 1000000LL + (int64_t)frac_us;
 }
 
-void net_ntp_init(void)
+static void ntp_init_locked(void)
 {
     memset(&g_pending, 0, sizeof(g_pending));
     memset(&g_result, 0, sizeof(g_result));
     g_have_result = false;
 }
 
-void net_ntp_set_pending(uint32_t originate_seconds,
+static bool ntp_set_pending_locked(uint32_t originate_seconds,
                          uint32_t originate_fraction,
                          uint16_t local_port,
                          uint32_t server_ip)
 {
+    uint16_t claimed = 0;
+    if (net_udp_port_claim(&g_pending, 0, local_port, &claimed)) return false;
     g_pending.waiting = true;
-    g_pending.local_port = local_port;
+    g_pending.local_port = claimed;
     g_pending.server_ip = server_ip;
     g_pending.originate_seconds = originate_seconds;
     g_pending.originate_fraction = originate_fraction;
     g_have_result = false;
+    return true;
 }
 
-void net_ntp_clear_pending(void)
+static void ntp_clear_pending_locked(void)
 {
     memset(&g_pending, 0, sizeof(g_pending));
     g_have_result = false;
 }
 
-bool net_ntp_get_result(net_ntp_result_t *out_result)
+static bool ntp_get_result_locked(net_ntp_result_t *out_result)
 {
     if (!g_have_result || !out_result)
     {
@@ -78,7 +84,7 @@ bool net_ntp_get_result(net_ntp_result_t *out_result)
     return true;
 }
 
-void net_ntp_handle_frame(struct net_interface *iface, const uint8_t *frame, size_t length)
+static void ntp_handle_frame_locked(struct net_interface *iface, const uint8_t *frame, size_t length, int64_t now_us)
 {
     (void)iface;
     if (!g_pending.waiting || !frame || length < 14 + 20 + 8 + NTP_MIN_PACKET)
@@ -146,7 +152,7 @@ void net_ntp_handle_frame(struct net_interface *iface, const uint8_t *frame, siz
     int64_t t1 = ntp_to_unix_us(g_pending.originate_seconds, g_pending.originate_fraction);
     int64_t t2 = ntp_to_unix_us(recv_sec, recv_frac);
     int64_t t3 = ntp_to_unix_us(transmit_sec, transmit_frac);
-    int64_t t4 = (int64_t)timekeeping_now_millis() * 1000LL;
+    int64_t t4 = now_us;
 
     int64_t delay = (t4 - t1) - (t3 - t2);
     int64_t offset = ((t2 - t1) + (t3 - t4)) / 2;
@@ -158,4 +164,41 @@ void net_ntp_handle_frame(struct net_interface *iface, const uint8_t *frame, siz
     g_result.server_ip = read_be32(ip + 12);
     g_have_result = true;
     g_pending.waiting = false;
+    net_udp_port_release(&g_pending);
+}
+
+void net_ntp_init(void)
+{
+    uint64_t flags = spinlock_lock_irqsave(&g_ntp_lock);
+    net_udp_port_release(&g_pending);
+    ntp_init_locked();
+    spinlock_unlock_irqrestore(&g_ntp_lock, flags);
+}
+bool net_ntp_set_pending(uint32_t seconds, uint32_t fraction, uint16_t port, uint32_t server)
+{
+    uint64_t flags = spinlock_lock_irqsave(&g_ntp_lock);
+    bool result = ntp_set_pending_locked(seconds, fraction, port, server);
+    spinlock_unlock_irqrestore(&g_ntp_lock, flags);
+    return result;
+}
+void net_ntp_clear_pending(void)
+{
+    uint64_t flags = spinlock_lock_irqsave(&g_ntp_lock);
+    net_udp_port_release(&g_pending);
+    ntp_clear_pending_locked();
+    spinlock_unlock_irqrestore(&g_ntp_lock, flags);
+}
+bool net_ntp_get_result(net_ntp_result_t *output)
+{
+    uint64_t flags = spinlock_lock_irqsave(&g_ntp_lock);
+    bool result = ntp_get_result_locked(output);
+    spinlock_unlock_irqrestore(&g_ntp_lock, flags);
+    return result;
+}
+void net_ntp_handle_frame(struct net_interface *iface, const uint8_t *frame, size_t length)
+{
+    int64_t now_us = (int64_t)timekeeping_now_millis() * 1000LL;
+    uint64_t flags = spinlock_lock_irqsave(&g_ntp_lock);
+    ntp_handle_frame_locked(iface, frame, length, now_us);
+    spinlock_unlock_irqrestore(&g_ntp_lock, flags);
 }

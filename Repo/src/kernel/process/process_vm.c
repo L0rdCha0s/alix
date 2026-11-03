@@ -1,5 +1,7 @@
 #include "process_internal.h"
 #include "physmem.h"
+#include "io_vfs.h"
+#include "errno.h"
 
 /* Anonymous VM has its own address arena, leaving the existing ELF, sbrk,
  * main stack and descending thread/TLS pool unchanged. A PROT_NONE area has
@@ -20,6 +22,7 @@ typedef struct process_vm_area
     size_t length;
     uint32_t protection;
     paddr_t *pages;
+    fd_description_t *file;
     struct process_vm_area *next;
 } process_vm_area_t;
 
@@ -106,12 +109,13 @@ static void vm_free_area_metadata(process_vm_area_t *area, bool free_new, bool f
             for (size_t index = 0; index < count; ++index)
             {
                 paddr_t page = area->pages[index];
-                if (page && (free_all || (free_new && (page & VM_NEW_PAGE))))
+                if (!area->file && page && (free_all || (free_new && (page & VM_NEW_PAGE))))
                 {
                     user_memory_free_page(page & ~VM_NEW_PAGE);
                 }
             }
         }
+        fd_description_put(area->file);
         free(area->pages);
         free(area);
         area = next;
@@ -287,6 +291,10 @@ static bool vm_area_append(process_vm_transaction_t *transaction, const process_
     area->base = base;
     area->length = length;
     area->protection = protection;
+    if (old && old->file) {
+        if (!fd_description_get(old->file)) { free(area); return false; }
+        area->file = old->file;
+    }
     if (transaction->new_tail)
     {
         transaction->new_tail->next = area;
@@ -296,7 +304,7 @@ static bool vm_area_append(process_vm_transaction_t *transaction, const process_
         transaction->new_areas = area;
     }
     transaction->new_tail = area;
-    if ((old && old->pages) || protection != SYSCALL_VM_PROT_NONE)
+    if ((old && (old->pages || old->file)) || protection != SYSCALL_VM_PROT_NONE)
     {
         size_t count = length / VM_PAGE_SIZE;
         if (count > SIZE_MAX / sizeof(*area->pages))
@@ -314,6 +322,11 @@ static bool vm_area_append(process_vm_transaction_t *transaction, const process_
             {
                 /* The unchanged VMA will demand-zero this page on first use. */
                 continue;
+            }
+            else if (old && old->file && !old->pages)
+            {
+                area->pages[index] = io_vfs_mapping_page(old->file, (base-old->base)/VM_PAGE_SIZE+index);
+                if (!area->pages[index]) return false;
             }
             else if (old && old->pages)
             {
@@ -400,7 +413,7 @@ static void vm_write_leaf(process_t *process, uintptr_t address, process_vm_area
 
 static int vm_change_locked(process_t *process, uintptr_t start, size_t length,
                             uint32_t protection, vm_operation_t operation,
-                            process_vm_transaction_t **transaction_out)
+                            process_vm_transaction_t **transaction_out, const process_vm_area_t *backing)
 {
     uintptr_t end = start + length;
     if ((operation == VM_OPERATION_PROTECT || operation == VM_OPERATION_DISCARD) &&
@@ -424,6 +437,9 @@ static int vm_change_locked(process_t *process, uintptr_t start, size_t length,
         {
             return VM_EEXIST;
         }
+        if (after->file && operation == VM_OPERATION_DISCARD) return -ENOTSUP;
+        if (after->file && operation == VM_OPERATION_PROTECT &&
+            (protection & SYSCALL_VM_PROT_WRITE) && !io_vfs_mapping_writable(after->file)) return -EACCES;
         uintptr_t low = after->base > start ? after->base : start;
         uintptr_t high = after->base + after->length < end ? after->base + after->length : end;
         if ((operation == VM_OPERATION_UNMAP || operation == VM_OPERATION_REPLACE ||
@@ -432,7 +448,7 @@ static int vm_change_locked(process_t *process, uintptr_t start, size_t length,
             for (size_t page = (low - after->base) / VM_PAGE_SIZE;
                  page < (high - after->base) / VM_PAGE_SIZE; ++page)
             {
-                if (after->pages[page]) ++retired_count;
+                if (!after->file && after->pages[page]) ++retired_count;
             }
         }
         last = after;
@@ -461,7 +477,7 @@ static int vm_change_locked(process_t *process, uintptr_t start, size_t length,
     bool okay = true;
     if (operation == VM_OPERATION_MAP)
     {
-        okay = vm_area_append(transaction, NULL, start, length, protection, false);
+        okay = vm_area_append(transaction, backing, start, length, protection, false);
     }
     else if (operation == VM_OPERATION_REPLACE)
     {
@@ -472,7 +488,7 @@ static int vm_change_locked(process_t *process, uintptr_t start, size_t length,
         }
         if (okay)
         {
-            okay = vm_area_append(transaction, NULL, start, length, protection, false);
+            okay = vm_area_append(transaction, backing, start, length, protection, false);
         }
         if (okay && last && last->base + last->length > end)
         {
@@ -490,7 +506,7 @@ static int vm_change_locked(process_t *process, uintptr_t start, size_t length,
             for (size_t page = (low - area->base) / VM_PAGE_SIZE;
                  page < (high - area->base) / VM_PAGE_SIZE; ++page)
             {
-                if (area->pages[page])
+                if (!area->file && area->pages[page])
                     transaction->retired[transaction->retired_count++] = area->pages[page];
             }
         }
@@ -518,7 +534,7 @@ static int vm_change_locked(process_t *process, uintptr_t start, size_t length,
                 for (size_t page = (low - area->base) / VM_PAGE_SIZE;
                      page < (high - area->base) / VM_PAGE_SIZE; ++page)
                 {
-                    if (area->pages[page])
+                    if (!area->file && area->pages[page])
                         transaction->retired[transaction->retired_count++] = area->pages[page];
                 }
             }
@@ -626,15 +642,18 @@ static void vm_finish(process_t *process, process_vm_transaction_t *transaction)
     process_memory_unlock(process, flags);
 }
 
-int64_t process_vm_map(process_t *process, uintptr_t address, size_t length,
-                       uint32_t protection, uint32_t flags)
+static int64_t vm_map_backing(process_t *process, uintptr_t address, size_t length,
+                       uint32_t protection, uint32_t flags, fd_description_t *file)
 {
     uint32_t required = SYSCALL_VM_MAP_PRIVATE | SYSCALL_VM_MAP_ANONYMOUS;
     uint32_t fixed = SYSCALL_VM_MAP_FIXED | SYSCALL_VM_MAP_FIXED_NOREPLACE;
-    uint32_t allowed = required | fixed;
+    uint32_t allowed = (file ? SYSCALL_VM_MAP_PRIVATE | SYSCALL_VM_MAP_SHARED | fixed : required | fixed) |
+                       SYSCALL_VM_MAP_NORESERVE;
     size_t rounded;
     if (!vm_call_valid(process) || !vm_length_valid(length, &rounded) ||
-        !vm_protection_valid(protection) || (flags & required) != required || (flags & ~allowed) ||
+        !vm_protection_valid(protection) ||
+        (file ? ((flags & 3u) != SYSCALL_VM_MAP_PRIVATE && (flags & 3u) != SYSCALL_VM_MAP_SHARED) :
+                (flags & required) != required) || (flags & ~allowed) ||
         ((flags & fixed) && !vm_range_valid(address, rounded)) ||
         ((flags & fixed) && !address) || (flags & fixed) == fixed)
     {
@@ -651,10 +670,11 @@ int64_t process_vm_map(process_t *process, uintptr_t address, size_t length,
     uint64_t irq_flags = vm_lock_ready(process);
     uintptr_t selected = (flags & fixed)
                            ? address : vm_find_space(process, address, rounded);
+    process_vm_area_t backing = {.base=selected,.length=rounded,.protection=protection,.file=file};
     process_vm_transaction_t *transaction = NULL;
     int result = selected ? vm_change_locked(process, selected, rounded, protection,
                                              (flags & SYSCALL_VM_MAP_FIXED) ? VM_OPERATION_REPLACE : VM_OPERATION_MAP,
-                                             &transaction) : VM_ENOMEM;
+                                             &transaction, file ? &backing : NULL) : VM_ENOMEM;
     process_memory_unlock(process, irq_flags);
     if (result != 0)
     {
@@ -675,7 +695,7 @@ int process_vm_protect(process_t *process, uintptr_t address, size_t length, uin
     protection = vm_protection_normalize(protection);
     uint64_t flags = vm_lock_ready(process);
     process_vm_transaction_t *transaction = NULL;
-    int result = vm_change_locked(process, address, rounded, protection, VM_OPERATION_PROTECT, &transaction);
+    int result = vm_change_locked(process, address, rounded, protection, VM_OPERATION_PROTECT, &transaction, NULL);
     process_memory_unlock(process, flags);
     if (result == 0)
     {
@@ -693,7 +713,7 @@ int process_vm_unmap(process_t *process, uintptr_t address, size_t length)
     }
     uint64_t flags = vm_lock_ready(process);
     process_vm_transaction_t *transaction = NULL;
-    int result = vm_change_locked(process, address, rounded, 0, VM_OPERATION_UNMAP, &transaction);
+    int result = vm_change_locked(process, address, rounded, 0, VM_OPERATION_UNMAP, &transaction, NULL);
     process_memory_unlock(process, flags);
     if (result == 0)
     {
@@ -730,8 +750,51 @@ int process_vm_advise(process_t *process, uintptr_t address, size_t length, uint
         return result;
     }
     process_vm_transaction_t *transaction = NULL;
-    int result = vm_change_locked(process, address, rounded, 0, VM_OPERATION_DISCARD, &transaction);
+    int result = vm_change_locked(process, address, rounded, 0, VM_OPERATION_DISCARD, &transaction, NULL);
     process_memory_unlock(process, flags);
     if (result == 0) vm_finish(process, transaction);
+    return result;
+}
+
+int64_t process_vm_map(process_t *process, uintptr_t address, size_t length,
+                       uint32_t protection, uint32_t flags)
+{ return vm_map_backing(process,address,length,protection,flags,NULL); }
+int64_t process_vm_map_file(process_t *process, uintptr_t address, size_t length,
+                            uint32_t protection, uint32_t flags, fd_description_t *file)
+{ return file ? vm_map_backing(process,address,length,protection,flags,file) : -EBADF; }
+int process_vm_file_check(uintptr_t address, size_t length, uint32_t protection,
+                          uint32_t flags, int64_t offset, size_t *rounded)
+{
+    uint32_t fixed=SYSCALL_VM_MAP_FIXED|SYSCALL_VM_MAP_FIXED_NOREPLACE;
+    uint32_t sharing=flags & (SYSCALL_VM_MAP_PRIVATE|SYSCALL_VM_MAP_SHARED);
+    if (!vm_length_valid(length,rounded) || !vm_protection_valid(protection) ||
+        (sharing!=SYSCALL_VM_MAP_PRIVATE && sharing!=SYSCALL_VM_MAP_SHARED) ||
+        (flags & ~(fixed|SYSCALL_VM_MAP_PRIVATE|SYSCALL_VM_MAP_SHARED|SYSCALL_VM_MAP_NORESERVE)) ||
+        (flags&fixed)==fixed || ((flags&fixed) && !vm_range_valid(address,*rounded)) ||
+        offset<0 || ((uint64_t)offset&(VM_PAGE_SIZE-1)) || *rounded>(uint64_t)INT64_MAX-offset) return -EINVAL;
+    return 0;
+}
+int process_vm_sync_prepare(process_t *process, uintptr_t address, size_t length,
+                            uint32_t options, fd_description_t **out)
+{
+    *out=NULL;
+    uint32_t mode=options & (SYSCALL_MS_SYNC|SYSCALL_MS_ASYNC);
+    size_t rounded=0;
+    if ((options & ~(SYSCALL_MS_SYNC|SYSCALL_MS_ASYNC|SYSCALL_MS_INVALIDATE)) ||
+        (mode!=SYSCALL_MS_SYNC && mode!=SYSCALL_MS_ASYNC) ||
+        (address&(VM_PAGE_SIZE-1)) || (length && !vm_length_valid(length,&rounded)) ||
+        !vm_range_valid(address,rounded)) return -EINVAL;
+    uint64_t irq=process_memory_lock(process);
+    int result=vm_covered(process->vm_areas,address,address+rounded)?0:-ENOMEM;
+    size_t count=0;
+    for (process_vm_area_t *a=process->vm_areas; !result && a; a=a->next)
+        if (a->file && a->base<address+rounded && a->base+a->length>address) ++count;
+    fd_description_t *bundle=result?NULL:io_vfs_sync_bundle_create(count);
+    if (!result && !bundle) result=-ENOMEM;
+    for (process_vm_area_t *a=process->vm_areas; !result && a; a=a->next)
+        if (a->file && a->base<address+rounded && a->base+a->length>address &&
+            !io_vfs_sync_bundle_add(bundle,a->file)) result=-ENOMEM;
+    process_memory_unlock(process,irq);
+    if (result) fd_description_put(bundle); else *out=bundle;
     return result;
 }

@@ -69,6 +69,10 @@ static void vfs_lock_node_data(vfs_node_t *n){CHECK(!pthread_mutex_lock(&n->data
 static void vfs_unlock_node_data(vfs_node_t *n){CHECK(!pthread_mutex_unlock(&n->data_lock));}
 static void vfs_backpressure_wait(vfs_mount_t *m,size_t count){(void)m;(void)count;}
 static void vfs_note_file_dirty(vfs_node_t *n,size_t offset,size_t count,bool changed){(void)n;(void)offset;(void)count;(void)changed;}
+/* These rename/resize fixtures have no installed mappings. The page-cache
+ * boundary is exercised with production code by filesystem_writeback_test. */
+static bool vfs_mapping_busy_locked(vfs_node_t *n){(void)n;return false;}
+static void vfs_mapping_push_locked(vfs_node_t *n,size_t offset,size_t count){(void)n;(void)offset;(void)count;}
 static bool fail_capacity;
 static bool ensure_capacity_locked(vfs_node_t *n,size_t needed){
     if(fail_capacity)return false;
@@ -85,6 +89,8 @@ for signature in ['int vfs_resize_data(', 'static ssize_t vfs_write_at_internal(
 code+=r'''
 typedef struct {uint32_t flags;} fd_description_t;
 #define FD_STATUS_APPEND (1u << 16)
+#define FD_STATUS_SYNC (1u << 19)
+static bool vfs_flush_node(vfs_node_t *n){(void)n;CHECK(false);return false;}
 static uint32_t fd_description_status_flags(fd_description_t *d){return d?d->flags:0;}
 typedef struct {vfs_node_t *node;size_t offset;bool writable;fd_description_t *description;pthread_mutex_t gate;} io_vfs_file_t;
 static void io_vfs_offset_lock(io_vfs_file_t *f){CHECK(!pthread_mutex_lock(&f->gate));}

@@ -28,6 +28,12 @@ attributes are supported; ignored dispositions otherwise survive launch and
 caught handlers reset. RESETIDS uses Alix's existing single identity policy.
 Process groups and scheduling attributes return `ENOTSUP` during spawn.
 
+`POSIX_SPAWN_CLOEXEC_DEFAULT` marks every descriptor in the child's private
+snapshot close-on-exec before file actions run. Explicit dup2/self-dup actions
+retain their destinations, including standard streams when requested. Sources
+remain available until actions finish. The parent's flags never change, and
+descriptors opened concurrently after the snapshot cannot leak into the child.
+
 The chdir action copies its path into the action object, then the syscall copies
 it into registered launch storage before submission. The protected loader
 resolves it against the launch record's current cwd, retains a new directory
@@ -63,6 +69,15 @@ owned claim on one quiescent child. Status copies precede the registry removal;
 failed copies release the claim without reaping. A caller killed while waiting
 abandons its registered request, and claim cleanup also releases ownership.
 Concurrent waiters cannot reap the same child twice.
+
+`waitid` uses the same registry and claim protocol. `P_PID` and `P_ALL` with
+`WEXITED` report `SIGCHLD`, the child PID/UID, `CLD_EXITED` or `CLD_KILLED`, and
+the exit value or terminating signal. `WNOWAIT` releases its claim after copying
+without removing the child, so another wait can read or consume the status.
+`WNOHANG` clears the complete `siginfo_t` when a child exists but none is ready.
+Failed copies and abandoned requests preserve the child. Process groups and
+stopped/continued events remain unsupported. Run `make zen-waitid-qemu-test` for
+native eight-CPU status, concurrent peek/reap and killed-waiter coverage.
 
 A persistent child monitor holds independent record ownership through terminal
 CPU/queue/transition quiescence. At that point it detaches the child's cwd,

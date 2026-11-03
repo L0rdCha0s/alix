@@ -3,6 +3,9 @@ typedef struct {
     struct stat metadata;
     PRFileInfo narrow;
     PRFileInfo64 wide;
+    PRFileMap mapping;
+    PRFileDesc descriptor;
+    PRFilePrivate secret;
 } file_abi_fixture_t;
 int main(void)
 {
@@ -29,7 +32,17 @@ int main(void)
     ++test->metadata.st_mtime;
     CHECK(_MD_convert_stat64_to_fileinfo64(&test->metadata,&test->wide)==-1 && captured_error==PR_RANGE_ERROR && captured_os_error==EOVERFLOW,"timestamp overflow 64");
     CHECK(_MD_convert_stat_to_fileinfo(&test->metadata,&test->narrow)==-1 && captured_error==PR_RANGE_ERROR,"timestamp overflow 32");
-    CHECK(!close(fd) && !unlink("/tmp/nspr-file-abi"),"cleanup");
-    serial_printf("NSPR_FILE_ABI_TEST: PASS open64=1 high_flags=1 stat=1 seconds=1 size64=1 overflow=1 nonblock=1 sync=1 fd_limits=1\n");
+    CHECK(!ftruncate(fd,8192),"mapping size");
+    test->descriptor.secret=&test->secret;test->secret.md.osfd=fd;
+    test->mapping.fd=&test->descriptor;test->mapping.md.prot=PROT_READ|PROT_WRITE;test->mapping.md.flags=MAP_SHARED;
+    unsigned char *map=_MD_MemMap(&test->mapping,0,8192);
+    unsigned char *alias=_MD_MemMap(&test->mapping,4096,4096);
+    CHECK(map && alias,"actual NSPR map helpers");map[4096+7]=0x5b;
+    CHECK(alias[7]==0x5b && _MD_SyncMemMap(&test->descriptor,map,8192)==PR_SUCCESS,"actual NSPR shared sync helper");
+    CHECK(!_MD_MemMap(&test->mapping,1,4096) && captured_os_error==EINVAL,"actual NSPR mmap error conversion");
+    CHECK(!_MD_MemMap(&test->mapping,(PRInt64)1<<32,4096) && captured_os_error==ENXIO,"NSPR preserves full native file offset");
+    CHECK(!close(fd) && _MD_MemUnmap(map,8192)==PR_SUCCESS && _MD_MemUnmap(alias,4096)==PR_SUCCESS &&
+        !unlink("/tmp/nspr-file-abi"),"cleanup after source close");
+    serial_printf("NSPR_FILE_ABI_TEST: PASS open64=1 high_flags=1 stat=1 seconds=1 size64=1 overflow=1 nonblock=1 sync=1 fd_limits=1 mmap=1 msync=1\n");
     free(test);return 0;
 }

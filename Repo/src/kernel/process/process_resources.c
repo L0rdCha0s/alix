@@ -77,13 +77,14 @@ bool process_prepare_inherited_context(process_t *process, process_t *parent, bo
     spinlock_preempt_disable();
     process_t *source = parentless ? NULL : parent ? parent : current_process_local();
     fd_description_t *owner = NULL;
-    uint32_t uid = VFS_UID_ROOT, gid = VFS_GID_ROOT;
+    uint32_t uid = VFS_UID_ROOT, gid = VFS_GID_ROOT, creation_mask = 0;
     bool ok = true;
     if (source)
     {
         spinlock_lock(&source->context_lock);
         uid = source->uid;
         gid = source->gid;
+        creation_mask = __atomic_load_n(&source->creation_mask, __ATOMIC_ACQUIRE);
         owner = source->cwd_owner;
         if (owner && !fd_description_get(owner)) { owner = NULL; ok = false; }
         spinlock_unlock(&source->context_lock);
@@ -124,6 +125,7 @@ bool process_prepare_inherited_context(process_t *process, process_t *parent, bo
     {
         process->uid = uid;
         process->gid = gid;
+        process->creation_mask = creation_mask;
         process->cwd_owner = owner;
         process->cwd = owner ? fd_description_context(owner) : NULL;
         process->directory_streams = directories;

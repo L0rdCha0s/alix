@@ -8,63 +8,298 @@
  import sys
  
  import buildconfig
-@@ -144,9 +145,67 @@
+@@ -144,9 +145,302 @@
          raise RuntimeError("\n".join(error))
  
  
 +def check_alix_static_elf(binary):
-+    # Alix currently loads fixed-address ELF64 executables, without a dynamic
-+    # linker. Accepting an absent dynamic table requires proving that format,
-+    # rather than treating arbitrary missing readelf output as success.
++    # Alix starts fixed ET_EXEC images itself. Export metadata and main static
++    # TLS/GLOB_DAT GOT fixups are consumed by its CRT; ET_DYN uses native dlopen.
 +    with open(binary, "rb") as stream:
 +        length = os.fstat(stream.fileno()).st_size
-+
 +        def read_at(offset, size):
-+            if offset < 0 or offset > length or size > length - offset:
++            if offset < 0 or offset > length or size < 0 or size > length - offset:
 +                raise RuntimeError("Truncated native Alix ELF")
 +            stream.seek(offset)
 +            data = stream.read(size)
 +            if len(data) != size:
 +                raise RuntimeError("Truncated native Alix ELF")
 +            return data
-+
 +        header = struct.unpack("<16sHHIQQQIHHHHHH", read_at(0, 64))
 +        ident, kind, machine, version, entry, phoff, shoff = header[:7]
-+        if ident[:7] != b"\x7fELF\x02\x01\x01" or kind != 2 or machine != 62 or version != 1:
-+            raise RuntimeError("Expected native x86-64 static ET_EXEC")
++        if ident[:7] != b"\x7fELF\x02\x01\x01" or kind not in (2, 3) or machine != 62 or version != 1:
++            raise RuntimeError("Expected native x86-64 ET_EXEC or ET_DYN")
 +        if header[8] != 64 or header[9] != 56 or not 0 < header[10] <= 1024:
 +            raise RuntimeError("Invalid native ELF program headers")
-+        loads = []
++        loads, dynamic_regions, sections, tls_sizes = [], [], [], []
 +        executable_entry = False
 +        for index in range(header[10]):
-+            ph = struct.unpack("<IIQQQQQQ", read_at(phoff + index * 56, 56))
-+            tag, flags, offset, address, physical, file_size, memory_size, alignment = ph
-+            if tag in (2, 3):
-+                raise RuntimeError("Alix has no dynamic loader or runtime relocations")
++            tag, flags, offset, address, physical, file_size, memory_size, alignment = struct.unpack(
++                "<IIQQQQQQ", read_at(phoff + index * 56, 56))
++            if tag == 3:
++                raise RuntimeError("Native Alix ELF must not request a host interpreter")
++            if tag == 2:
++                dynamic_regions.append((address, offset, file_size))
++            if tag == 7:
++                if file_size > memory_size or (alignment and alignment & (alignment - 1)):
++                    raise RuntimeError("Invalid native TLS template")
++                tls_sizes.append(memory_size)
 +            if tag != 1:
 +                continue
-+            if file_size > memory_size or memory_size > (1 << 64) - address:
++            if file_size > memory_size or memory_size > (1 << 64) - 1 - address:
 +                raise RuntimeError("Invalid native ELF load size")
-+            if offset > length or file_size > length - offset:
++            if offset > length or file_size > length-offset:
 +                raise RuntimeError("Truncated native ELF load")
 +            if flags & 3 == 3:
 +                raise RuntimeError("Writable executable native ELF load")
 +            if alignment and (alignment & (alignment - 1) or address % alignment != offset % alignment):
 +                raise RuntimeError("Invalid native ELF load alignment")
 +            end = address + memory_size
-+            if any(address < other_end and other < end for other, other_end in loads):
++            if any(address < other[1] and other[0] < end for other in loads):
 +                raise RuntimeError("Overlapping native ELF loads")
-+            loads.append((address, end))
++            loads.append((address, end, offset, file_size, flags))
 +            executable_entry |= bool(flags & 1 and address <= entry < address + file_size)
-+        if len(loads) < 2 or not executable_entry:
-+            raise RuntimeError("Missing native ELF loads or executable entry")
++        if len(loads) < 2 or (kind == 2 and not executable_entry) or len(tls_sizes) > 1:
++            raise RuntimeError("Missing native ELF loads, entry or unique TLS template")
++        def in_load(address, size, flags=0):
++            return any(address >= low and address <= high and size <= high-address and permission & flags == flags
++                       for low, high, offset, file_size, permission in loads)
++        def read_virtual(address, size):
++            for low, high, offset, file_size, flags in loads:
++                if flags & 4 and address >= low and address-low <= file_size and size <= file_size-(address-low):
++                    return read_at(offset + address-low, size)
++            raise RuntimeError("Native ELF metadata is not backed by a readable load")
 +        if header[12]:
 +            if header[11] != 64 or not shoff:
 +                raise RuntimeError("Invalid native ELF section headers")
 +            for index in range(header[12]):
 +                section = struct.unpack("<IIQQQQIIQQ", read_at(shoff + index * 64, 64))
-+                if section[1] == 6 or (section[1] in (4, 9) and section[2] & 2):
-+                    raise RuntimeError("Native ELF contains dynamic/runtime relocations")
++                sections.append(section)
++                if section[1] == 6:
++                    if not section[2] & 2:
++                        raise RuntimeError("Unmapped native dynamic section")
++                    dynamic_regions.append((section[3], section[4], section[5]))
++        dynamic_regions = list(dict.fromkeys(dynamic_regions))
++        if len(dynamic_regions) > 1 or (kind == 3 and not dynamic_regions):
++            raise RuntimeError("Missing or conflicting native dynamic metadata")
++        dynamic = {}
++        if dynamic_regions:
++            address, offset, size = dynamic_regions[0]
++            if address % 8 or not size or size % 16 or not in_load(address, size, 4):
++                raise RuntimeError("Invalid native dynamic metadata range")
++            raw = read_at(offset, size)
++            if raw != read_virtual(address, size):
++                raise RuntimeError("Conflicting native dynamic metadata bytes")
++            terminated = False
++            for position in range(0, size, 16):
++                tag, value = struct.unpack_from("<qQ", raw, position)
++                if not tag:
++                    terminated = True
++                    break
++                if tag == 22 or (tag == 30 and value & 4):
++                    raise RuntimeError("Native ELF text relocations are unsupported")
++                if tag in (0x6ffffff0, 0x6ffffffc, 0x6ffffffd, 0x6ffffffe, 0x6fffffff) and tag in dynamic:
++                    raise RuntimeError("Duplicate native version dynamic tag")
++                if kind == 2 and (tag == 1 or (tag in (2, 17, 18, 23, 35, 36) and value)):
++                    raise RuntimeError("Executable needs an unsupported startup dynamic linker")
++                dynamic[tag] = value
++            if not terminated or not dynamic.get(5) or not dynamic.get(6) or dynamic.get(11) != 24 or not dynamic.get(10) or not (dynamic.get(4) or dynamic.get(0x6ffffef5)):
++                raise RuntimeError("Invalid native dynamic symbol metadata")
++            if dynamic.get(9, 24) != 24 or dynamic.get(37, 8) != 8 or dynamic.get(18, 0):
++                raise RuntimeError("Unsupported native relocation format")
++            read_virtual(dynamic[5], dynamic[10])
++        # GNU symbol-version metadata uses the same bounded load/string rules
++        # as the native runtime. Dependency ABI availability is checked at load.
++        if dynamic:
++            limit = 32768
++            symbol_limit = 2000000
++            strings = read_virtual(dynamic[5], dynamic[10])
++            def version_string(offset):
++                if offset >= len(strings):
++                    raise RuntimeError("Invalid native version string offset")
++                end = strings.find(b"\0", offset)
++                if end < 0 or end == offset:
++                    raise RuntimeError("Invalid native version string")
++                return strings[offset:end]
++            def version_hash(name):
++                value = 0
++                for byte in name:
++                    value = ((value << 4) + byte) & 0xffffffff
++                    high = value & 0xf0000000
++                    if high:
++                        value ^= high >> 24
++                    value &= ~high
++                return value
++            if dynamic.get(4):
++                buckets, symbol_count = struct.unpack("<II", read_virtual(dynamic[4], 8))
++                if not buckets or buckets > symbol_limit or not symbol_count or symbol_count > symbol_limit:
++                    raise RuntimeError("Invalid native ELF symbol hash")
++                read_virtual(dynamic[4], (buckets + symbol_count + 2) * 4)
++            else:
++                address = dynamic[0x6ffffef5]
++                count, offset, bloom, shift = struct.unpack("<IIII", read_virtual(address, 16))
++                if not count or count > symbol_limit or not bloom or bloom > symbol_limit or offset > symbol_limit:
++                    raise RuntimeError("Invalid native GNU symbol hash")
++                buckets_address = address + 16 + bloom * 8
++                buckets = struct.unpack("<" + "I" * count, read_virtual(buckets_address, count * 4))
++                maximum = max(buckets)
++                symbol_count = offset
++                if maximum:
++                    if maximum < offset or maximum >= symbol_limit:
++                        raise RuntimeError("Invalid native GNU symbol index")
++                    chains = buckets_address + count * 4
++                    for index in range(maximum, symbol_limit):
++                        word, = struct.unpack("<I", read_virtual(chains + (index - offset) * 4, 4))
++                        if word & 1:
++                            symbol_count = index + 1
++                            break
++                    else:
++                        raise RuntimeError("Unterminated native GNU hash")
++            if not symbol_count:
++                raise RuntimeError("Empty native dynamic symbol table")
++            symbols = read_virtual(dynamic[6], symbol_count * 24)
++            versym, verdef, definitions, verneed, requirements = (dynamic.get(tag, 0) for tag in
++                (0x6ffffff0, 0x6ffffffc, 0x6ffffffd, 0x6ffffffe, 0x6fffffff))
++            if (bool(verdef) != bool(definitions) or bool(verneed) != bool(requirements) or
++                definitions >= limit or requirements >= limit or versym % 2 or verdef % 4 or verneed % 4 or
++                ((definitions or requirements) and not versym)):
++                raise RuntimeError("Invalid native version table metadata")
++            versions = {}
++            def add_version(index, hash_value, name, defined):
++                if not 0 < index < limit or index in versions or version_hash(name) != hash_value:
++                    raise RuntimeError("Invalid native version index/hash")
++                versions[index] = defined
++            address = verdef
++            auxiliaries = 0
++            for position in range(definitions):
++                version, flags, index, count, hash_value, aux, following = struct.unpack("<HHHHIII", read_virtual(address, 20))
++                if (version != 1 or flags & ~7 or not count or count > limit - auxiliaries or aux < 20 or aux % 4 or
++                    not 0 < index < limit or bool(flags & 1) != (index == 1)):
++                    raise RuntimeError("Invalid native version definition")
++                auxiliaries += count
++                cursor = address + aux
++                for number in range(count):
++                    name_offset, next_aux = struct.unpack("<II", read_virtual(cursor, 8))
++                    name = version_string(name_offset)
++                    end = cursor + 8
++                    if not number:
++                        add_version(index, hash_value, name, True)
++                    if number + 1 < count:
++                        if next_aux < 8 or next_aux % 4:
++                            raise RuntimeError("Invalid native definition auxiliary chain")
++                        cursor += next_aux
++                    elif next_aux:
++                        raise RuntimeError("Unterminated native definition auxiliary chain")
++                if position + 1 < definitions:
++                    if following < end - address or following % 4:
++                        raise RuntimeError("Invalid native definition chain")
++                    address += following
++                elif following:
++                    raise RuntimeError("Unterminated native definition chain")
++            needed = {version_string(value) for tag, value in dynamic.items() if tag == 1}
++            # DT_NEEDED can occur more than once (the dictionary holds only its
++            # last occurrence), so retain its original dynamic sequence here.
++            if dynamic_regions:
++                raw_dynamic = read_at(dynamic_regions[0][1], dynamic_regions[0][2])
++                for position in range(0, len(raw_dynamic), 16):
++                    tag, value = struct.unpack_from("<qQ", raw_dynamic, position)
++                    if not tag:
++                        break
++                    if tag == 1:
++                        needed.add(version_string(value))
++            address = verneed
++            for position in range(requirements):
++                version, count, file_offset, aux, following = struct.unpack("<HHIII", read_virtual(address, 16))
++                if version != 1 or not count or count > limit - auxiliaries or aux < 16 or aux % 4 or version_string(file_offset) not in needed:
++                    raise RuntimeError("Invalid native version requirement")
++                auxiliaries += count
++                cursor = address + aux
++                for number in range(count):
++                    hash_value, flags, index, name_offset, next_aux = struct.unpack("<IHHII", read_virtual(cursor, 16))
++                    if flags & ~2 or (index & 0x7fff) < 2:
++                        raise RuntimeError("Invalid native requirement flags/index")
++                    add_version(index & 0x7fff, hash_value, version_string(name_offset), False)
++                    end = cursor + 16
++                    if number + 1 < count:
++                        if next_aux < 16 or next_aux % 4:
++                            raise RuntimeError("Invalid native requirement auxiliary chain")
++                        cursor += next_aux
++                    elif next_aux:
++                        raise RuntimeError("Unterminated native requirement auxiliary chain")
++                if position + 1 < requirements:
++                    if following < end - address or following % 4:
++                        raise RuntimeError("Invalid native requirement chain")
++                    address += following
++                elif following:
++                    raise RuntimeError("Unterminated native requirement chain")
++            if versym:
++                indices = struct.unpack("<" + "H" * symbol_count, read_virtual(versym, symbol_count * 2))
++                for position, value in enumerate(indices):
++                    index = value & 0x7fff
++                    section, = struct.unpack_from("<H", symbols, position * 24 + 6)
++                    if index > 1:
++                        if index not in versions or versions[index] != bool(section):
++                            raise RuntimeError("Native symbol references unknown/incompatible version")
++                    elif value & 0x8000:
++                        raise RuntimeError("Hidden reserved native symbol version")
++        tables = []
++        for pointer, size_tag in ((7, 8), (23, 2)):
++            size = dynamic.get(size_tag, 0)
++            if size:
++                address = dynamic.get(pointer, 0)
++                if address % 8 or size % 24:
++                    raise RuntimeError("Invalid native RELA table")
++                tables.append((address, size))
++                raw = read_virtual(address, size)
++                for position in range(0, size, 24):
++                    target, info, addend = struct.unpack_from("<QQq", raw, position)
++                    relocation, symbol_index = info & 0xffffffff, info >> 32
++                    if not relocation:
++                        continue
++                    width = 4 if relocation in (2, 10, 11) else 8
++                    if not in_load(target, width, 2):
++                        raise RuntimeError("Native relocation writes outside writable data")
++                    if kind == 2:
++                        if relocation not in (6, 18) or target % 8:
++                            raise RuntimeError("Unsupported native startup relocation")
++                        name, binding, visibility, section, value, symbol_size = struct.unpack(
++                            "<IBBHQQ", read_virtual(dynamic[6] + symbol_index * 24, 24))
++                        if relocation == 6:
++                            if addend or binding & 15 not in (0, 1, 2):
++                                raise RuntimeError("Invalid main GOT symbol or addend")
++                            if not section:
++                                if binding >> 4 != 2 or value or symbol_size:
++                                    raise RuntimeError("Undefined strong main GOT import")
++                            elif section != 0xfff1 and not in_load(value, symbol_size):
++                                raise RuntimeError("Main GOT symbol is outside the image")
++                        else:
++                            tls_size = tls_sizes[0] if tls_sizes else 0
++                            if binding & 15 != 6 or section in (0, 0xfff1) or value > tls_size or symbol_size > tls_size-value or not 0 <= value+addend <= tls_size:
++                                raise RuntimeError("Invalid main static TLS relocation")
++                    elif relocation not in (1, 2, 6, 7, 8, 10, 11, 16, 17, 24):
++                        raise RuntimeError("Unsupported native shared-object relocation")
++        for section in sections:
++            if section[1] == 9 and section[2] & 2:
++                raise RuntimeError("Native ELF REL relocations are unsupported")
++            if section[1] == 4 and section[2] & 2 and (section[3], section[5]) not in tables:
++                raise RuntimeError("Unreferenced native runtime relocation section")
++        size = dynamic.get(35, 0)
++        if size:
++            if kind != 3 or size % 8 or dynamic.get(36, 0) % 8:
++                raise RuntimeError("Invalid native packed relocations")
++            raw = read_virtual(dynamic[36], size)
++            cursor = None
++            for position in range(0, size, 8):
++                word, = struct.unpack_from("<Q", raw, position)
++                if not word & 1:
++                    targets, cursor = (word,), word+8
++                else:
++                    if cursor is None:
++                        raise RuntimeError("Packed relocation starts with a bitmap")
++                    targets = tuple(cursor+(bit-1)*8 for bit in range(1, 64) if word & (1 << bit))
++                    cursor += 63*8
++                if any(not in_load(target, 8, 2) for target in targets):
++                    raise RuntimeError("Packed relocation writes outside writable data")
 +
 +
  def check_textrel(binary):

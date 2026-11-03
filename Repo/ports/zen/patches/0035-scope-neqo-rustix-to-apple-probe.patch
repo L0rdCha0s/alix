@@ -1,0 +1,18 @@
+--- a/netwerk/socket/neqo_glue/Cargo.toml
++++ b/netwerk/socket/neqo_glue/Cargo.toml
+@@ -22,11 +22,14 @@
+ log = "0.4.0"
+ qlog = "0.16"
+ libc = "0.2.0"
+-rustix = { version = "1.1", default-features = false, features = ["fs", "net"] }
+ static_assertions = "1.1"
+ static_prefs = { path = "../../../modules/libpref/init/static_prefs"}
+ uuid = { version = "1.0", features = ["v4"] }
+ zlib-rs = { version = "0.6", features = ["avx512"] }
++
++# Used by the Apple sendmsg_x/recvmsg_x capability probe.
++[target.'cfg(target_vendor = "apple")'.dependencies]
++rustix = { version = "1.1", default-features = false, features = ["fs", "net"] }
+ 
+ [target.'cfg(target_os = "windows")'.dependencies]
+ winapi = {version = "0.3", features = ["ws2def"] }

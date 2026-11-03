@@ -27,6 +27,14 @@ def main():
 #define CHILD_ARGUMENTS 256u
 #define SYSCALL_PROCESS_NOHANG 1u
 #define ALIX_SIGKILL 9
+#define ALIX_SIGCHLD 17
+#define ALIX_CLD_EXITED 1
+#define ALIX_CLD_KILLED 2
+#define ALIX_CLD_DUMPED 3
+typedef struct {
+    int32_t si_signo,si_errno,si_code,si_status;void *si_addr;int32_t si_pid;uint32_t si_uid;
+    uint64_t si_tid,si_trapno,si_error,reserved;
+} alix_siginfo_t;
 typedef struct {bool terminal,quiescent,context_closed;uint32_t status,pid,kills;fd_table_t *files;} process_t;
 typedef struct {process_t *owner;uint64_t pid;bool complete;} process_creation_watch_t;
 typedef struct {fd_description_t *cwd;fd_table_t *files;uint32_t uid,gid;uint64_t parent_pid;} process_launch_context_t;
@@ -67,7 +75,8 @@ static child_record_t *g_orphan_head,*g_orphan_tail,*g_reap_batch[64];
                       "static int child_record_close(", "static bool child_record_valid(",
                       "static int child_table_close(", "static void child_claim_release(",
                       "static int child_claim_close(", "static void child_reap_once(",
-                      "static bool child_wait_handler(", "static int child_wait_commit("):
+                      "static bool child_wait_handler(", "static int child_wait_commit(",
+                      "static int child_wait_commit_info("):
         code += function_definition(source, signature) + "\n"
         operation = {
             "static int child_record_close(": ("child_record_ops", "child_record_close"),
@@ -145,14 +154,48 @@ static void claims_contract(void){
     fd_description_put(lease);(void)drain(queue,99);CHECK(released_children==releases+1);
     fd_description_put(table_owner);fd_table_put(table);destroy_empty(queue);
 }
+static void info_contract(void){
+    for(unsigned phase=0;phase<4;++phase){
+        fd_retirement_queue_t *queue=fd_retirement_queue_create(64);CHECK(queue);active_retirement=queue;
+        fd_table_t *table=fd_table_create_deferred(4,queue);CHECK(table);
+        child_record_t *record=NULL;fd_description_t *description=new_record(queue,true,&record);
+        record->launch.uid=101;record->watch.owner->terminal=record->watch.owner->quiescent=true;
+        record->watch.owner->status=phase==0?0:phase==1?(255u<<8):phase==2?9u:(11u|0x80u);
+        int pid=(int)record->watch.pid;
+        CHECK(fd_table_install(table,description,0,0)==0);fd_description_put(description);
+        child_table_owner_t *owner=calloc(1,sizeof(*owner));CHECK(owner&&fd_table_get(table));owner->table=table;
+        fd_description_t *table_owner=fd_description_create_deferred(&child_table_ops,owner,queue);CHECK(table_owner);
+        child_wait_work_t work={.pid=pid,.flags=CHILD_WAIT_INFO|CHILD_WAIT_PEEK};
+        io_request_t request={&work,sizeof(work),table_owner};io_service_result_t result;alix_siginfo_t output;
+        for(unsigned attempt=0;attempt<3;++attempt){
+            CHECK(child_wait_handler(&request,&result)&&result.result==pid&&result.description_owned);
+            memset(&output,0x5a,sizeof(output));spinlock_preempt_disable();fail_output=attempt==0;
+            CHECK(child_wait_commit_info(result.description_owned,table,&output,&work)==(fail_output?-EFAULT:0));
+            if(!fail_output)CHECK(output.si_signo==ALIX_SIGCHLD&&output.si_pid==pid&&output.si_uid==101&&
+                output.si_code==(phase<2?ALIX_CLD_EXITED:phase==2?ALIX_CLD_KILLED:ALIX_CLD_DUMPED)&&
+                output.si_status==(phase==0?0:phase==1?255:phase==2?9:11)&&!output.reserved&&!output.si_errno);
+            CHECK(!record->reaped&&!record->claimed);fail_output=false;spinlock_preempt_enable();
+            fd_description_put(result.description_owned);(void)drain(queue,99);
+        }
+        /* Abandon an information request after its claim was published. */
+        CHECK(child_wait_handler(&request,&result)&&result.description_owned);
+        fd_description_put(result.description_owned);(void)drain(queue,99);CHECK(!record->claimed&&!record->reaped);
+        work.flags=CHILD_WAIT_INFO;
+        CHECK(child_wait_handler(&request,&result)&&result.description_owned);
+        spinlock_preempt_disable();CHECK(!child_wait_commit_info(result.description_owned,table,&output,&work)&&record->reaped);
+        spinlock_preempt_enable();fd_description_put(result.description_owned);(void)drain(queue,99);
+        CHECK(child_wait_handler(&request,&result)&&result.result==-ECHILD&&!result.description_owned);
+        child_reap_once();fd_description_put(table_owner);fd_table_put(table);destroy_empty(queue);
+    }
+}
 int main(void){
-    CHECK(!baseline());monitor_contract();claims_contract();concurrent_retirement();
-    CHECK(!allocations&&!held_locks&&!preempt_depth&&!g_orphan_head&&released_children==67&&closed_contexts==67);
+    CHECK(!baseline());monitor_contract();claims_contract();info_contract();concurrent_retirement();
+    CHECK(!allocations&&!held_locks&&!preempt_depth&&!g_orphan_head&&released_children==71&&closed_contexts==71);
     puts("Child lifecycle contracts PASS");return 0;
 }
 '''
     compile_and_run("process-child", code)
-    print("Child lifecycle contracts PASS: orphan survival, abandoned launch kill, quiescence, OOM, claim cancel/copy rollback")
+    print("Child lifecycle contracts PASS: orphan survival, abandoned launch kill, quiescence, OOM, claim cancel/copy rollback, waitid peek/reap")
     return 0
 
 

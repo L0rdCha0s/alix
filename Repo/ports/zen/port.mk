@@ -10,6 +10,7 @@ ZEN_SOCKET_OBJECT := $(USER_OBJDIR)/lib/socket-owned.o
 ZEN_SELECT_OBJECT := $(USER_OBJDIR)/lib/select-owned.o
 ZEN_IOCTL_OBJECT := $(USER_OBJDIR)/lib/ioctl-owned.o
 ZEN_RESOURCE_OBJECT := $(USER_OBJDIR)/lib/resource-owned.o
+ZEN_DSO_START := $(USER_OBJDIR)/lib/dso_start.o
 ZEN_USER_RUNTIME_OBJECTS := $(filter-out $(USER_OBJDIR)/lib/syscall.o $(USER_OBJDIR)/lib/libc.o $(USER_OBJDIR)/lib/socket.o $(USER_OBJDIR)/lib/select.o $(USER_OBJDIR)/lib/ioctl.o $(USER_OBJDIR)/lib/resource.o,$(USER_COMMON_OBJECTS)) $(ZEN_UPSTREAM_LIBC) $(ZEN_OWNED_SYSCALL) $(ZEN_FCNTL_OBJECT) $(ZEN_TERMIOS_OBJECT) $(ZEN_POLL_OBJECT) $(ZEN_SOCKET_OBJECT) $(ZEN_SELECT_OBJECT) $(ZEN_IOCTL_OBJECT) $(ZEN_RESOURCE_OBJECT)
 
 $(ZEN_UPSTREAM_LIBC): user/lib/libc.c
@@ -35,6 +36,30 @@ $(ZEN_IOCTL_OBJECT): user/lib/ioctl.c
 $(ZEN_RESOURCE_OBJECT): user/lib/resource.c
 	@mkdir -p $(@D)
 	$(CC) $(USER_CFLAGS) -DALIX_OWNED_FDS=1 -c -o $@ $<
+
+$(ZEN_DSO_START): user/lib/dso_start.c
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -fPIC -mcmodel=small -ftls-model=global-dynamic -c -o $@ $<
+
+.PHONY: zen-dso-runtime
+zen-dso-runtime: $(ZEN_DSO_START)
+
+.PHONY: zen-dynamic-loader-qemu-test
+zen-dynamic-loader-qemu-test: all zen-dso-runtime $(ZEN_USER_RUNTIME_OBJECTS) $(ZEN_SSP_ARCHIVE)
+	ALIX_RUNTIME_OBJECTS="$(ZEN_USER_RUNTIME_OBJECTS)" python3 tests/zen_toolchain_test.py
+	python3 ports/zen/build_dynamic_loader_test.py
+	python3 tests/zen_static_elf_validator_test.py
+	python3 tests/dynamic_loader_qemu_test.py
+
+.PHONY: zen-rlbox-runtime-qemu-test
+zen-rlbox-runtime-qemu-test: all $(ZEN_USER_RUNTIME_OBJECTS) $(ZEN_SSP_ARCHIVE)
+	ALIX_RUNTIME_OBJECTS="$(ZEN_USER_RUNTIME_OBJECTS)" python3 tests/zen_toolchain_test.py
+	python3 ports/zen/build_rlbox_runtime_test.py
+	python3 tests/rlbox_runtime_qemu_test.py
+
+.PHONY: zen-udp-core-qemu-test
+zen-udp-core-qemu-test:
+	python3 tests/udp_owned_qemu_test.py
 
 $(ZEN_FCNTL_OBJECT): user/lib/fcntl.c
 	@mkdir -p $(@D)
@@ -77,6 +102,38 @@ $(USER_OBJDIR)/stat_clock_test.elf: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/t
 zen-stat-clock-qemu-test:
 	python3 tests/stat_clock_qemu_test.py
 
+$(USER_OBJDIR)/tests/file_identity_test.o: tests/file_identity_test.c
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+
+$(USER_OBJDIR)/file_identity_test.elf: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/file_identity_test.o $(USER_LD_SCRIPT)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/file_identity_test.o
+
+.PHONY: zen-file-identity-qemu-test
+zen-file-identity-qemu-test: all $(USER_OBJDIR)/file_identity_test.elf
+	python3 tests/file_identity_qemu_test.py
+
+$(USER_OBJDIR)/tests/record_lock_test.o: tests/record_lock_test.c
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+
+$(USER_OBJDIR)/record_lock_test.elf: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/record_lock_test.o $(USER_LD_SCRIPT)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/record_lock_test.o
+
+.PHONY: zen-record-lock-qemu-test
+zen-record-lock-qemu-test: all $(USER_OBJDIR)/record_lock_test.elf
+	python3 tests/record_lock_qemu_test.py
+
+.PHONY: zen-sqlite-runtime-qemu-test
+zen-sqlite-runtime-qemu-test: all $(ZEN_USER_RUNTIME_OBJECTS)
+	python3 ports/zen/build_sqlite_runtime_test.py
+	python3 tests/sqlite_runtime_qemu_test.py
+
+.PHONY: zen-version-loader-qemu-test
+zen-version-loader-qemu-test: all $(ZEN_USER_RUNTIME_OBJECTS)
+	python3 ports/zen/build_version_loader_test.py
+	python3 tests/version_loader_qemu_test.py
+
 $(USER_OBJDIR)/tests/process_wait_status_test.o: tests/process_wait_status_test.c
 	@mkdir -p $(@D)
 	$(CC) $(USER_CFLAGS) -c -o $@ $<
@@ -96,6 +153,29 @@ $(USER_OBJDIR)/process_spawn_test.elf: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR
 .PHONY: zen-process-spawn-qemu-test
 zen-process-spawn-qemu-test:
 	python3 tests/process_spawn_qemu_test.py
+
+$(USER_OBJDIR)/tests/waitid_test.o: tests/waitid_test.c
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+$(USER_OBJDIR)/waitid_test.elf: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/waitid_test.o $(USER_LD_SCRIPT)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/waitid_test.o
+.PHONY: zen-waitid-qemu-test
+zen-waitid-qemu-test: all $(USER_OBJDIR)/waitid_test.elf
+	python3 tests/waitid_qemu_test.py
+
+$(USER_OBJDIR)/tests/random_test.o: tests/random_test.c
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+$(USER_OBJDIR)/random_test.elf: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/random_test.o $(USER_LD_SCRIPT)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/random_test.o
+.PHONY: zen-random-qemu-test
+zen-random-qemu-test: all $(USER_OBJDIR)/random_test.elf
+	python3 tests/random_qemu_test.py
+
+.PHONY: zen-libevent-qemu-test
+zen-libevent-qemu-test: all $(ZEN_USER_RUNTIME_OBJECTS) zen-ssp-runtime
+	python3 ports/zen/build_libevent_runtime_test.py
+	python3 tests/libevent_runtime_qemu_test.py
 
 $(USER_OBJDIR)/tests/posix_spawn_test.o: tests/posix_spawn_test.c
 	@mkdir -p $(@D)
@@ -146,6 +226,28 @@ $(USER_OBJDIR)/posix_runtime_test.elf: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR
 zen-posix-runtime-qemu-test: all $(USER_OBJDIR)/posix_runtime_test.elf
 	python3 tests/posix_runtime_qemu_test.py
 
+$(USER_OBJDIR)/tests/sleep_test.o: tests/sleep_test.c
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+
+$(USER_OBJDIR)/sleep_test.elf: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/sleep_test.o $(USER_LD_SCRIPT)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/sleep_test.o
+
+.PHONY: zen-sleep-qemu-test
+zen-sleep-qemu-test: all $(USER_OBJDIR)/sleep_test.elf
+	python3 tests/sleep_qemu_test.py
+
+$(USER_OBJDIR)/tests/shared_memory_test.o: tests/shared_memory_test.c
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+
+$(USER_OBJDIR)/shared_memory_test.elf: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/shared_memory_test.o $(USER_LD_SCRIPT)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/shared_memory_test.o
+
+.PHONY: zen-shared-memory-qemu-test
+zen-shared-memory-qemu-test: all $(USER_OBJDIR)/shared_memory_test.elf
+	python3 tests/shared_memory_qemu_test.py
+
 $(USER_OBJDIR)/tests/fd_stream_test.o: tests/fd_stream_test.c
 	@mkdir -p $(@D)
 	$(CC) $(USER_CFLAGS) -c -o $@ $<
@@ -159,7 +261,7 @@ zen-fd-stream-qemu-test: all $(USER_OBJDIR)/fd_stream_test.elf
 
 ZEN_RUST_LIBC_SOURCE := ports/zen/upstream/firefox-159.0/third_party/rust/libc/src
 ZEN_RUST_LIBC_FFI_DIR := build/ports/zen/rust-libc-ffi
-$(ZEN_RUST_LIBC_FFI_DIR)/liblibc.rlib: $(ZEN_RUST_LIBC_SOURCE)/lib.rs $(ZEN_RUST_LIBC_SOURCE)/alix/mod.rs ports/zen/patches/series.json ports/zen/rust/rustc.py ports/zen/rust/x86_64-unknown-alix.json
+$(ZEN_RUST_LIBC_FFI_DIR)/liblibc.rlib: $(ZEN_RUST_LIBC_SOURCE)/lib.rs $(ZEN_RUST_LIBC_SOURCE)/alix/mod.rs $(ZEN_RUST_LIBC_SOURCE)/alix/sdk.rs ports/zen/patches/series.json ports/zen/rust/rustc.py ports/zen/rust/x86_64-unknown-alix.json
 	@mkdir -p $(@D)
 	python3 ports/zen/rust/rustc.py --crate-name libc --crate-type rlib --edition 2021 --target x86_64-unknown-alix -C panic=abort -C opt-level=2 $(ZEN_RUST_LIBC_SOURCE)/lib.rs -o $@
 
@@ -274,6 +376,54 @@ zen-nspr-spawn-qemu-test: all $(ZEN_USER_RUNTIME_OBJECTS) $(ZEN_SSP_ARCHIVE)
 	python3 ports/zen/build_nspr_spawn_test.py
 	python3 tests/nspr_spawn_qemu_test.py
 
+$(USER_OBJDIR)/tests/sigwait_test.o: tests/sigwait_test.c
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+
+$(USER_OBJDIR)/sigwait_test.elf: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/sigwait_test.o $(USER_LD_SCRIPT)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/sigwait_test.o
+
+.PHONY: zen-sigwait-qemu-test
+zen-sigwait-qemu-test: all $(USER_OBJDIR)/sigwait_test.elf
+	python3 tests/sigwait_qemu_test.py
+
+$(USER_OBJDIR)/tests/file_mapping_test.o: tests/file_mapping_test.c
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+$(USER_OBJDIR)/file_mapping_test.elf: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/file_mapping_test.o $(USER_LD_SCRIPT)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/file_mapping_test.o
+.PHONY: zen-file-mapping-qemu-test
+$(USER_OBJDIR)/tests/file_mapping_legacy_test.o: tests/file_mapping_legacy_test.c
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+$(USER_OBJDIR)/file_mapping_legacy_test.elf: $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/tests/file_mapping_legacy_test.o $(USER_LD_SCRIPT)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/tests/file_mapping_legacy_test.o
+zen-file-mapping-qemu-test: all $(USER_OBJDIR)/file_mapping_test.elf $(USER_OBJDIR)/file_mapping_legacy_test.elf
+	python3 tests/file_mapping_qemu_test.py
+
+$(USER_OBJDIR)/tests/writev_test.o: tests/writev_test.c
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+$(USER_OBJDIR)/writev_test.elf: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/writev_test.o $(USER_LD_SCRIPT)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/writev_test.o
+.PHONY: zen-writev-qemu-test
+zen-writev-qemu-test: all $(USER_OBJDIR)/writev_test.elf
+	python3 tests/writev_qemu_test.py
+
+.PHONY: zen-nspr-library-build zen-nspr-runtime-qemu-test
+zen-nspr-library-build: zen-dso-runtime
+	python3 ports/zen/build_nspr_library.py --make "$(MAKE)" --jobs 2
+
+zen-nspr-runtime-qemu-test: all zen-dso-runtime zen-toolchain-test
+	python3 ports/zen/build_nspr_library.py --make "$(MAKE)" --jobs 2
+	python3 ports/zen/build_nspr_runtime_test.py
+	python3 tests/nspr_runtime_qemu_test.py
+
+.PHONY: zen-rust-dynamic-loading-qemu-test
+zen-rust-dynamic-loading-qemu-test: all zen-dso-runtime zen-toolchain-test
+	python3 ports/zen/rust/build_dynamic_loading_test.py
+	python3 tests/rust_dynamic_loading_qemu_test.py
+
 $(USER_OBJDIR)/tests/executable_path_test.o: tests/executable_path_test.c
 	@mkdir -p $(@D)
 	$(CC) $(USER_CFLAGS) -c -o $@ $<
@@ -375,6 +525,11 @@ zen-ssp-runtime: $(ZEN_SSP_ARCHIVE)
 
 zen-ssp-test: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_LD_SCRIPT) $(ZEN_SSP_ARCHIVE)
 	ALIX_RUNTIME_OBJECTS="$(ZEN_USER_RUNTIME_OBJECTS)" python3 tests/stack_protector_toolchain_test.py
+
+.PHONY: zen-ssp-loader-qemu-test
+zen-ssp-loader-qemu-test: all zen-dso-runtime zen-ssp-test
+	python3 ports/zen/build_ssp_loader_test.py
+	python3 tests/ssp_loader_qemu_test.py
 
 zen-cxx-stream-test: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_LD_SCRIPT) $(ZEN_SSP_ARCHIVE)
 	ALIX_RUNTIME_OBJECTS="$(ZEN_USER_RUNTIME_OBJECTS)" python3 tests/cxx_stream_toolchain_test.py

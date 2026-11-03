@@ -1,0 +1,67 @@
+--- a/third_party/rust/neqo-udp/src/lib.rs
++++ b/third_party/rust/neqo-udp/src/lib.rs
+@@ -105,7 +105,7 @@
+     Ok(())
+ }
+
+-#[cfg(unix)]
++#[cfg(any(unix, target_os = "alix"))]
+ fn is_emsgsize(e: &io::Error) -> bool {
+     e.raw_os_error() == Some(libc::EMSGSIZE)
+ }
+@@ -117,12 +117,12 @@
+     matches!(e.raw_os_error(), Some(c) if c == WinSock::WSAEMSGSIZE.0 || c == WinSock::WSAEINVAL.0)
+ }
+
+-#[cfg(not(any(unix, windows)))]
++#[cfg(not(any(unix, windows, target_os = "alix")))]
+ fn is_emsgsize(_: &io::Error) -> bool {
+     false
+ }
+
+-#[cfg(unix)]
++#[cfg(any(unix, target_os = "alix"))]
+ fn is_enobufs(e: &io::Error) -> bool {
+     e.raw_os_error() == Some(libc::ENOBUFS)
+ }
+@@ -132,12 +132,12 @@
+     e.raw_os_error() == Some(WinSock::WSAENOBUFS.0)
+ }
+
+-#[cfg(not(any(unix, windows)))]
++#[cfg(not(any(unix, windows, target_os = "alix")))]
+ fn is_enobufs(_: &io::Error) -> bool {
+     false
+ }
+
+-#[cfg(unix)]
++#[cfg(any(unix, target_os = "alix"))]
+ use std::os::fd::AsFd as SocketRef;
+ #[cfg(windows)]
+ use std::os::windows::io::AsSocket as SocketRef;
+@@ -382,7 +382,7 @@
+     }
+
+     #[test]
+-    #[cfg(unix)]
++    #[cfg(any(unix, target_os = "alix"))]
+     fn is_emsgsize_and_is_enobufs_are_disjoint() {
+         let emsgsize = io::Error::from_raw_os_error(libc::EMSGSIZE);
+         assert!(is_emsgsize(&emsgsize));
+--- a/third_party/rust/neqo-udp/Cargo.toml
++++ b/third_party/rust/neqo-udp/Cargo.toml
+@@ -71,7 +71,7 @@
+ version = "0.2.2"
+ default-features = false
+
+-[target."cfg(unix)".dependencies.libc]
++[target.'cfg(any(unix, target_os = "alix"))'.dependencies.libc]
+ version = "0.2"
+ default-features = false
+
+--- a/third_party/rust/neqo-udp/.cargo-checksum.json
++++ b/third_party/rust/neqo-udp/.cargo-checksum.json
+@@ -1 +1 @@
+-{"files":{"Cargo.toml":"89cdd16fe435ee404acb7d77a8cc2a5838019bcb34ee3e1df77ed25299aed632","build.rs":"bf57cd35a78f636c14c442c1926abc2deca3d137e9d207e4f2f960f5b8363b07","src/lib.rs":"c76c2fdd06870e6727134ce00511a11e4a99f058b183af8909b0fcedeff7ac30"},"package":null}
+\ No newline at end of file
++{"files":{"Cargo.toml":"5d2cf50f62f659202dcd66863ab25b26fc34a309e861712c4814d4f40e0759df","build.rs":"bf57cd35a78f636c14c442c1926abc2deca3d137e9d207e4f2f960f5b8363b07","src/lib.rs":"285b1db1501c374c09991c9bb9e42e7d3eb6175f5dafe55a992580d844182c67"},"package":null}

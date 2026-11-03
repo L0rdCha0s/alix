@@ -190,6 +190,7 @@ bool process_handle_user_page_fault(interrupt_frame_t *frame,
 uint64_t process_current_pid(void);
 uint64_t process_current_uptime_ns(void);
 int process_user_resource_usage(int which, uintptr_t output, size_t bytes);
+int process_user_cpu_clock(int which, uintptr_t output, size_t bytes);
 uint32_t process_get_uid(const process_t *process);
 uint32_t process_get_gid(const process_t *process);
 void process_set_identity(process_t *process, uint32_t uid, uint32_t gid);
@@ -255,6 +256,12 @@ int64_t process_vm_map(process_t *process, uintptr_t hint, size_t length,
 int process_vm_protect(process_t *process, uintptr_t address, size_t length, uint32_t protection);
 int process_vm_unmap(process_t *process, uintptr_t address, size_t length);
 int process_vm_advise(process_t *process, uintptr_t address, size_t length, uint32_t advice);
+int process_vm_file_check(uintptr_t address, size_t length, uint32_t protection,
+                          uint32_t flags, int64_t offset, size_t *rounded);
+int64_t process_vm_map_file(process_t *process, uintptr_t address, size_t length,
+                            uint32_t protection, uint32_t flags, fd_description_t *file);
+int process_vm_sync_prepare(process_t *process, uintptr_t address, size_t length,
+                            uint32_t options, fd_description_t **out);
 int process_user_thread_detach(uint64_t tid);
 struct syscall_thread_info;
 int process_user_thread_info(uint64_t tid, struct syscall_thread_info *info);
@@ -317,6 +324,10 @@ bool wait_queue_wait_timeout(wait_queue_t *queue,
                              uint64_t timeout_ticks);
 void wait_queue_wake_one(wait_queue_t *queue);
 void wait_queue_wake_all(wait_queue_t *queue);
+/* Persistent I/O cleanup controllers wait here; notifications must run after
+ * releasing scheduler_lock, never inside request ownership primitives. */
+bool process_io_wait_cleanup(bool (*predicate)(void *), void *context, uint64_t timeout_ticks);
+void process_io_notify_cleanup(void);
 
 thread_t *process_find_stack_owner(const void *ptr, size_t len);
 bool process_pointer_on_stack(const void *ptr, size_t len);

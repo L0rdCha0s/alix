@@ -12,6 +12,7 @@
 #include "net/arp.h"
 #include "net/interface.h"
 #include "net/route.h"
+#include "net/udp.h"
 #include "spinlock.h"
 
 #define NET_DNS_MAX_SERVERS 4
@@ -168,6 +169,7 @@ void net_dns_init(void)
     g_server_count = 0;
     for (size_t i = 0; i < NET_DNS_MAX_PENDING; ++i)
     {
+        net_udp_port_release(&g_pending[i]);
         g_pending[i].active = false;
     }
     for (size_t i = 0; i < NET_DNS_CACHE_SIZE; ++i)
@@ -464,6 +466,7 @@ static void dns_release_pending(dns_pending_t *pending)
         dns_packet_t *packets = pending->packet_head;
         pending->packet_head = pending->packet_tail = NULL;
         pending->packet_count = 0;
+        net_udp_port_release(pending);
         pending->active = false;
         pending->local_port = 0;
         pending->server_snapshot_count = 0;
@@ -1570,8 +1573,10 @@ static uint16_t dns_allocate_port(dns_pending_t *pending)
         }
         if (!in_use)
         {
-            result = candidate;
-            pending->local_port = candidate;
+            uint16_t claimed = 0;
+            if (net_udp_port_claim(pending, 0, candidate, &claimed)) continue;
+            result = claimed;
+            pending->local_port = claimed;
             break;
         }
     }

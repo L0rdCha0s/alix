@@ -6,6 +6,47 @@ zen-rust-runtime: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_LD_SCRIPT)
 zen-rust-runtime-qemu-test: all zen-rust-runtime
 	python3 tests/rust_std_qemu_test.py
 
+.PHONY: zen-rust-std-net-qemu-test
+zen-rust-std-net-qemu-test: all zen-rust-runtime
+	python3 ports/zen/rust/build_std_net_test.py
+	python3 tests/rust_std_net_qemu_test.py
+
+.PHONY: zen-rust-glyph-rasterizer-qemu-test
+zen-rust-glyph-rasterizer-qemu-test: all
+	$(MAKE) zen-rust-runtime
+	$(MAKE) zen-gecko-configure
+	python3 ports/zen/rust/build_glyph_rasterizer_test.py
+	python3 ports/zen/rust/check_glyph_gecko.py
+	python3 tests/rust_glyph_rasterizer_qemu_test.py
+
+.PHONY: zen-rust-mtu-qemu-test
+zen-rust-mtu-qemu-test: all
+	$(MAKE) zen-rust-runtime
+	$(MAKE) zen-gecko-configure
+	python3 ports/zen/rust/build_mtu_test.py
+	python3 tests/rust_mtu_qemu_test.py
+
+.PHONY: zen-rust-socket2-qemu-test
+zen-rust-socket2-qemu-test: all
+	$(MAKE) zen-rust-runtime
+	$(MAKE) zen-gecko-configure
+	python3 ports/zen/rust/build_socket2_test.py
+	python3 tests/rust_socket2_qemu_test.py
+
+.PHONY: zen-rust-quinn-udp-qemu-test
+zen-rust-quinn-udp-qemu-test: all
+	$(MAKE) zen-rust-runtime
+	$(MAKE) zen-gecko-configure
+	python3 ports/zen/rust/build_quinn_udp_test.py
+	python3 tests/rust_quinn_udp_qemu_test.py
+
+.PHONY: zen-rust-neqo-udp-qemu-test
+zen-rust-neqo-udp-qemu-test: all
+	$(MAKE) zen-rust-runtime
+	$(MAKE) zen-gecko-configure
+	python3 ports/zen/rust/build_neqo_udp_test.py
+	python3 tests/rust_neqo_udp_qemu_test.py
+
 .PHONY: zen-rust-file-urls-test zen-rust-file-urls-qemu-test
 # Keep std publication and configure sequential even when the caller uses -j.
 zen-rust-file-urls-test:

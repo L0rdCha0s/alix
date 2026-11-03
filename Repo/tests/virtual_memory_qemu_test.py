@@ -16,7 +16,7 @@ def main():
     parser.add_argument("--test", choices=("vm", "copy", "write", "none", "exec", "all"), default="all")
     choice = parser.parse_args().test
     if choice in ("vm", "all"):
-        run_native_elf("virtual_memory_test.elf", ("VM_PLATFORM_TEST: PASS",),
+        run_native_elf("virtual_memory_test.elf", ("VM_PLATFORM_TEST: PASS", "noreserve=8GiB"),
                        ROOT / "build/test-out/virtual-memory-qemu.log", "Anonymous VM and native JIT", 60)
     if choice in ("copy", "all"):
         run_native_elf("user_copy_test.elf", ("USER_COPY_TEST: PASS",),

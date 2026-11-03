@@ -2,7 +2,7 @@
 +++ b/nsprpub/pr/include/md/_unixos.h
 @@ -591,7 +591,12 @@
  #endif
- 
+
  typedef PRIntn (*_MD_Fstat64)(PRIntn osfd, _MDStat64* buf);
 +#if defined(ALIX)
 +/* Native open flags use the uint64_t ABI declared by Alix's fcntl.h. */
@@ -18,7 +18,7 @@
 @@ -2470,6 +2470,19 @@
  #error "I don't know yet"
  #endif
- 
+
 +#if defined(ALIX)
 +static int
 +_MD_alix_stat_times_valid(const struct stat* sb)
@@ -38,7 +38,7 @@
 @@ -2490,6 +2503,11 @@
  #endif /* defined(_PR_HAVE_LARGE_OFF_T) */
      info->size = sb->st_size;
- 
+
 +#if defined(ALIX)
 +    if (_MD_alix_stat_times_valid(sb) < 0) {
 +        return -1;
@@ -48,9 +48,9 @@
      return 0;
  } /* _MD_convert_stat_to_fileinfo */
 @@ -2508,6 +2526,11 @@
- 
+
      LL_I2L(info->size, sb->st_size);
- 
+
 +#if defined(ALIX)
 +    if (_MD_alix_stat_times_valid(sb) < 0) {
 +        return -1;
@@ -59,3 +59,19 @@
      _MD_set_fileinfo64_times(sb, info);
      return 0;
  } /* _MD_convert_stat64_to_fileinfo64 */
+@@ -3514,10 +3537,14 @@
+ void*
+ _MD_MemMap(PRFileMap* fmap, PRInt64 offset, PRUint32 len)
+ {
++#if defined(ALIX)
++    off_t off = (off_t)offset;
++#else
+     PRInt32 off;
++    LL_L2I(off, offset);
++#endif
+     void* addr;
+
+-    LL_L2I(off, offset);
+     if ((addr = mmap(0, len, fmap->md.prot, fmap->md.flags,
+                      fmap->fd->secret->md.osfd, off)) == (void*)-1) {
+         _PR_MD_MAP_MMAP_ERROR(_MD_ERRNO());

@@ -1390,6 +1390,8 @@ static void thread_free_resources(thread_t *thread)
     }
 
     process_signal_thread_cleanup(thread);
+    fd_description_put(thread->vm_file_prepare);
+    thread->vm_file_prepare = NULL;
     process_t *owner_proc = thread->process;
     bool owner_valid = false;
     if (owner_proc)

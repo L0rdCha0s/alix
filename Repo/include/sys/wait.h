@@ -1,12 +1,16 @@
 #ifndef ALIX_SYS_WAIT_H
 #define ALIX_SYS_WAIT_H
 #include "sys/types.h"
+#include "signal.h"
 
 /* Encoded child status. Normal exit uses bits 8..15; a terminating signal uses
  * bits 0..6. Stopped/continued encodings are reserved for future job control. */
 #define WNOHANG 1
 #define WUNTRACED 2
+#define WEXITED 4
 #define WCONTINUED 8
+#define WNOWAIT 0x01000000
+typedef enum { P_ALL = 0, P_PID = 1, P_PGID = 2 } idtype_t;
 #define WIFEXITED(status) (((status) & 0x7f) == 0)
 #define WEXITSTATUS(status) (((unsigned)(status) >> 8) & 0xff)
 #define WTERMSIG(status) ((status) & 0x7f)
@@ -23,6 +27,7 @@ extern "C" {
  * groups and stopped/continued-job reporting remain unsupported. */
 pid_t wait(int *status);
 pid_t waitpid(pid_t pid, int *status, int options);
+int waitid(idtype_t type, id_t id, siginfo_t *info, int options);
 #ifdef __cplusplus
 }
 #endif

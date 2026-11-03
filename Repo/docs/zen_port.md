@@ -12,8 +12,17 @@ configuration and full static-shell build succeed for `x86_64-unknown-alix`.
 The real shell runs inside eight-CPU Alix, including observed Ion JIT execution,
 eight GC cycles with 10,000 rooted objects, WebAssembly execution/bounds trapping
 and worker shared Atomics. Gecko configures in a separate native object tree
-with `widget/alix` selected. The complete widget, NSPR/NSS and browser runtime
+with `widget/alix` selected. The complete widget, NSS and browser runtime
 still require compile and runtime acceptance.
+
+The thirteenth full build completes Gecko's entire configured Rust root in
+19m03s and produces a fresh 1,196,948,572-byte `libgkrust.a`. Cross objdump
+identifies all eleven archive members as native x86-64 ELF. The archive hash,
+compiler target, Rust snapshot and build-log hash are recorded in
+`build/ports/zen/gkrust-native-build.json`. The remaining C++ build exposed a
+missing `sleep` API in `ContentChild.cpp`; shared Alix libc now implements it,
+with host sanitizer and eight-CPU guest checks. The complete Gecko application
+has not linked, and Zen has not launched.
 
 Native prerequisites now include LLVM libc++/libc++abi file streams, upstream
 Rust `std` threading/synchronization, executable-path discovery, borrowed-storage
@@ -22,12 +31,12 @@ software window presentation. WASI sandbox compiler/header/link probes pass.
 These results establish individual OS boundaries; the full Rust filesystem,
 network and process backends remain incomplete.
 
-The seventh complete keep-going build finishes with compile errors after 21:14.
+The earlier seventh keep-going build finished with compile errors after 21:14.
 It clears the earlier resolver/select and C++ style-handle declarations and
 reaches Rust style compilation. Its diagnostics are preserved as
 `build/ports/zen/gecko-seventh-compile-diagnostics.log`. Dynamic loading,
 NSPR/system interfaces, shared memory/local IPC and Rust platform dispatch
-remain incomplete. This was not a successful browser build.
+were incomplete at that checkpoint. This was not a successful browser build.
 
 Follow-up work now also clears the Rust style thread-handle errors. The real
 upstream std uses Alix pthread creation, join/detach and OS naming, with native
@@ -35,8 +44,9 @@ borrowed/consuming handle extensions. Guest checks cover eight CPU-pinned native
 identities, names and stack metadata, 48 ownership-transfer/drop cases and 56
 TLS destructor runs. The existing std synchronization/HashMap/time regression
 still passes. The actual Gecko Rust root build then produces a fresh native
-style library containing get_thread_handles. Its broader root build still
-fails on other platform gaps; no complete gkrust or browser link is claimed.
+style library containing get_thread_handles. At that checkpoint the broader
+root failed on other platform gaps. The thirteenth build now completes the
+Rust root; the application link remains unverified.
 
 File resizing, VFS canonical paths and atomic directory-only removal now pass
 eight-CPU native tests and the actual Rust libc ABI fixture. Shrink/grow
@@ -75,8 +85,8 @@ files, including escaped and non-UTF-8 names.
 The default account config path also supports recursive profile-directory
 creation and preferences write/sync/readback without HOME/XDG overrides.
 
-The broader Rust root still exits 101 on mtu, socket2, ash, rustix and
-wr_glyph_rasterizer. Diagnostics are in
+The earlier directories-component build exited 101 on mtu, socket2, ash,
+rustix and wr_glyph_rasterizer. Historical diagnostics are in
 `build/ports/zen/rust-directories-native-build.log`; the native component
 receipt records that failed root result separately from the successful
 component compile/link and guest execution. No complete application link is
@@ -112,8 +122,8 @@ close/reuse and killed-caller checks, including exception-only hangup waits.
 The actual vendored Rust libc passes fd_set/timeval layout and select calls.
 NSPR's real prnetdb.c compiles using native reentrant host/protocol queries;
 the native pthread include also lets the complete nsDeviceContext.cpp compile.
-A refreshed compilation audit passes 60 of NSPR's 64 selected C sources. The
-four remaining sources require dynamic loading and shared-file operations.
+A refreshed compilation audit passes all 64 selected NSPR C sources, including
+the shared file mapping and synchronous signal-wait paths.
 These are individual source compilations, not an NSPR library
 link or runtime result. See [poll/select](kernel/poll.md).
 
@@ -128,8 +138,7 @@ eight-CPU tests, including 512 snapshots during 64 hostname replacements.
 The version identifies the actual running kernel's ELF build ID, verified
 against the private boot image. The configured NSPR metadata code also passes
 native open-flag, 64-bit size and checked timestamp-conversion tests. Its
-complete Unix source now stops on three shared-mapping/msync errors; a complete
-NSPR library still has not linked or run. See
+complete library now has separate native execution acceptance below. See
 [system identity](kernel/system_identity.md) for ownership and validation scope.
 
 NSPR's public random-noise, physical-memory and CPU-count functions also run
@@ -159,8 +168,8 @@ ASan/UBSan and TSan checks pass 8,000 concurrent operations. The actual Rust
 libc fixture checks its native resource ABI and enforced open failure. NSPR's
 complete pthread I/O source now compiles, and its table-size entry points run
 against the native FD policy. Its multicast request structure is declared;
-multicast operations remain unsupported. Complete NSPR startup remains
-unverified. See [descriptor limits](kernel/descriptor_limits.md).
+multicast operations remain unsupported. Full NSPR initialization now passes
+the library suite below. See [descriptor limits](kernel/descriptor_limits.md).
 
 NSPR's native launch helper now uses Alix posix_spawn with an owned environment
 snapshot, redirected standard descriptors and child-only cwd actions. Its actual
@@ -170,8 +179,174 @@ descriptor cleanup. The kernel cwd action separately passes 24 concurrent child
 launches with ordered relative opens, relative executable/PATH lookup and parent
 isolation. ASan/UBSan checks fault each helper preparation step and validate cwd
 ownership/error cleanup. The complete upstream process source compiles; full
-NSPR initialization and its wait daemon remain unverified. See
+NSPR initialization and its actual wait daemon now pass the full-library
+parent/child fixture as well. See
 [child processes](kernel/child_processes.md).
+
+Real native ELF dynamic loading now passes five eight-CPU guests: C/C++ shared
+objects execute with libc imports, dependencies, global/local lookup, GNU hashes,
+packed relocations, constructors/finalizers and 512 isolated TLS updates.
+Pending C++ destructors retain their code after dlclose; process exit finalizes
+libraries while keeping code mapped for terminating threads. RELRO and code
+write attempts fault as intended. ASan/UBSan fault injection and 3,000 metadata
+mutations pass, as does the existing upstream libc++/libc++abi regression.
+NSPR's linking, allocator and pthread sources now compile. Startup dependency loading,
+additional dynamic ABI forms and Zen remain incomplete. See
+[dynamic loading](kernel/dynamic_loading.md).
+
+Native `sigwait` now passes 512 directed waits across eight CPUs, competing
+process waiters, protected/cross-page output failures, signal coalescing,
+unrelated-signal retry, waiting inside a handler and killed-waiter cleanup.
+The kernel captures the input mask and retains only thread-owned wait state;
+failed checked output does not consume a pending signal. Actual Gecko Rust libc
+bindings pass native mask/block/raise/wait/restoration checks as well. Plain and
+ASan/UBSan host tests pass 201 signal assertions. See [signals](kernel/signals.md).
+The real unified NSPR 4.40 library now links and runs in Alix. Its full-library
+suite passes initialization, eight threads and 512 synchronized updates, once,
+conditions, TLS destructors, environment snapshots, real TCP gather writes,
+pipes/pollable events, shared file maps, child startup/wait-daemon status and
+cleanup. Native executable exports supply the canonical C runtime and SSP guard;
+missing strong imports still fail at load. Unsupported network operations report
+their error paths. See [NSPR runtime](kernel/nspr_runtime.md) for exact scope and
+the canonical current build log. This is still separate from Gecko/Zen startup.
+
+Gecko's actual `libloading` and `ash` Rust crates now have explicit Alix ELF
+dispatch without selecting a foreign OS family. A native eight-CPU consumer
+passes code loading, constructor/finalizer imports, 512 independent TLS updates,
+defined NULL symbols, missing-library/symbol errors, main-executable lookup and
+unload. Ash's absent-Vulkan-library path reports its normal loading error; this
+does not establish a Vulkan backend. These targeted crate checks are separate
+from the complete Rust archive build recorded above and from browser startup.
+
+Upstream Rust `std::net` now uses native Alix TCP descriptors, including safe
+owned-FD conversions. Its eight-CPU guest passes nine connections, 294,912
+payload bytes, connect deadlines/refusal, cloning, CLOEXEC/nonblocking status,
+peek/EOF, lookup and hostname. The broader network capabilities remain separate
+porting work.
+
+WebRender's actual FreeType rasterizer now runs in eight-CPU Alix using Gecko's
+bundled C library. It passes 512 concurrent glyph renders, monochrome/alpha/
+subpixel modes, variable-font weight changes and matching raw/file pixels
+through non-UTF-8 paths. The real C objects exposed main executable GOT imports;
+the CRT and upstream validator now handle that relocation form with checked
+symbols, destinations and TLS addends. See [glyph rasterization](kernel/glyph_rasterization.md).
+This establishes the rasterizer backend, not a completed Gecko font platform,
+compositor or Zen application.
+
+The actual Socket2 crate now also compiles with its `all` feature and runs in
+eight-CPU Alix. Its nine TCP connections transfer 294,912 bytes using native
+polling deadlines, atomic CLOEXEC/nonblocking creation, cloned/shared status,
+safe FD ownership, peek/EOF and real gather/scatter `sendmsg`/`recvmsg`.
+The message API captures all vectors before sending and keeps metadata in the
+registered request during waits; fault/cancellation/SIGPIPE contracts and
+native bad-vector checks pass. Addressed and ancillary messages remain work.
+
+Gecko's `mtu` crate now queries Alix's real route/interface/MTU service. Native
+acceptance covers 512 queries on eight CPUs, checked copying and C/Rust ABI.
+Host sanitizer checks cover 56,000 snapshots during 8,000 configuration changes.
+See [native routes](kernel/network_routes.md).
+
+A source audit found Gecko's direct Rustix use is confined to its
+`target_vendor = "apple"` QUIC capability probe. Its Cargo dependency now has
+that same condition. This removes an unused native dependency rather than
+claiming a completed generic Alix Rustix filesystem/network backend. Host
+build dependencies continue to use their normal Rustix implementation.
+These component milestones are separate from the complete Gecko Rust archive
+build; the application link and Zen startup remain unverified.
+
+The ninth full build advances to Quinn's missing Alix UDP backend and C API gaps
+in RLBox/SQLite. Its diagnostics are preserved in
+`build/ports/zen/gecko-ninth-full-build.log`; the run was deliberately interrupted
+after collecting those failures before editing compiler inputs.
+Follow-up work clears the RLBox memory/clock compile failures in targeted
+production builds. The actual runtime then passes eight-CPU execution with four
+clocks, sampled CPU accounting, 8 GiB alignment, minimum-WASI imports, eight
+independent WABT traps and a separate hardware guard fault. Alix now exposes
+process/thread CPU clocks, clock resolution and the native page-size getter.
+See [Wasm sandbox runtime](kernel/wasm_sandbox.md). SQLite's file-identity and
+fchown compile gaps are now cleared. Versioned stat records preserve the old
+40-byte ABI while adding device/inode/link identity and credentials for new
+C/Rust consumers. Native eight-CPU snapshots and independent ownership/mode
+readback pass. Basic fchmod, utimes and process-owned fcntl byte-range locks now
+pass in Alix, including the actual Rust libc bindings. The configured SQLite
+3.53.4 shared library now compiles and runs on eight CPUs: rollback, WAL snapshot
+isolation, separate-process busy/commit behavior, concurrent writers, integrity
+checks and 198 rows read back after an independent boot all pass. Its acceptance
+is `build/test-out/sqlite-runtime.acceptance.json`. This loads Gecko's configured
+libmozsqlite3.so, including FTS5/vector extensions, without changing build features.
+
+The earlier full-library build exposed unsupported ELF symbol versions.
+Native loader/validator support now checks definitions, requirements and aliases,
+and the real library passes. The original rejected artifact/report remain under
+`build/ports/zen/sqlite-versioning` as historical diagnostics. Versioned provider
+and consumer fixtures also pass on eight CPUs, including missing requirements,
+data, TLS and unload. See [dynamic loading](kernel/dynamic_loading.md#symbol-versions).
+
+The tenth full build cleared the earlier Quinn platform error and exposed
+Neqo UDP's Unix-only SocketRef selector. Patch `0041` selects the explicit Alix
+FD traits/error codes and dependency. The actual Neqo wrapper now exchanges 128
+datagrams across eight CPUs through Quinn, with packet-verified endpoints,
+ECN/checksums and proper PMTUD error handling. This is transport acceptance;
+complete HTTP/3 and Zen startup remain separate.
+
+The eleventh build compiled Neqo UDP and reached Gecko's `neqo_glue`, where
+two more Unix-only selectors omitted Alix's borrowed socket handle. Patch
+`0042` selects the native `BorrowedFd` alias and initializer. The Neqo guest
+fixture now uses borrowed descriptors, repeats the 128 packet-verified exchanges
+on eight CPUs, and verifies that dropping the wrapper leaves its socket owner
+open. The full Gecko build is being rerun with this glue fix.
+
+The twelfth build produced the Neqo glue library and advanced through DOM
+compilation, then exposed two Unix-only path-trait imports in WebRender's
+Gecko bindings. Patch `0043` selects Alix's existing `OsStringExt`/`OsStrExt`
+traits there. The font descriptor and Moz2D conversions retain their native
+byte-preserving behavior; complete binding compilation and browser startup
+still need verification.
+
+The fourteenth full build completes Rust with the updated libc inputs, then
+reaches Cairo's PDF sources. The native toolkit was missing from the
+`MOZ_PDF_PRINTING` selector, leaving PDF and font-subset declarations disabled.
+The platform patch now enables that backend for Alix. After regenerating the
+export tier, the complete Cairo directory compiles; the PDF and font-subset
+objects are native x86-64 ELF and contain the PDF creation entry points.
+`build/ports/zen/cairo-pdf-native-build.json` records this compile evidence.
+Native PDF output and the browser printing workflow remain unverified.
+
+The fifteenth build reaches the graphics and IPC layers. The next platform
+patch selects Skia's POSIX semaphore/file backend, exports the native FreeType
+types and preferences, and supplies the generic compositor resize message.
+The complete Skia, Moz2D, WebRender C++ bridge and headless directories now
+compile. Shared libc/kernel support now also provides `MAP_NORESERVE` and
+volatile `shm_open`/`shm_unlink` objects. Native checks cover an 8 GiB sparse
+reservation, 512 shared updates across eight CPUs, read-only inherited handles,
+unlink/recreate lifetime, killed creators and a namespace reset across reboot.
+See [named memory](kernel/shared_memory.md). Process launch/wait integration,
+the libevent platform configuration, layout selection and random-number APIs
+remain the next diagnosed compile gates. There is still no complete browser
+link or Zen runtime acceptance.
+See [VFS identity](kernel/vfs.md#file-identity-and-ownership).
+
+Native IPv4 UDP transport now passes an eight-CPU kernel acceptance workload:
+256 outgoing datagrams and 256 real host replies, zero/odd/max-MTU payloads,
+peek/truncation, retained ownership and shared DNS/NTP port leases. Independent
+capture checks pass for checksums, ECN/TOS, TTL/DF, lengths and endpoints. The
+ordinary kernel is restored after the fixture and the existing native DNS/netdb
+regression passes. The userspace executor/API bridge and actual Quinn adapter
+now also pass eight-CPU Alix execution with 256 host exchanges, Rust std
+UdpSocket and the public C socket API. Packet captures verify ECN/source
+selection and endpoint metadata. Killing a blocked receive caller releases its
+port while unrelated sockets continue progressing. IPv6, multicast, offload and
+POSIX addressed/ancillary message I/O remain unsupported. See
+[UDP transport](kernel/udp_transport.md).
+
+Regular-file shared mappings now pass eight-CPU aliases, 512 atomic updates,
+independent spawned processes, killed-owner cleanup, FD close, private snapshots,
+VFS coherence and partial protection/unmap tests. An independent AlixFS boot
+reads 32,785 bytes persisted through `msync` without explicit `fsync`. Actual
+Gecko Rust libc bindings and extracted NSPR map/sync/unmap functions pass as
+components. The current backend rejects whole pages beyond EOF and shrinking
+live mapped files; device/shared-anonymous mappings remain unsupported. See
+[file mappings](kernel/file_mappings.md).
 
 The existing browser remains available during the port.
 
@@ -287,8 +462,8 @@ pass pointers to one thread's stack to another thread or asynchronous callback.
   changes, copying, link creation and recursive deletion remain unsupported,
   as do network and process-creation backends. Native environment snapshots,
   cwd changes, executable discovery, HOME/account fallback and PATH handling
-  now pass eight-CPU guest checks. Unwinding, dynamic loading and
-  ecosystem platform dispatch need further work. See
+  now pass eight-CPU guest checks. Unwinding and ecosystem platform dispatch,
+  including Rust integration with the new native dynamic loader, need further work. See
   [`ports/zen/rust/README.md`](../ports/zen/rust/README.md).
 - **ELF TLS and threads.** The static `ET_EXEC` loader initializes `PT_TLS`
   data/BSS with alignment for the initial and created threads. FS points to the
@@ -309,8 +484,9 @@ pass pointers to one thread's stack to another thread or asynchronous callback.
   hardware permission faults. The new `MADV_DONTNEED` path discards backing and
   refills zero pages on permitted instruction faults or syscall copies;
   `posix_madvise` preserves contents. Native discard/refill and write-protection
-  tests passed; the remaining fault-mode QA is recorded below. Shared and
-  file-backed mappings remain unsupported. The expanded user window runs from
+  tests passed; the remaining fault-mode QA is recorded below. Regular-file
+  shared/private mappings now have separate acceptance; shared anonymous
+  mappings remain unsupported. The expanded user window runs from
   4 GiB to 64 TiB, with a 16 GiB brk reservation and a separate anonymous-VM
   arena. A native 32 MiB ELF and sparse 12 GiB mapping across high PML4 entries
   passed on eight CPUs. Committed memory remains limited by physical RAM, and
@@ -331,9 +507,9 @@ pass pointers to one thread's stack to another thread or asynchronous callback.
 The native Clang driver uses Alix headers, CRT/linker script, LLVM
 libc++/libc++abi and a real native Rust standard library. The pinned upstream
 standalone SpiderMonkey build now passes its full default build and final link.
-The Alix static ELF check retains meaningful executable validation without
-requiring the dynamic table used on other platforms. There are no unresolved
-symbols or runtime interpreter. See [`ports/zen/README.md`](../ports/zen/README.md)
+The Alix ELF check validates fixed executables, optional export metadata,
+supported main TLS fixups and native shared-object relocations. The proven
+standalone shell has no unresolved symbols or host runtime interpreter. See [`ports/zen/README.md`](../ports/zen/README.md)
 for the patch manifest, build evidence and exact native execution boundary.
 
 The complete C11 runtime includes the `nearbyint` family and full real/complex
@@ -409,6 +585,19 @@ The remaining acceptance order is:
    QEMU. Package a real native ELF and switch the default browser only after
    these tests pass.
 
+Zen import preparation has separate receipts under `build/ports/zen`.
+`zen-overlay-composition-preflight.json` records all 273 source patches
+composing with the 47 Alix patches preserved. `zen-release-preferences/receipt.json`
+records repeatable output from the pinned release preference generator.
+`zen-release-resources/receipt.json` records the pinned search-settings merge
+and 571 localization overlays across 42 locales, all parsed by Gecko's Fluent
+parser. `zen-branding-project/receipt.json` records 80 repeatable release-branding
+files generated by pinned Surfer 1.14.9, including nine verified native PNG icon
+sizes and valid English Fluent branding. These files are staged outside the
+active engine. Non-English Gecko locale baselines and the actual Zen import
+remain separate work; these preparation receipts do not establish a running
+Zen application.
+
 Changing user address-space boundaries requires coordinated changes to
 `src/arch/x86/uefi.ld` and `user/lib/link.ld`.
 
@@ -456,6 +645,26 @@ make zen-synchronous-file-qemu-test # Native O_SYNC and independent disk remount
 make zen-fd-limits-qemu-test        # Enforced FD quotas, inheritance and legacy rejection
 make zen-spawn-cwd-qemu-test        # Ordered child cwd actions and parent isolation
 make zen-nspr-spawn-qemu-test       # Actual NSPR native launch helper
+make zen-dynamic-loader-qemu-test   # Real ELF DSOs, dynamic TLS, lifetimes and permissions
+make zen-sigwait-qemu-test          # Blocked signal acceptance and competing waiters
+make zen-file-mapping-qemu-test     # Shared pages, private copies and msync remount
+make zen-nspr-runtime-qemu-test     # Complete NSPR library public APIs in Alix
+make zen-writev-qemu-test           # Gather capture, atomic pipes and append
+make zen-rust-dynamic-loading-qemu-test # Actual libloading/ash and native DSOs
+make zen-rust-std-net-qemu-test # Actual std TCP, deadlines and descriptor ownership
+make zen-rust-glyph-rasterizer-qemu-test # Actual WebRender/FreeType glyphs on eight CPUs
+make zen-rust-mtu-qemu-test # Actual MTU crate and native route snapshots
+make zen-rust-socket2-qemu-test # Actual Socket2, message I/O and FD ownership
+make zen-rlbox-runtime-qemu-test # Actual RLBox memory/minWASI, clocks and WABT traps
+make zen-udp-core-qemu-test # Native UDP transport, packets and shared DNS/NTP leases
+make zen-rust-quinn-udp-qemu-test # Actual Quinn, std UDP, packet metadata and cancellation
+make zen-file-identity-qemu-test # Versioned metadata, ownership and independent remount
+make zen-record-lock-qemu-test # Process ranges, close/dup2, contention and killed owners
+make zen-sqlite-runtime-qemu-test # Actual configured DSO, extensions, WAL and remount
+make zen-version-loader-qemu-test # Default/legacy ELF versions, requirements and TLS
+make zen-sleep-qemu-test # Real timed/interruptible waits, SA_RESTART and UINT_MAX
+make zen-shared-memory-qemu-test # Named RAM objects, processes, unlink lifetime and reboot
+make zen-rust-neqo-udp-qemu-test # Actual Neqo wrapper over native Quinn UDP
 make zen-rust-file-urls-qemu-test # Actual Gecko URL crate and native file readback
 make zen-rust-os-consumers-qemu-test # Real Glean logging, errno and storage paths
 make zen-rust-directories-qemu-test # Actual dirs crates and native XDG/account paths
@@ -493,7 +702,7 @@ The following actual Alix guest results are retained under `build/test-out/`:
 | `filesystem-primitives-qemu.log` | Eight CPUs pass file resizing/zero-fill, shared alias offsets and shared-node read snapshots, symlink-aware realpath, directory-only rmdir and invalid/read-only user-copy checks. |
 | `fsync-legacy-root-qemu.log` | Disk written before the mount-root fix retains the new mount-point name and passes complete native file readback. |
 | `select-native-qemu.log` | Eight pinned select waiters, all descriptor bits/highest slot, multi-set counts, monotonic timeouts, safe copies, TCP/EOF, exception-only hangup, close/reuse, EINTR and killed-caller cleanup. |
-| `rust-libc-ffi-native-qemu.log` | Actual Gecko-vendored Rust libc linked to Alix: C/Rust scalar ABI, heap, environment, opaque FILE I/O, 64-bit offsets, pipes, sockets, address lookup, fsync, physical-page queries, select, ioctl and native system/credential identity. |
+| `rust-libc-ffi-native-qemu.log` | Actual Gecko-vendored Rust libc linked to Alix: C/Rust scalar ABI, heap, environment, opaque FILE I/O, 64-bit offsets, pipes, sockets, address lookup, fsync, physical-page queries, select, ioctl, native system/credential identity and versioned stat/fchown. |
 | `executable-path-native-qemu.log` | Kernel file loader and native spawn/PATH launch expose full absolute paths before main, independently of mutable argv/cwd; rename snapshot and invalid/short/read-only reply checks. |
 | `rust-std-qemu.log` | Actual upstream std: native pthread identities/handles/TLS; File/OwnedFd ownership, offsets, resizing, paths, directories and pipes; 1,536 concurrent C/Rust environment updates, 512 snapshots, raw bytes, owned iterators, real cwd/executable paths and exact-uid account fallback; original allocation/time/synchronization/HashMap checks also pass. |
 | `rust-file-urls-qemu.log` | Actual Gecko URL crate: native absolute paths, percent escaping, Unicode and invalid UTF-8 byte roundtrips, local/remote-host handling, NUL rejection at file open and eight-CPU file readback through decoded URLs. |
@@ -502,12 +711,35 @@ The following actual Alix guest results are retained under `build/test-out/`:
 | `flock-native-qemu.log` | Eight pinned CPUs preserve 256 file updates under real shared/exclusive locks; advisory behavior, dup/final-close, rename, native inheritance, descriptor reuse, EINTR, storage progress and killed-waiter sibling-lock release pass. Rust File lock APIs independently pass 256 pinned critical sections in rust-std-qemu.log. |
 | `ioctl-native-qemu.log`, `ioctl-legacy-qemu.log` | Eight CPUs pass 768 pipe snapshots, atomic nonblocking/shared-status behavior, per-slot CLOEXEC, file offset/EOF counts, exact copy widths and pointer errors; a separate legacy guest rejects controls without altering private flags. |
 | `system-identity-qemu.log` | Running kernel build ID matches the booted ELF; credentials, checked copies and hostname bounds pass alongside 512 snapshots on eight CPUs during 64 atomic hostname replacements. |
-| `nspr-file-abi-qemu.log` | Actual configured NSPR metadata converters and native open ABI pass 64-bit flags/sizes, second-to-microsecond conversion and overflow rejection. Extracted functions use an instrumented error sink; complete NSPR startup is not tested. |
+| `nspr-file-abi-qemu.log` | Actual configured NSPR metadata/open and map/sync/unmap helpers pass native flags/sizes/offsets, timestamp conversion, shared visibility and error handling. Extracted functions use an instrumented error sink; complete NSPR startup is not tested. |
 | `nspr-resources-qemu.log`, `nspr-resources-unsupported-qemu.log` | Whole upstream resource objects pass 512 eight-CPU samples, native memory/CPU counts, bounded short results, descriptor pressure and checked-copy errors. A separate CPU without RDRAND returns zero, maps ENOSYS and preserves output. Full NSPR initialization and production SSP startup are outside this fixture. |
 | `synchronous-file-qemu.log`, `synchronous-file-remount-qemu.log`, `synchronous-file-legacy-qemu.log` | Eight pinned writers append 64 complete records; immutable sync state, shared offsets and checked inputs pass. A separate boot reads all 32 KiB and metadata without an explicit fsync; legacy wrapper and raw kernel reject sync without truncation. |
 | `fd-limits-qemu.log`, `fd-limits-legacy-qemu.log` | 512 eight-CPU operations pass real FD quotas, atomic pipes, sockets, failed-truncate preservation, high slots, cross-page copies and spawn policy inheritance/isolation. A separate legacy guest rejects FD-limit calls without altering private limits. |
 | `spawn-cwd-qemu.log` | Eight pinned launchers create 24 children with owned cwd actions, ordered relative opens, relative executable/PATH lookup, constructor-time cwd and parent isolation through failures. |
 | `nspr-spawn-qemu.log` | Actual NSPR spawn helper launches 25 children, including crossed stdio and eight pinned callers; environment variants, CLOEXEC, blocking child streams, cwd/constructor state, failed-launch restoration and temporary-FD cleanup pass. Full NSPR initialization and wait daemon are not tested. |
+| `dynamic-loader-qemu.log` | Real ELF code/dependencies, libc imports, constructor order, SysV/GNU hashes, packed relocations, 512 eight-CPU TLS updates, global/local binding retention, defined NULL symbols, error state, unload and NODELETE exit finalization. |
+| `dynamic-loader-dtors-qemu.log`, `dynamic-loader-pinned-exit-qemu.log` | Eight C++ destructors retain code after dlclose and release it only after callbacks return; separate process exit finalizes with live threads and keeps code resident through termination. |
+| `dynamic-loader-{relro,text}-qemu.log` | Hardware rejects writes to protected DSO data/code with the expected page faults and source locations; the shell recovers afterward. |
+| `sigwait-qemu.log` | 512 directed waits across eight CPUs, eight competing process waiters, coalescing, checked-copy failures, handler retry/nesting and killed-waiter cleanup. Actual Rust libc mask/wait ABI also passes in `rust-libc-ffi-native-qemu.log`. |
+| `file-mapping-qemu.log`, `file-mapping-remount-qemu.log`, `file-mapping-legacy-qemu.log` | Shared physical pages across threads/processes, 512 atomic updates, private isolation, VFS coherence, protection/unmap/close lifetimes and independent msync persistence. Legacy FDs remain isolated. |
+| `nspr-runtime-qemu.log` | Full NSPR 4.40 library initialization, eight-thread synchronization/TLS, TCP gather/echo, pipes/events, shared maps, a child initializing NSPR, real wait-daemon status and cleanup. |
+| `writev-qemu.log` | 512 atomic pipe records and 512 append records across eight CPUs, safe capture, overflow, bounded short writes, nonblocking admission and pipe SIGPIPE. |
+| `ssp-loader-qemu.log`, `ssp-loader-corrupt-qemu.log` | Protected DSO constructor/calls use the main guard and native environment exports; an intentional overflow exits with verified status 127. |
+| `rust-dynamic-loading-qemu.log` | Actual libloading/ash crates, native ELF code/imports, 512 thread-local updates, defined NULL symbols, error state and unload. Vulkan availability is not established. |
+| `rust-std-net-qemu.log` | Native upstream std TCP: nine connections, 294,912 bytes, deadlines/refusal, FD ownership/cloning, CLOEXEC/nonblocking, peek/EOF, lookup and hostname. |
+| `rust-glyph-rasterizer-qemu.log` | Actual WebRender FreeType backend: 512 glyph renders on eight CPUs, stable pixels/metrics, mono/alpha/subpixel modes, variable weights and raw/non-UTF-8 file-font equivalence. |
+| `rust-mtu-qemu.log` | Actual MTU crate: 512 native route queries on eight CPUs, real outgoing interface/MTU, local/default routes, C ABI and checked-output errors. |
+| `rust-socket2-qemu.log` | Actual Socket2 with all feature: nine TCP connections and 294,912 bytes, native deadlines, atomic flags, cloning, FD ownership, peek/EOF, gather/scatter, capture faults and NOSIGNAL after EOF. |
+| `rlbox-runtime-qemu.log` | Actual RLBox memory/minWASI and default WABT runtime: eight aligned memories/traps, four clocks, native thread/process CPU samples, sleep exclusion and cleanup. |
+| `rlbox-guard-qemu.log` | Exact native hardware write fault inside RLBox's reserved guard, compiled source verification and recovered shell. |
+| `udp-owned-qemu.log` | Native owned UDP core on eight CPUs: 256 host exchanges, zero/max-MTU datagrams, peek/truncation, ownership, ECN/TOS/TTL and live DNS/NTP port coexistence, followed by userspace TCP download/TLS. |
+| `quinn-udp-qemu.log` | Actual Quinn and std/public UDP sockets on eight CPUs: 256 host exchanges, wire-matched ECN/endpoints, source selection, empty/max-MTU packets, aliases/nonblocking, safe-copy failures and killed-caller port release. |
+| `file-identity-qemu.log`, `file-identity-remount-qemu.log` | 512 snapshots on eight CPUs, old/new stat canaries, aliases/independent opens, readdir, rename/unlink/recreation, directory links, mount identities and independent readback of owner/group/mode 0640. |
+| `record-lock-qemu.log` | Eight CPUs, 512 lock rounds, three children, PID/conflict queries, shared/exclusive splits, relative offsets, close-any-FD/dup2, killed holders/waiters, event progress and checked copying. |
+| `sqlite-runtime-qemu.log`, `sqlite-remount-qemu.log` | Actual configured SQLite DSO: rollback/WAL, snapshots, separate-process busy/commit, eight writers, FTS5/vector extensions, integrity checks and 198 persisted rows. |
+| `version-loader-qemu.log` | Versioned providers/consumers: default/legacy aliases, data, missing requirements, constructor order, eight-CPU dynamic TLS and unload. |
+| `sleep-native-qemu.log` | Eight pinned CPUs: timed waits, sixteen caught-signal interruptions, SA_RESTART behavior, UINT_MAX durations, zero waits and errno. |
+| `neqo-udp-qemu.log` | Actual Neqo/Quinn bridge: 128 host exchanges on eight CPUs, packet-verified endpoints/ECN/checksums, oversize PMTUD behavior and borrowed socket ownership. |
 | `thread-elf_tls-qemu.log` | Eight CPUs passed initialized TLS, zeroed TLS, 128-byte alignment, constructors and thread-local errno checks. |
 | `thread-libc-qemu.log` | Four-CPU allocator/once/TSD checks and exit ordering passed; required `main PASS` and `exit PASS` are present. |
 | `thread-main_exit-qemu.log` | `MAIN_THREAD_EXIT_TEST: PASS main_joined=1 tls=1 last=1`: workers survive initial-thread exit and the last participant performs final cleanup. |

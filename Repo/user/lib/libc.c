@@ -1828,7 +1828,7 @@ int mkdir(const char *path, uint32_t mode)
 {
     (void)mode;
 #if defined(ALIX_OWNED_FDS) && !defined(TTF_HOST_BUILD)
-    int64_t result = sys_file_io(SYSCALL_FILE_MKDIR, (uintptr_t)path, 0, 0, 0);
+    int64_t result = sys_file_io(SYSCALL_FILE_MKDIR_MODE, (uintptr_t)path, mode, 0, 0);
     if (result < 0) { errno = (int)-result; return -1; }
     return 0;
 #else
@@ -3755,6 +3755,7 @@ int __alix_stat_decode(const syscall_stat_t *input, struct stat *st)
         case SYSCALL_NODE_TYPE_FIFO: mode = S_IFIFO; break;
         default: errno = EIO; return -1;
     }
+    memset(st, 0, sizeof(*st));
     st->st_size = input->size_bytes;
     st->st_mode = mode;
     st->st_type = input->type;
@@ -3767,9 +3768,69 @@ int __alix_stat_decode(const syscall_stat_t *input, struct stat *st)
 int fstat(int fd, struct stat *st)
 {
     if (!st) { errno = EFAULT; return -1; }
+#ifdef ALIX_OWNED_FDS
+    int64_t result = sys_file_io(SYSCALL_FILE_STAT_INFO, (uint64_t)(int64_t)fd, (uintptr_t)st, 0, 0);
+    if (result < 0) { errno = (int)-result; return -1; }
+    return 0;
+#else
     syscall_stat_t value;
     int result = sys_fstat(fd, &value);
     return result ? result : __alix_stat_decode(&value, st);
+#endif
+}
+
+/* Original ELF ABI: only its 40 bytes may be written. Existing std binaries
+ * still call this symbol, while newly compiled C/Rust libc consumers use v2. */
+int __alix_stat_decode_legacy(syscall_stat_t *value, void *output)
+{
+    if (!output) { errno = EFAULT; return -1; }
+    uint32_t type = value->type, mode;
+    switch (type)
+    {
+        case SYSCALL_NODE_TYPE_DIR: mode = S_IFDIR; break;
+        case SYSCALL_NODE_TYPE_FILE: mode = S_IFREG; break;
+        case SYSCALL_NODE_TYPE_BLOCK: mode = S_IFBLK; break;
+        case SYSCALL_NODE_TYPE_SYMLINK: mode = S_IFLNK; break;
+        case SYSCALL_NODE_TYPE_SOCKET: mode = S_IFSOCK; break;
+        case SYSCALL_NODE_TYPE_CHARACTER: mode = S_IFCHR; break;
+        case SYSCALL_NODE_TYPE_FIFO: mode = S_IFIFO; break;
+        default: errno = EIO; return -1;
+    }
+    value->type = mode; value->reserved = type;
+    memcpy(output, value, sizeof(*value));
+    return 0;
+}
+int __alix_fstat_legacy(int fd, void *output) __asm__("fstat");
+int __alix_fstat_legacy(int fd, void *output)
+{
+    if (!output) { errno = EFAULT; return -1; }
+    syscall_stat_t value;
+    int result = sys_fstat(fd, &value);
+    return result ? result : __alix_stat_decode_legacy(&value, output);
+}
+
+int fchown(int fd, uid_t uid, gid_t gid)
+{
+#ifdef ALIX_OWNED_FDS
+    int64_t result = sys_file_io(SYSCALL_FILE_CHOWN, (uint64_t)(int64_t)fd, uid, gid, 0);
+    if (result < 0) { errno = (int)-result; return -1; }
+    return 0;
+#else
+    (void)fd; (void)uid; (void)gid;
+    errno = ENOTSUP; return -1;
+#endif
+}
+
+int fchmod(int fd, mode_t mode)
+{
+#ifdef ALIX_OWNED_FDS
+    int64_t result = sys_file_io(SYSCALL_FILE_CHMOD, (uint64_t)(int64_t)fd, mode, 0, 0);
+    if (result < 0) { errno = (int)-result; return -1; }
+    return 0;
+#else
+    (void)fd; (void)mode;
+    errno = ENOTSUP; return -1;
+#endif
 }
 
 int putc(int ch, FILE *stream) { return fputc(ch, stream); }
@@ -3798,7 +3859,38 @@ int open(const char *path, uint64_t flags, ...)
     {
         mode_flags |= SYSCALL_OPEN_READ;
     }
-    return sys_open(path, mode_flags);
+    uint32_t mode = 0666u;
+#ifndef TTF_HOST_BUILD
+    if (flags & SYSCALL_OPEN_CREATE)
+    {
+        va_list arguments;
+        va_start(arguments, flags);
+        mode = va_arg(arguments, uint32_t);
+        va_end(arguments);
+    }
+#endif
+    return sys_open_mode(path, mode_flags, mode);
+}
+
+#ifndef TTF_HOST_BUILD
+int __alix_open_legacy(const char *path, uint64_t flags, ...) __asm__("open");
+int __alix_open_legacy(const char *path, uint64_t flags, ...)
+{
+    if (!(flags & (SYSCALL_OPEN_READ | SYSCALL_OPEN_WRITE))) flags |= SYSCALL_OPEN_READ;
+    return sys_open(path, flags);
+}
+#endif
+
+int creat(const char *path, mode_t mode)
+{
+    return open(path, SYSCALL_OPEN_WRITE | SYSCALL_OPEN_CREATE | SYSCALL_OPEN_TRUNCATE, mode);
+}
+
+mode_t umask(mode_t mask)
+{
+    int64_t result = sys_process(SYSCALL_PROCESS_UMASK, mask, 0, 0);
+    if (result < 0) { errno = (int)-result; return (mode_t)-1; }
+    return (mode_t)result;
 }
 
 int socket_open(const char *iface_name)
@@ -4222,6 +4314,7 @@ typedef struct libc_thread_destructor
     struct libc_thread_destructor *next;
     void (*function)(void *);
     void *argument;
+    void *module;
 } libc_thread_destructor_t;
 static libc_tls_key_t g_tls_keys[ALIX_TLS_KEYS];
 static alix_mutex_t g_tls_keys_lock;
@@ -4327,6 +4420,8 @@ int alix_tls_set(alix_tls_key_t key, void *value)
 
 void alix_thread_run_tls_destructors(void)
 {
+    extern void __alix_dl_unpin(void *) __attribute__((weak));
+    extern void __alix_dl_thread_cleanup(void) __attribute__((weak));
     if (g_tls_cleanup_active || g_tls_cleanup_done)
     {
         return;
@@ -4338,8 +4433,10 @@ void alix_thread_run_tls_destructors(void)
         g_thread_destructors = item->next;
         void (*function)(void *) = item->function;
         void *argument = item->argument;
+        void *module = item->module;
         free(item);
         function(argument);
+        if (module && __alix_dl_unpin) __alix_dl_unpin(module);
     }
     for (unsigned pass = 0; pass < ALIX_TLS_DESTRUCTOR_ITERATIONS; ++pass)
     {
@@ -4368,6 +4465,19 @@ void alix_thread_run_tls_destructors(void)
             break;
         }
     }
+    /* A pthread-key destructor may have instantiated another C++ TLS object. */
+    while (g_thread_destructors)
+    {
+        libc_thread_destructor_t *item = g_thread_destructors;
+        g_thread_destructors = item->next;
+        void (*function)(void *) = item->function;
+        void *argument = item->argument;
+        void *module = item->module;
+        free(item);
+        function(argument);
+        if (module && __alix_dl_unpin) __alix_dl_unpin(module);
+    }
+    if (__alix_dl_thread_cleanup) __alix_dl_thread_cleanup();
     g_tls_cleanup_done = true;
     g_tls_cleanup_active = false;
 }
@@ -4468,7 +4578,7 @@ void alix_run_exit_handlers(void)
 
 int __cxa_thread_atexit_impl(void (*function)(void *), void *argument, void *dso)
 {
-    (void)dso; /* Static ET_EXEC images cannot unload their code. */
+    extern void *__alix_dl_pin(const void *) __attribute__((weak));
     if (!function)
     {
         errno = EINVAL;
@@ -4482,6 +4592,7 @@ int __cxa_thread_atexit_impl(void (*function)(void *), void *argument, void *dso
     }
     item->function = function;
     item->argument = argument;
+    item->module = __alix_dl_pin ? __alix_dl_pin(dso) : NULL;
     item->next = g_thread_destructors;
     g_thread_destructors = item;
     return 0;
@@ -4658,13 +4769,47 @@ void qsort(void *base, size_t count, size_t width, int (*compare)(const void *, 
     }
 }
 
+static int libc_cpu_clock(clockid_t clock, syscall_cpu_clock_t *snapshot)
+{
+    int result = sys_cpu_clock(clock == CLOCK_THREAD_CPUTIME_ID ?
+        SYSCALL_USAGE_CLOCK_THREAD : SYSCALL_USAGE_CLOCK_PROCESS, snapshot);
+    if (result < 0) { errno = -result; return -1; }
+    if (!snapshot->tick_frequency || snapshot->reserved) { errno = EIO; return -1; }
+    return 0;
+}
+
 int clock_gettime(clockid_t clock, struct timespec *value)
 {
-    if (!value || (clock != CLOCK_REALTIME && clock != CLOCK_MONOTONIC))
-    { errno = EINVAL; return -1; }
+    if (clock < CLOCK_REALTIME || clock > CLOCK_THREAD_CPUTIME_ID) { errno = EINVAL; return -1; }
+    if (!value) { errno = EFAULT; return -1; }
+    if (clock == CLOCK_PROCESS_CPUTIME_ID || clock == CLOCK_THREAD_CPUTIME_ID)
+    {
+        syscall_cpu_clock_t snapshot = {0};
+        if (libc_cpu_clock(clock, &snapshot)) return -1;
+        uint64_t seconds = snapshot.ticks / snapshot.tick_frequency;
+        if (seconds > INT64_MAX) { errno = EOVERFLOW; return -1; }
+        value->tv_sec = (time_t)seconds;
+        value->tv_nsec = (long)(((snapshot.ticks % snapshot.tick_frequency) * 1000000000ull) /
+                                snapshot.tick_frequency);
+        return 0;
+    }
     uint64_t milliseconds = clock == CLOCK_MONOTONIC ? sys_monotonic_millis() : sys_time_millis();
     value->tv_sec = (time_t)(milliseconds / 1000u);
     value->tv_nsec = (long)((milliseconds % 1000u) * 1000000u);
+    return 0;
+}
+
+int clock_getres(clockid_t clock, struct timespec *value)
+{
+    if (clock < CLOCK_REALTIME || clock > CLOCK_THREAD_CPUTIME_ID) { errno = EINVAL; return -1; }
+    if (!value) return 0;
+    syscall_cpu_clock_t snapshot = {0};
+    if (libc_cpu_clock(clock, &snapshot)) return -1;
+    uint64_t nanoseconds = (1000000000ull + snapshot.tick_frequency - 1) / snapshot.tick_frequency;
+    if ((clock == CLOCK_REALTIME || clock == CLOCK_MONOTONIC) && nanoseconds < 1000000u)
+        nanoseconds = 1000000u;
+    value->tv_sec = (time_t)(nanoseconds / 1000000000u);
+    value->tv_nsec = (long)(nanoseconds % 1000000000u);
     return 0;
 }
 
@@ -4724,6 +4869,16 @@ int nanosleep(const struct timespec *duration, struct timespec *remaining)
     return 0;
 }
 
+unsigned int sleep(unsigned int seconds)
+{
+    int saved_errno = errno;
+    struct timespec duration = { (time_t)seconds, 0 };
+    struct timespec remaining = duration;
+    if (nanosleep(&duration, &remaining)) return (unsigned int)remaining.tv_sec;
+    errno = saved_errno;
+    return 0;
+}
+
 time_t time(time_t *result)
 {
     time_t value = (time_t)(sys_time_millis() / 1000u);
@@ -4736,6 +4891,8 @@ double difftime(time_t end, time_t beginning)
     return end >= beginning ? (double)((uint64_t)end - (uint64_t)beginning)
                             : -(double)((uint64_t)beginning - (uint64_t)end);
 }
+
+int getpagesize(void) { return (int)sysconf(_SC_PAGESIZE); }
 
 long sysconf(int name)
 {

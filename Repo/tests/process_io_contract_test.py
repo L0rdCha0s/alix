@@ -100,6 +100,7 @@ static void checked_free(void *ptr) { CHECK(!lock_depth && !scheduler_locked); f
                       "void wait_queue_wake_all_locked(", "void wait_queue_wake_all("):
         code += function_definition(api, signature) + "\n"
     code += function_definition(scheduler, "void thread_remove_from_wait_queue(") + "\n"
+    code += 'static bool wait_queue_wait_timeout(wait_queue_t*q,bool(*predicate)(void*),void*context,uint64_t ticks){(void)q;(void)predicate;(void)context;(void)ticks;CHECK(false);return false;}\n'
     code += "\n".join(line for line in glue.read_text().splitlines() if not line.startswith("#include "))
     code += "\n" + termination + r'''
 static bool model_quiescent;

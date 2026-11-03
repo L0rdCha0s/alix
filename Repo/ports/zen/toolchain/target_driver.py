@@ -1,4 +1,4 @@
-"""Clang driver for genuine native Alix ELF compilation and static linking."""
+"""Clang driver for native Alix executables and ELF shared objects."""
 import json
 import os
 from pathlib import Path
@@ -50,13 +50,27 @@ def native_bindgen_flags():
 def main(cxx=False):
     compiler, flags = compiler_configuration(cxx)
     arguments = sys.argv[1:]
+    shared = "-shared" in arguments
+    pic = shared or any(arg in ("-fPIC", "-fpic") for arg in arguments)
+    if pic:
+        flags = [flag for flag in flags if flag not in ("-fno-pic", "-mcmodel=large", "-ftls-model=local-exec")]
+        flags += ["-fPIC", "-mcmodel=small", "-ftls-model=global-dynamic"]
     no_link = (not arguments or any(arg in ("-c", "-S", "-E", "-fsyntax-only", "-M", "-MM")
                                    for arg in arguments) or
                any(arg.startswith(("-print-", "--print-", "-dump", "--version")) for arg in arguments) or
                arguments == ["-v"])
     if not no_link:
-        if "-shared" in arguments:
-            raise RuntimeError("Alix shared-object loading is not implemented; this gate builds static SpiderMonkey")
+        if shared:
+            startup = ROOT / "build/user/lib/dso_start.o"
+            if not startup.is_file():
+                raise RuntimeError("build the native DSO startup object with make zen-dso-runtime")
+            arguments = [str(startup)] + arguments
+            # The bare-metal GCC specs omit the driver's -shared translation.
+            # Pass ELF shared mode explicitly to the native linker as well.
+            hash_flags = [] if any("hash-style=" in arg for arg in arguments) else ["-Wl,--hash-style=both"]
+            arguments += ["-nostdlib", "-Wl,-shared", "-Wl,-z,noexecstack", "-Wl,-z,max-page-size=0x1000", *hash_flags,
+                          "-Wl,-z,text", "-Wl,-z,relro", "-Wl,-z,now"]
+            os.execv(compiler, [str(compiler)] + flags + arguments)
         manifest = Path(os.environ.get("ALIX_RUNTIME_MANIFEST", str(ROOT / "ports/zen/upstream/alix-toolchain/runtime-objects.json")))
         objects = json.loads(manifest.read_text())
         if not objects or not any(Path(obj).name == "crt0.o" for obj in objects):
@@ -91,7 +105,8 @@ def main(cxx=False):
         # -lm request there, after object inputs, instead of searching a host
         # sysroot or pulling a second early copy of those same definitions.
         arguments = [argument for argument in arguments if argument != "-lm"]
-        arguments += ["-nostdlib", "-static",
+        arguments += ["-nostdlib", "-no-pie", "-Wl,--export-dynamic", "-Wl,--no-dynamic-linker",
+                      "-Wl,-u,__stack_chk_guard",
                       "-Wl,-T," + str(ROOT / "user/lib/link.ld"), "-Wl,-z,max-page-size=0x1000",
                       "-Wl,--start-group", "-x", "none"] + objects + list(map(str, libraries)) + [libgcc, "-Wl,--end-group"]
     os.execv(compiler, [str(compiler)] + flags + arguments)

@@ -5,6 +5,8 @@
 #include "sys/types.h"
 #include "syscall_defs.h"
 
+#define _POSIX_MONOTONIC_CLOCK 200809L
+
 #ifndef KERNEL_BUILD
 #ifdef __cplusplus
 extern "C" {
@@ -16,6 +18,7 @@ ssize_t write(int fd, const void *buffer, size_t count);
 int close(int fd);
 int fsync(int fd);
 int ftruncate(int fd, off_t length);
+int fchown(int fd, uid_t uid, gid_t gid);
 void _exit(int status) __attribute__((__noreturn__));
 int dup(int fd);
 int dup2(int source, int destination);
@@ -43,7 +46,9 @@ uint32_t getgid(void);
 uint32_t getegid(void);
 int gethostname(char *name, size_t capacity);
 pid_t getpid(void);
+unsigned int sleep(unsigned int seconds);
 long sysconf(int name);
+int getpagesize(void);
 int getentropy(void *buffer, size_t length);
 #ifdef __cplusplus
 }

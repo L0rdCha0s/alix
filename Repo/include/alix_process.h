@@ -9,8 +9,8 @@ extern "C" {
  * are provided separately as their native backends are integrated. */
 pid_t alix_spawn_argv(const char *path, char *const argv[]);
 /* Heap-owned snapshot of the current native getenv/setenv map. */
-char **alix_environment_copy(void);
-void alix_environment_free(char **environment);
+__attribute__((visibility("default"))) char **alix_environment_copy(void);
+__attribute__((visibility("default"))) void alix_environment_free(char **environment);
 #ifdef __cplusplus
 }
 #endif

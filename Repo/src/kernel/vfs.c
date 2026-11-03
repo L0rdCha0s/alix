@@ -2,6 +2,7 @@
 #include "vfs.h"
 #include "errno.h"
 #include "vfs_internal.h"
+#include "vfs_mapping.h"
 #include "alixfs.h"
 #include "libc.h"
 #include "heap.h"
@@ -335,6 +336,7 @@ static void vfs_lock_node_data(vfs_node_t *node)
     if (node)
     {
         spinlock_lock(&node->data_lock);
+        vfs_mapping_pull_locked(node);
     }
 }
 
@@ -657,6 +659,7 @@ static vfs_node_t *vfs_alloc_node(vfs_node_type_t type)
         n->allow_mutation = true;
         n->uid = VFS_UID_ROOT;
         n->gid = VFS_GID_ROOT;
+        n->permissions = type == VFS_NODE_FILE ? 0666u : type == VFS_NODE_BLOCK ? 0600u : 0777u;
         n->refcount = 1;
         n->pending_dirty_bytes = 0;
         spinlock_init(&n->data_lock);
@@ -814,6 +817,7 @@ static void vfs_free_subtree(vfs_node_t *node)
     char *name = node->name;
     node->name = NULL;
     char *data = node->data;
+    vfs_mapping_destroy_locked(node);
     node->data = NULL;
     node->size = 0;
     node->capacity = 0;
@@ -1517,8 +1521,12 @@ vfs_node_t *vfs_resolve(vfs_node_t *cwd, const char *path)
  * leaves (including symlinks) return EEXIST. Credentials and path storage are
  * captured by the registered caller request before this protected worker runs.
  */
-int vfs_mkdir_exclusive(vfs_node_t *cwd, const char *path, uint32_t uid, uint32_t gid)
+static int vfs_node_access_locked(const vfs_node_t *node, uint32_t uid, uint32_t gid, uint32_t access);
+
+static int vfs_mkdir_internal(vfs_node_t *cwd, const char *path, uint32_t uid, uint32_t gid,
+                              uint32_t mode, bool owned_access)
 {
+    if (mode & ~0777u) return -EOPNOTSUPP;
     if (!path || !path[0]) return -ENOENT;
     vfs_tree_lock_acquire();
     int lookup_error = -ENOENT;
@@ -1537,13 +1545,22 @@ int vfs_mkdir_exclusive(vfs_node_t *cwd, const char *path, uint32_t uid, uint32_
         else if (!vfs_node_allows_mutation(parent)) error = -EROFS;
         else
         {
-            vfs_node_t *dir = vfs_alloc_node(VFS_NODE_DIR);
-            if (!dir) error = -ENOMEM;
+            int denied = 0;
+            if (owned_access)
+            {
+                vfs_lock_node_data(parent);
+                denied = vfs_node_access_locked(parent, uid, gid, 3u);
+                vfs_unlock_node_data(parent);
+            }
+            vfs_node_t *dir = denied ? NULL : vfs_alloc_node(VFS_NODE_DIR);
+            if (denied) error = denied;
+            else if (!dir) error = -ENOMEM;
             else
             {
                 dir->name = name; name = NULL;
-                vfs_attach_child(parent, dir);
                 dir->uid = uid; dir->gid = gid;
+                dir->permissions = mode;
+                vfs_attach_child(parent, dir);
                 vfs_mark_meta_dirty(parent); vfs_mark_meta_dirty(dir);
                 error = 0;
             }
@@ -1552,6 +1569,16 @@ int vfs_mkdir_exclusive(vfs_node_t *cwd, const char *path, uint32_t uid, uint32_
     free(name);
     vfs_tree_lock_release();
     return error;
+}
+
+int vfs_mkdir_exclusive(vfs_node_t *cwd, const char *path, uint32_t uid, uint32_t gid)
+{
+    return vfs_mkdir_internal(cwd, path, uid, gid, 0777u, false);
+}
+
+int vfs_mkdir_mode_exclusive(vfs_node_t *cwd, const char *path, uint32_t uid, uint32_t gid, uint32_t mode)
+{
+    return vfs_mkdir_internal(cwd, path, uid, gid, mode, true);
 }
 
 /* Kernel callers retain the existing create-or-return directory contract. */
@@ -1611,12 +1638,138 @@ vfs_node_t *vfs_mkdir(vfs_node_t *cwd, const char *path)
  * - If `truncate` is true and the node exists, its contents are cleared.
  * - Returns NULL on failure or if the existing node is not a file.
  */
+/* Caller holds data_lock; read/write/search bits use the native Unix masks.
+ * Existing descriptions retain their granted access after a later chmod. */
+static int vfs_node_access_locked(const vfs_node_t *node, uint32_t uid, uint32_t gid, uint32_t access)
+{
+    if (access & ~7u) return -EINVAL;
+    if (!uid) return 0;
+    uint32_t shift = uid == node->uid ? 6 : gid == node->gid ? 3 : 0;
+    return (((node->permissions >> shift) & access) == access) ? 0 : -EACCES;
+}
+
+typedef struct vfs_shm_entry
+{
+    struct vfs_shm_entry *next;
+    vfs_node_t *node;
+    char name[];
+} vfs_shm_entry_t;
+static vfs_shm_entry_t *g_vfs_shm;
+static size_t g_vfs_shm_count;
+
+static int vfs_shm_name_length(const char *name, size_t *length)
+{
+    if (!name || name[0] != '/' || !name[1]) return -EINVAL;
+    size_t size = strnlen(name, 256);
+    if (size == 256) return -ENAMETOOLONG;
+    if (strchr(name + 1, '/') || !strcmp(name + 1, ".") || !strcmp(name + 1, "..")) return -EINVAL;
+    *length = size;
+    return 0;
+}
+
+int vfs_shm_open_owned(const char *name, bool create, bool truncate, bool exclusive,
+                       uint32_t uid, uint32_t gid, uint32_t mode, uint32_t access,
+                       vfs_node_t **out)
+{
+    if (!out) return -EINVAL;
+    *out = NULL;
+    size_t length = 0;
+    int result = vfs_shm_name_length(name, &length);
+    if (result) return result;
+    if ((access != 4u && access != 6u) || (truncate && !(access & 2u))) return -EINVAL;
+    vfs_tree_lock_acquire();
+    vfs_shm_entry_t *entry = g_vfs_shm;
+    while (entry && strcmp(entry->name, name)) entry = entry->next;
+    bool created = false;
+    if (entry && create && exclusive) result = -EEXIST;
+    else if (!entry)
+    {
+        if (!create) result = -ENOENT;
+        else if (g_vfs_shm_count == 1024) result = -ENOSPC;
+        else
+        {
+            entry = calloc(1, sizeof(*entry) + length + 1);
+            vfs_node_t *node = entry ? vfs_alloc_node(VFS_NODE_FILE) : NULL;
+            if (node) node->name = malloc(length);
+            if (!node || !node->name)
+            {
+                if (node) vfs_node_release(node);
+                free(entry);
+                entry = NULL;
+                result = -ENOMEM;
+            }
+            else
+            {
+                memcpy(node->name, name + 1, length);
+                node->uid = uid;
+                node->gid = gid;
+                node->permissions = mode & 0777u;
+                entry->node = node;
+                memcpy(entry->name, name, length + 1);
+                entry->next = g_vfs_shm;
+                g_vfs_shm = entry;
+                ++g_vfs_shm_count;
+                created = true;
+            }
+        }
+    }
+    if (!result)
+    {
+        vfs_node_t *node = entry->node;
+        vfs_lock_node_data(node);
+        if (!created) result = vfs_node_access_locked(node, uid, gid, access);
+        if (!result)
+        {
+            if (!node->refcount || node->refcount == (uint32_t)-1) result = -EOVERFLOW;
+            else { ++node->refcount; *out = node; }
+        }
+        vfs_unlock_node_data(node);
+    }
+    vfs_tree_lock_release();
+    if (!result && truncate)
+    {
+        result = vfs_resize_data(*out, 0);
+        if (result) { vfs_node_release_owned(*out); *out = NULL; }
+    }
+    return result;
+}
+
+int vfs_shm_unlink_owned(const char *name, uint32_t uid)
+{
+    size_t length = 0;
+    int result = vfs_shm_name_length(name, &length);
+    if (result) return result;
+    vfs_tree_lock_acquire();
+    vfs_shm_entry_t **link = &g_vfs_shm;
+    while (*link && strcmp((*link)->name, name)) link = &(*link)->next;
+    if (!*link) result = -ENOENT;
+    else
+    {
+        vfs_shm_entry_t *entry = *link;
+        vfs_lock_node_data(entry->node);
+        bool allowed = !uid || uid == entry->node->uid;
+        vfs_unlock_node_data(entry->node);
+        if (!allowed) result = -EACCES;
+        else
+        {
+            *link = entry->next;
+            --g_vfs_shm_count;
+            vfs_node_release(entry->node);
+            free(entry);
+        }
+    }
+    vfs_tree_lock_release();
+    return result;
+}
+
 static vfs_node_t *vfs_open_file_internal(vfs_node_t *cwd, const char *path, bool create, bool truncate,
-                                           bool owned_data, bool pin_result, bool exclusive, uint32_t uid, uint32_t gid, int *error)
+                                           bool owned_data, bool pin_result, bool exclusive, uint32_t uid, uint32_t gid,
+                                           uint32_t access, uint32_t create_mode, int *error)
 {
     if (error) *error = -EIO;
     vfs_node_t *parent = NULL;
     char *name = NULL;
+    bool created = false;
 
     bool trace_proc = (path && strncmp(path, "/proc/devices", 13) == 0);
 
@@ -1667,6 +1820,17 @@ static vfs_node_t *vfs_open_file_internal(vfs_node_t *cwd, const char *path, boo
             vfs_tree_lock_release();
             return NULL;
         }
+        if (owned_data)
+        {
+            vfs_lock_node_data(parent);
+            int denied = vfs_node_access_locked(parent, uid, gid, 3);
+            vfs_unlock_node_data(parent);
+            if (denied)
+            {
+                if (error) *error = denied;
+                free(name); vfs_tree_lock_release(); return NULL;
+            }
+        }
         file = vfs_alloc_node(VFS_NODE_FILE);
         if (!file)
         {
@@ -1680,13 +1844,15 @@ static vfs_node_t *vfs_open_file_internal(vfs_node_t *cwd, const char *path, boo
         file->capacity = 0;
         file->data = NULL;
         vfs_inherit_mutability(parent, file);
-        vfs_attach_child(parent, file);
         if (owned_data)
         {
             /* Caller credentials are explicit; never inherit service root. */
             file->uid = uid;
             file->gid = gid;
+            file->permissions = create_mode;
         }
+        vfs_attach_child(parent, file);
+        created = true;
         vfs_mark_meta_dirty(parent);
         vfs_mark_meta_dirty(file);
     }
@@ -1718,8 +1884,12 @@ static vfs_node_t *vfs_open_file_internal(vfs_node_t *cwd, const char *path, boo
         vfs_lock_node_data(file);
         int result = 0;
         if (owned_data && (file->read_cb || file->write_cb)) result = -ENOTSUP;
-        else if (!file->refcount || file->refcount == (uint32_t)-1) result = -EOVERFLOW;
-        else ++file->refcount;
+        else if (owned_data && !created) result = vfs_node_access_locked(file, uid, gid, access);
+        if (!result)
+        {
+            if (!file->refcount || file->refcount == (uint32_t)-1) result = -EOVERFLOW;
+            else ++file->refcount;
+        }
         vfs_unlock_node_data(file);
         if (result)
         {
@@ -1746,6 +1916,17 @@ static vfs_node_t *vfs_open_file_internal(vfs_node_t *cwd, const char *path, boo
             vfs_node_release(file);
             vfs_tree_lock_release();
             return NULL;
+        }
+        if (file->size && vfs_mapping_busy_locked(file)) {
+            if (error) *error = -EBUSY;
+            vfs_unlock_node_data(file);
+            if (pin_result) vfs_node_release(file);
+            vfs_tree_lock_release();
+            return NULL;
+        }
+        if (file->size) {
+            memset(file->data, 0, file->size);
+            vfs_mapping_push_locked(file, 0, file->size);
         }
         file->size = 0;
         bool ok_trunc = ensure_capacity_locked(file, 0);
@@ -1779,7 +1960,7 @@ static vfs_node_t *vfs_open_file_internal(vfs_node_t *cwd, const char *path, boo
 
 vfs_node_t *vfs_open_file(vfs_node_t *cwd, const char *path, bool create, bool truncate)
 {
-    return vfs_open_file_internal(cwd, path, create, truncate, false, false, false, 0, 0, NULL);
+    return vfs_open_file_internal(cwd, path, create, truncate, false, false, false, 0, 0, 0, 0666u, NULL);
 }
 
 int vfs_open_data_owned(vfs_node_t *cwd, const char *path, bool create, bool truncate,
@@ -1790,7 +1971,7 @@ int vfs_open_data_owned(vfs_node_t *cwd, const char *path, bool create, bool tru
     if (!cwd || !path || !path[0]) return -EINVAL;
     if (!vfs_is_dir(cwd)) return -ENOTDIR;
     int error = -EIO;
-    *out = vfs_open_file_internal(cwd, path, create, truncate, true, true, false, uid, gid, &error);
+    *out = vfs_open_file_internal(cwd, path, create, truncate, true, true, false, uid, gid, 4u | (truncate ? 2u : 0), 0666u, &error);
     return *out ? 0 : error;
 }
 
@@ -1799,7 +1980,28 @@ int vfs_open_data_flags_owned(vfs_node_t *cwd, const char *path, bool create, bo
 {
     if (!out || !cwd || !path || !*path) return -EINVAL;
     int error;
-    *out = vfs_open_file_internal(cwd, path, create, truncate, true, true, exclusive, uid, gid, &error);
+    *out = vfs_open_file_internal(cwd, path, create, truncate, true, true, exclusive, uid, gid, 4u | (truncate ? 2u : 0), 0666u, &error);
+    return *out ? 0 : error;
+}
+
+int vfs_open_data_access_owned(vfs_node_t *cwd, const char *path, bool create, bool truncate,
+                               bool exclusive, uint32_t uid, uint32_t gid, uint32_t access, vfs_node_t **out)
+{
+    if (!out || !cwd || !path || !*path || (access & ~6u) || !access) return -EINVAL;
+    int error;
+    *out = vfs_open_file_internal(cwd, path, create, truncate, true, true, exclusive, uid, gid, access, 0666u, &error);
+    return *out ? 0 : error;
+}
+
+int vfs_open_data_mode_owned(vfs_node_t *cwd, const char *path, bool create, bool truncate,
+                             bool exclusive, uint32_t uid, uint32_t gid, uint32_t access,
+                             uint32_t mode, vfs_node_t **out)
+{
+    if (!out || !cwd || !path || !*path || (access & ~6u) || !access) return -EINVAL;
+    if (mode & ~0777u) return -EOPNOTSUPP;
+    int error;
+    *out = vfs_open_file_internal(cwd, path, create, truncate, true, true, exclusive,
+                                  uid, gid, access, mode, &error);
     return *out ? 0 : error;
 }
 
@@ -1808,7 +2010,7 @@ int vfs_open_legacy_handle(vfs_node_t *cwd, const char *path, bool create, bool 
 {
     if (!out || !path || !*path) return -EINVAL;
     int error;
-    *out = vfs_open_file_internal(cwd, path, create, truncate, false, true, exclusive, 0, 0, &error);
+    *out = vfs_open_file_internal(cwd, path, create, truncate, false, true, exclusive, 0, 0, 0, 0666u, &error);
     return *out ? 0 : error;
 }
 
@@ -1978,11 +2180,21 @@ const char *vfs_symlink_target(const vfs_node_t *node)
  * This updates dirty tracking so mounts will write the change back if the node
  * is backed by a block device.
  */
+bool vfs_mapping_write_allowed(const vfs_node_t *node)
+{ return vfs_node_allows_mutation(node); }
+
 bool vfs_truncate(vfs_node_t *file)
 {
     if (!file || file->type != VFS_NODE_FILE) return false;
     if (!vfs_node_allows_mutation(file)) return false;
     vfs_lock_node_data(file);
+    if (file->size && vfs_mapping_busy_locked(file)) {
+        vfs_unlock_node_data(file); return false;
+    }
+    if (file->size) {
+        memset(file->data, 0, file->size);
+        vfs_mapping_push_locked(file, 0, file->size);
+    }
     file->size = 0;
     bool ok = ensure_capacity_locked(file, 0);
     if (ok)
@@ -2015,12 +2227,20 @@ int vfs_resize_data(vfs_node_t *file, uint64_t length)
         return -EROFS;
     }
     size_t previous = file->size;
+    if (length < previous && vfs_mapping_busy_locked(file)) {
+        vfs_unlock_node_data(file); return -EBUSY;
+    }
     if (!ensure_capacity_locked(file, (size_t)length))
     {
         vfs_unlock_node_data(file);
         return -ENOMEM;
     }
     if (length > previous) memset(file->data + previous, 0, (size_t)length - previous);
+    if (length < previous) {
+        memset(file->data + (size_t)length, 0, previous - (size_t)length);
+        vfs_mapping_push_locked(file, (size_t)length, previous - (size_t)length);
+    }
+    if (length > previous) vfs_mapping_push_locked(file, previous, (size_t)length - previous);
     file->size = (size_t)length;
     ensure_terminator_locked(file);
     vfs_unlock_node_data(file);
@@ -2060,6 +2280,7 @@ bool vfs_append(vfs_node_t *file, const char *data, size_t len)
     }
 
     memmove(file->data + file->size, data, len);
+    vfs_mapping_push_locked(file, file->size, len);
     size_t start = file->size;
     file->size += len;
     ensure_terminator_locked(file);
@@ -2204,6 +2425,8 @@ static ssize_t vfs_write_at_internal(vfs_node_t *file, size_t offset, const void
         memset(file->data + file->size, 0, gap);
     }
     memcpy(file->data + offset, data, count);
+    vfs_mapping_push_locked(file, previous_size < offset ? previous_size : offset,
+                            end - (previous_size < offset ? previous_size : offset));
     vfs_log("write src=", (uint64_t)(uintptr_t)data);
     if (end > file->size)
     {
@@ -2697,6 +2920,76 @@ void vfs_node_set_owner(vfs_node_t *node, uint32_t uid, uint32_t gid)
     }
 }
 
+int vfs_chown_owned(vfs_node_t *node, uint32_t caller_uid, uint32_t caller_gid,
+                     uint32_t uid, uint32_t gid)
+{
+    if (!node) return -EINVAL;
+    vfs_tree_lock_acquire();
+    vfs_lock_node_data(node);
+    int result = !vfs_node_allows_mutation(node) ? -EROFS :
+        node->mount && !alixfs_mount_supports_ownership(node->mount->backend) ? -ENOTSUP :
+        node->read_cb || node->write_cb ? -ENOTSUP : 0;
+    if (!result && caller_uid != VFS_UID_ROOT &&
+        (node->uid != caller_uid || (uid != UINT32_MAX && uid != node->uid) ||
+         (gid != UINT32_MAX && gid != node->gid && gid != caller_gid))) result = -EPERM;
+    if (!result)
+    {
+        if (uid != UINT32_MAX) node->uid = uid;
+        if (gid != UINT32_MAX) node->gid = gid;
+        node->ctime = vfs_now_seconds();
+        node->dirty = true; node->disk_meta_dirty = true; ++node->dirty_seq;
+    }
+    vfs_unlock_node_data(node);
+    if (!result) vfs_mark_mount_dirty(node->mount);
+    vfs_tree_lock_release();
+    return result;
+}
+
+int vfs_chmod_owned(vfs_node_t *node, uint32_t caller_uid, uint32_t mode)
+{
+    if (!node || (mode & ~0177777u)) return -EINVAL;
+    /* Set-ID and sticky policies require additional execution/unlink support. */
+    if (mode & 07000u) return -EOPNOTSUPP;
+    vfs_tree_lock_acquire();
+    vfs_lock_node_data(node);
+    int result = !vfs_node_allows_mutation(node) ? -EROFS :
+        node->read_cb || node->write_cb ? -ENOTSUP :
+        caller_uid && node->uid != caller_uid ? -EPERM : 0;
+    if (!result)
+    {
+        node->permissions = mode & 0777u;
+        node->ctime = vfs_now_seconds();
+        node->dirty = true; node->disk_meta_dirty = true; ++node->dirty_seq;
+    }
+    vfs_unlock_node_data(node);
+    if (!result) vfs_mark_mount_dirty(node->mount);
+    vfs_tree_lock_release();
+    return result;
+}
+
+int vfs_set_times_owned(vfs_node_t *node, uint32_t uid, uint32_t gid, bool explicit_times,
+                         uint64_t access_seconds, uint64_t modify_seconds)
+{
+    if (!node) return -EINVAL;
+    vfs_tree_lock_acquire(); vfs_lock_node_data(node);
+    int result = !vfs_node_allows_mutation(node) ? -EROFS :
+        node->read_cb || node->write_cb || (node->mount && !node->mount->supports_times) ? -ENOTSUP : 0;
+    if (!result && uid && uid != node->uid)
+        result = explicit_times ? -EPERM : vfs_node_access_locked(node, uid, gid, 2);
+    if (!result)
+    {
+        uint64_t now = vfs_now_seconds();
+        node->atime = explicit_times ? access_seconds : now;
+        node->mtime = explicit_times ? modify_seconds : now;
+        node->ctime = now;
+        node->dirty = true; node->disk_meta_dirty = true; ++node->dirty_seq;
+    }
+    vfs_unlock_node_data(node);
+    if (!result) vfs_mark_mount_dirty(node->mount);
+    vfs_tree_lock_release();
+    return result;
+}
+
 /*
  * Enumerate directory children under the VFS tree lock.
  *
@@ -2862,7 +3155,7 @@ static bool vfs_mount_writeback(vfs_mount_t *mount, bool force)
     const char *dev_name = (mount->device && mount->device->name[0]) ? mount->device->name : "(anon)";
 
     spinlock_lock(&mount->dirty_lock);
-    if (mount->dirty || mount->needs_full_sync || force)
+    if (mount->dirty || mount->needs_full_sync || mount->mapped_files || force)
     {
         do_flush = true;
         force_all = mount->needs_full_sync;
@@ -3065,7 +3358,7 @@ bool vfs_sync_dirty(void)
         bool dirty = false;
         bool need_full = false;
         spinlock_lock(&mount->dirty_lock);
-        dirty = mount->dirty;
+        dirty = mount->dirty || mount->mapped_files;
         need_full = mount->needs_full_sync;
         spinlock_unlock(&mount->dirty_lock);
 
@@ -3389,6 +3682,57 @@ static uint64_t vfs_directory_object_id_locked(vfs_node_t *node)
     if (!g_vfs_next_object_id || g_vfs_next_object_id == UINT64_MAX) return 0;
     node->object_id = g_vfs_next_object_id++;
     return node->object_id;
+}
+
+static int vfs_stat_info_locked(vfs_node_t *node, vfs_stat_info_t *output)
+{
+    uint64_t inode = vfs_directory_object_id_locked(node);
+    uint64_t device = node->mount ? vfs_directory_object_id_locked(node->mount->mount_point) : 0;
+    if (!inode || (node->mount && !device)) return -EOVERFLOW;
+    uint64_t links = node == root || node->parent ? 1 : 0;
+    if (links && node->type == VFS_NODE_DIR)
+    {
+        ++links; /* '.' and the parent entry (root's '..' names itself). */
+        for (vfs_node_t *child = node->first_child; child; child = child->next_sibling)
+            if (child->type == VFS_NODE_DIR) ++links;
+    }
+    vfs_lock_node_data(node);
+    *output = (vfs_stat_info_t){
+        .metadata = { .size_bytes = node->size, .type = node->type,
+                      .atime = node->atime, .mtime = node->mtime, .ctime = node->ctime },
+        .device = device + 1, .inode = inode, .links = links,
+        .uid = node->uid, .gid = node->gid, .permissions = node->permissions,
+    };
+    vfs_unlock_node_data(node);
+    return 0;
+}
+
+int vfs_node_stat_info(vfs_node_t *node, vfs_stat_info_t *output)
+{
+    if (!node || !output) return -EINVAL;
+    vfs_tree_lock_acquire();
+    int result = vfs_stat_info_locked(node, output);
+    vfs_tree_lock_release();
+    return result;
+}
+
+int vfs_path_stat_info(vfs_node_t *cwd, const char *path, bool follow_final,
+                        uint32_t uid, uint32_t gid, vfs_stat_info_t *output)
+{
+    /* Lookup mode enforcement is a separate VFS policy; never substitute the
+     * protected worker's identity for the captured caller credentials. */
+    (void)uid; (void)gid;
+    if (!cwd || !path || !output) return -EINVAL;
+    size_t length = strnlen(path, VFS_PATH_MAX);
+    if (!length) return -ENOENT;
+    if (length == VFS_PATH_MAX) return -ENAMETOOLONG;
+    vfs_tree_lock_acquire();
+    int result = 0;
+    vfs_node_t *node = vfs_readlink_resolve_locked(cwd, path, follow_final, &result);
+    if (node) result = vfs_stat_info_locked(node, output);
+    else if (!result) result = -ENOENT;
+    vfs_tree_lock_release();
+    return result;
 }
 
 static int vfs_directory_name_length(const char *name, size_t *length)

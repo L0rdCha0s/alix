@@ -42,10 +42,14 @@ USER_FREEBSD_OBJECTS := $(patsubst user/%.c,$(USER_OBJDIR)/%.o,$(USER_FREEBSD_SO
 USER_C11_NAMES := fenv threads stdlib_extra uchar scanf wcstofloat stdio_files math_errno atomic
 USER_C11_OBJECTS := $(addprefix $(USER_OBJDIR)/lib/,$(addsuffix .o,$(USER_C11_NAMES)))
 USER_COMPILER_COMPLEX := $(USER_OBJDIR)/lib/compiler_complex.o
-USER_COMMON_OBJECTS += $(USER_MUSL_OBJECTS) $(USER_SCAN_OBJECTS) $(USER_FREEBSD_OBJECTS) $(USER_C11_OBJECTS) $(USER_COMPILER_COMPLEX)
+USER_PRNG_OBJECT := $(USER_OBJDIR)/lib/vendor/musl/prng/random.o
+USER_COMMON_OBJECTS += $(USER_MUSL_OBJECTS) $(USER_SCAN_OBJECTS) $(USER_FREEBSD_OBJECTS) $(USER_C11_OBJECTS) $(USER_COMPILER_COMPLEX) $(USER_PRNG_OBJECT)
 USER_NUMERIC_FLAGS := -fno-strict-aliasing -O2 -frounding-math -ffp-contract=off -Wno-unused-but-set-variable -Wno-parentheses -Wno-unknown-pragmas
 
 $(USER_MUSL_OBJECTS) $(USER_SCAN_OBJECTS) $(USER_FREEBSD_OBJECTS): user/lib/libc_runtime.mk
+$(USER_PRNG_OBJECT): user/lib/vendor/musl/prng/random.c include/alix_mutex.h
+	@mkdir -p $(dir $@)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
 $(USER_OBJDIR)/lib/vendor/musl/%.o: user/lib/vendor/musl/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(USER_CFLAGS) $(USER_NUMERIC_FLAGS) -I$(USER_MUSL_DIR)/internal -include $(USER_MUSL_DIR)/internal/alix_musl.h -c -o $@ $<

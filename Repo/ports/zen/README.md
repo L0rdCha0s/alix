@@ -237,8 +237,8 @@ eight-CPU guest test (`make zen-socket-qemu-test`), including 128 KiB transfer,
 atomic flags, peek, per-call nonblocking and safe-copy checks. Native endpoint
 and supported option queries also pass, including packet-matched addresses and
 single-consumer SO_ERROR transactions after failed copyout. The actual vendored
-Rust libc passes native socket ABI checks. Additional options, local IPC and UDP
-still need implementation.
+Rust libc passes native socket ABI checks. Additional options and local IPC
+still need implementation. IPv4 UDP now has separate native acceptance below.
 IPv4 DNS/netdb now passes a separate eight-CPU guest test with a controlled UDP
 resolver: multiple records, CNAME follow-up, negative/malformed replies,
 thread-local/reentrant results, resolved TCP transfers and killed-caller
@@ -247,7 +247,7 @@ header also pass targeted checks. Default external DNS, full NSPR/NSS and the
 complete browser remain unverified; see
 [`docs/kernel/resolver.md`](../../docs/kernel/resolver.md).
 The seventh complete diagnostic pass clears the missing netdb/select headers
-and reaches Rust style compilation. It still fails after 21:14 on remaining
+and reaches Rust style compilation. That run failed after 21:14 on remaining
 native platform interfaces. Native `fsync`,
 physical-page `sysconf` queries and checked `MADV_WILLNEED` now pass eight-CPU
 execution. The fsync fixture remounts a private disk in a second boot and reads
@@ -267,12 +267,14 @@ tests. The complete existing libc++/libc++abi guest regression remains green,
 and the actual llama-sampler.cpp source compiles. Native Rust pthread ownership
 and handle extensions now pass eight-CPU identity/name/stack, consuming join,
 detach and TLS checks. Gecko's actual Rust root build emits a fresh native style
-library after selecting that API. Other root crate/platform errors still stop
-the full Rust edge; the browser remains unbuilt.
+library after selecting that API. Later platform fixes allow the thirteenth
+build to finish the entire configured Rust root and produce native
+`libgkrust.a`; see `build/ports/zen/gkrust-native-build.json`. The complete
+browser remains unlinked and unrun.
 Native ftruncate, realpath and directory-only rmdir now pass eight-CPU and
 Rust libc ABI tests. The resized-file zero-fill survives an independent AlixFS
-remount. NSPR's actual uxshm.c compiles, but file/shared mappings and the full
-Rust filesystem backend remain unfinished.
+remount. NSPR's actual uxshm.c compiles; regular-file shared mappings now have
+native acceptance. The full Rust filesystem backend remains unfinished.
 Bindgen now receives the same native ABI/header configuration as the compiler
 through its target-specific environment override; the actual profiler build
 script generates bindings successfully. Native `sched_yield`/`sched_getcpu`
@@ -322,8 +324,130 @@ Native math, C/C++ streams, signal-aware jumps, process uptime/accounting,
 protected readlink, directory streams, private descriptor inheritance, pipes,
 terminal classification, pthreads/TLS and anonymous VM have separate fixture
 acceptance. Existing base applications retain the legacy descriptor ABI. General
-file-backed/shared VM, callback VFS nodes, shell redirection, dynamic loading,
+mapping invalidation on truncate, shared anonymous VM, callback VFS nodes, shell redirection, startup shared-library dependencies,
 POSIX network integration and Gecko's widget/compositor remain later gates.
+
+Native runtime dlopen now executes real ELF shared objects with dependencies,
+imports, dynamic TLS and constructor/destructor lifetime tests in Alix. The
+supported ABI and its remaining limits are documented in
+[`dynamic loading`](../../docs/kernel/dynamic_loading.md). Full NSPR library
+initialization and selected public API paths now pass in Alix; browser startup
+remains unverified. See [`NSPR runtime`](../../docs/kernel/nspr_runtime.md).
+
+Native synchronous signal waiting now passes an eight-CPU Alix fixture and the
+actual Gecko Rust libc bindings. The current NSPR source audit passes all 64 C
+sources. Shared regular-file mappings and `msync` also pass aliases, cross-process
+ownership and independent disk remount checks; current EOF/truncate restrictions
+are documented in [`file mappings`](../../docs/kernel/file_mappings.md). See
+[`signals`](../../docs/kernel/signals.md) and `make zen-sigwait-qemu-test`.
+
+Native Rust dynamic loading now executes the real Gecko-vendored `libloading`
+and `ash` packages. Its eight-CPU fixture checks ELF code, imports, 512 TLS
+updates, NULL/error handling and unload. Reproduce with
+`make zen-rust-dynamic-loading-qemu-test`; Vulkan availability is not established.
+
+Native Rust standard-library TCP and WebRender glyph rasterization also pass
+eight-CPU guest execution. Reproduce with `make zen-rust-std-net-qemu-test` and
+`make zen-rust-glyph-rasterizer-qemu-test`. Managed patch `0034` selects the
+existing FreeType backend explicitly for Alix, preserves byte-valued font
+paths and links bundled variation functions directly. Gecko's native
+configuration now includes its bundled FreeType and Cairo's FreeType support.
+The rasterizer test covers 512 concurrent glyphs, mono/alpha/subpixel output,
+variable weights and matching raw/file pixels. See
+[glyph rasterization](../../docs/kernel/glyph_rasterization.md) for scope and
+evidence; font discovery/shaping/compositor and complete browser startup remain
+separate gates.
+
+`make zen-rust-mtu-qemu-test` and `make zen-rust-socket2-qemu-test` run the actual
+MTU/Socket2 packages in native eight-CPU guests. Patch `0036` uses the native
+route snapshot syscall; `0037` selects Alix's real address/poll/message ABI,
+atomic creation flags and FD traits. Connected TCP message I/O gathers/scatters
+through registered heap requests, with negative capability and safe-copy
+checks. Generic Rustix support remains incomplete; patch `0035` scopes Gecko's
+direct Rustix dependency to its existing Apple-only QUIC probe. No Alix browser
+feature is removed by that dependency condition. Full Gecko and Zen build/runtime
+acceptance remain separate.
+
+`make zen-rlbox-runtime-qemu-test` exercises the actual RLBox memory/minWASI
+objects and WABT trap implementation on eight Alix CPUs. Patches `0038`/`0039`
+select native mmap/mprotect and the correct native signal-aware jump record.
+The guest checks 8 GiB alignment, four clocks, thread/process CPU accounting,
+eight independent bounds traps and a separate hardware guard fault. These are
+component results; complete application integration remains unfinished.
+
+`make zen-file-identity-qemu-test` adds native eight-CPU stable file identities,
+old/new stat ABI canaries and independent on-disk owner/group readback. The
+actual Rust libc fixture also uses the new 88-byte stat and fchown API. Existing
+40-byte ELF entry points remain available to installed binaries/current std.
+SQLite's metadata/fchown/fchmod compile errors are cleared. Basic file modes
+persist on existing AlixFS formats and new owned opens check the final file's
+permission bits. Creation-mode/umask and full ancestor-search policy remain
+work. Native process-owned fcntl ranges and utimes now also pass in Alix. The
+configured SQLite 3.53.4 shared library passes eight-CPU WAL/rollback, snapshot
+isolation, separate-process busy/commit, concurrent writers and independent
+readback of 198 rows (`make zen-sqlite-runtime-qemu-test`). Its build features
+are unchanged; the test loads the real module and its FTS5/vector extensions.
+ELF version definitions/requirements, default/legacy aliases and versioned TLS
+now have native loader/validator acceptance. The original rejected artifact is
+retained only as historical evidence under `build/ports/zen/sqlite-versioning`.
+Patch `0041` also clears Neqo UDP's platform selector; its actual wrapper passes
+128 host exchanges on eight CPUs with independently checked packet metadata.
+The next full build compiled that library and exposed the same platform gate
+in Gecko's `neqo_glue`. Patch `0042` selects Alix's native borrowed FD handle.
+The guest fixture now passes those exchanges with borrowed sockets and verifies
+that wrapper destruction leaves the original socket open. Complete HTTP/3 and
+browser startup remain unverified.
+
+The twelfth full build produced the Neqo glue library before reaching two
+Unix-only path-trait imports in `gfx/webrender_bindings`. Patch `0043` selects
+Alix's existing byte-preserving path traits without changing the font descriptor
+or Moz2D conversion logic. The complete Gecko build is being rerun.
+
+The thirteenth build now compiles WebRender's Gecko bindings and the complete
+Rust root. Its 1.2 GB `libgkrust.a` contains eleven native x86-64 ELF members.
+The C++ build then exposes the missing `sleep` API; it is now implemented in
+shared libc and passes timed waits, signal interruption, SA_RESTART and large
+duration checks on eight CPUs. Reproduce with `make zen-sleep-qemu-test`.
+
+The fourteenth run completes Rust again and exposes Cairo's PDF configuration:
+the source list includes PDF code, but the native toolkit was omitted from the
+feature selector. The platform patch now enables `MOZ_PDF_PRINTING` for Alix.
+The regenerated configuration and complete Cairo directory compile, including
+native PDF/font-subset objects. Evidence is
+`build/ports/zen/cairo-pdf-native-build.json`; PDF output and browser printing
+still need runtime verification.
+
+The fifteenth run exposes additional graphics and IPC selectors. Patch `0044`
+selects Skia's POSIX backend and the native FreeType path, including header,
+preference and compiler configuration, plus generic compositor resize messages.
+Skia, Moz2D, WebRender's C++ bridge and headless widget directories compile.
+Alix also now supplies `MAP_NORESERVE` and volatile named memory objects through
+shared libc/kernel paths. `make zen-shared-memory-qemu-test` verifies eight-CPU
+sharing, subprocess access, unlink lifetime, killed creators and an independent
+reboot. The complete browser still has process, event-loop and other platform
+compile gates. See [`docs/kernel/shared_memory.md`](../../docs/kernel/shared_memory.md).
+
+Patches `0045` through `0047` connect the generic Gecko process launcher to
+native `posix_spawn`, select Alix's libevent poll/select configuration and use
+the native system-font fallback. Chromium, the Gecko launcher unit, libevent
+and the affected layout unit compile. `waitid`/`WNOWAIT`, child-only default
+CLOEXEC filtering and the musl `random` family now live in the shared runtime.
+Eight-CPU guests verify process status/launch and the actual configured Gecko
+libevent object, including both backends, timers, pipe wakeups, entropy and
+interface-name lookup. These component results precede the next full build;
+there is still no linked or running Zen browser.
+
+`make zen-udp-core-qemu-test` verifies the native kernel UDP transport with eight
+pinned services and 256 real host exchanges, independently checked packet
+metadata/checksums and DNS/NTP port ownership. The transport lives in the shared
+kernel network paths and both NIC dispatchers. The fixture restores the normal
+kernel. `make zen-rust-quinn-udp-qemu-test` separately runs the actual Quinn UDP
+crate, std UdpSocket and public C socket API in an eight-CPU guest: 256 host
+exchanges, wire-matched ECN/endpoints, explicit source selection, bounded atomic
+datagrams, aliases, nonblocking and killed-caller port release. Patch `0040`
+selects the native executor/API bridge. IPv6, multicast, offload and POSIX
+addressed/ancillary messages remain unsupported; see
+[UDP transport](../../docs/kernel/udp_transport.md).
 
 Nine offline tests exercise patch application, repeatability, new-file reversal,
 preservation of unrelated edits and rejection of unknown/partial/wrong-base
