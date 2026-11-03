@@ -1,5 +1,6 @@
 #include "build_features.h"
 #include "keyboard.h"
+#include "input_activity.h"
 #include "io.h"
 #include "interrupts.h"
 #include "serial.h"
@@ -669,6 +670,7 @@ static void buffer_push(uint8_t code)
     scancode_buffer[buffer_head] = code;
     buffer_head = next_head;
     spinlock_unlock_irqrestore(&g_kbd_buffer_lock, flags);
+    input_activity_record();
 
     //serial_write_string("keyboard.c: buffer_push scancode=0x");
     //static const char hex[] = "0123456789ABCDEF";

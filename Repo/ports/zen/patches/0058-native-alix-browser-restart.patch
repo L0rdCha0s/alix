@@ -1,0 +1,11 @@
+--- a/toolkit/xre/nsAppRunner.cpp
++++ b/toolkit/xre/nsAppRunner.cpp
+@@ -2714,7 +2714,7 @@
+   rv = lf->GetNativePath(exePath);
+   if (NS_FAILED(rv)) return rv;
+ 
+-#      if defined(XP_UNIX)
++#      if defined(XP_UNIX) && !defined(__ALIX__)
+   if (aTryExec) {
+     execv(exePath.get(), gRestartArgv);
+ 

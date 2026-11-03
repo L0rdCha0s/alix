@@ -1,0 +1,20 @@
+--- a/xpcom/io/nsLocalFileUnix.cpp
++++ b/xpcom/io/nsLocalFileUnix.cpp
+@@ -75,7 +75,7 @@
+ /**
+  *  we need these for statfs()
+  */
+-#ifdef HAVE_SYS_STATVFS_H
++#if defined(HAVE_SYS_STATVFS_H) || defined(__ALIX__)
+ #  if defined(__osf__) && defined(__DECCXX)
+ extern "C" int statvfs(const char*, struct statvfs*);
+ #  endif
+@@ -93,7 +93,7 @@
+ #if defined(HAVE_STATVFS64) && (!defined(LINUX) && !defined(__osf__))
+ #  define STATFS statvfs64
+ #  define F_BSIZE f_frsize
+-#elif defined(HAVE_STATVFS) && (!defined(LINUX) && !defined(__osf__))
++#elif (defined(HAVE_STATVFS) || defined(__ALIX__)) && (!defined(LINUX) && !defined(__osf__))
+ #  define STATFS statvfs
+ #  define F_BSIZE f_frsize
+ #elif defined(HAVE_STATFS64)

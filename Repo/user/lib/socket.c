@@ -143,15 +143,15 @@ int accept(int descriptor,struct sockaddr *address,socklen_t *length)
 int shutdown(int descriptor,int direction)
 {
     if(direction!=SHUT_RD && direction!=SHUT_WR && direction!=SHUT_RDWR){errno=EINVAL;return -1;}
-    return socket_operation_unavailable(descriptor);
+    return (int)socket_call(SYSCALL_FILE_NET_SHUTDOWN, (uint64_t)(int64_t)descriptor, (uint32_t)direction, 0, 0);
 }
 int socketpair(int domain,int type,int protocol,int descriptors[2])
 {
-    (void)descriptors;
     if(domain!=AF_UNIX){errno=EAFNOSUPPORT;return -1;}
     if(protocol){errno=EPROTONOSUPPORT;return -1;}
     if((type & ~(SOCK_CLOEXEC|SOCK_NONBLOCK))!=SOCK_STREAM){errno=EPROTONOSUPPORT;return -1;}
-    errno=EOPNOTSUPP;return -1;
+    return (int)socket_call(SYSCALL_FILE_NET_PAIR, (uint64_t)(int64_t)domain,
+                           (uint64_t)(int64_t)type, (uint64_t)(int64_t)protocol, (uintptr_t)descriptors);
 }
 ssize_t sendto(int descriptor,const void *data,size_t length,int flags,
                const struct sockaddr *address,socklen_t address_length)

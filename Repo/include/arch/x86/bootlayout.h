@@ -17,6 +17,6 @@
 #define PD3_PHYS          (PAGE_TABLE_BASE + 0x5000ULL)
 
 #define KERNEL_HEAP_BASE  0x0000000020000000ULL
-#define KERNEL_HEAP_SIZE  0x0000000020000000ULL /* 512 MiB */
+#define KERNEL_HEAP_SIZE  0x0000000040000000ULL /* 1 GiB ceiling; E820 selection caps this at one quarter of usable RAM. */
 
 #endif /* ARCH_X86_BOOTLAYOUT_H */

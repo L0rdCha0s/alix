@@ -11,11 +11,11 @@ typedef syscall_audio_status_t alix_audio_status_t;
 /* Process-owned output channel, 48 kHz stereo S16LE. This handle belongs to the
  * private descriptor namespace; these wrappers work in both runtime profiles.
  * Queued PCM owns its metadata through DMA completion, including after close. */
-int alix_audio_open(uint32_t flags);
-ssize_t alix_audio_write(int handle, const void *pcm, size_t bytes);
-int alix_audio_get_status(int handle, alix_audio_status_t *output);
-int alix_audio_drain(int handle);
-int alix_audio_close(int handle);
+__attribute__((visibility("default"))) int alix_audio_open(uint32_t flags);
+__attribute__((visibility("default"))) ssize_t alix_audio_write(int handle, const void *pcm, size_t bytes);
+__attribute__((visibility("default"))) int alix_audio_get_status(int handle, alix_audio_status_t *output);
+__attribute__((visibility("default"))) int alix_audio_drain(int handle);
+__attribute__((visibility("default"))) int alix_audio_close(int handle);
 #ifdef __cplusplus
 }
 #endif

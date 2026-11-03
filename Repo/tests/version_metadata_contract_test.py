@@ -90,7 +90,7 @@ static bool inspect_versions(const char *path,unsigned failure){
     if(m){m->path=owned_strdup(path);if(m->path)ok=dl_map_file(m);}
     if(failure)CHECK(injected&&!ok);
     if(m){if(m->reservation)CHECK(!model_munmap((void*)m->reservation,m->reservation_bytes));
-        owned_free(m->segments);owned_free(m->versions);owned_free(m->path);owned_free(m);}
+        owned_free((void*)m->program_headers);owned_free(m->segments);owned_free(m->versions);owned_free(m->path);owned_free(m);}
     CHECK(!allocations&&!live_files&&!live_maps);return ok;
 }
 int main(void){

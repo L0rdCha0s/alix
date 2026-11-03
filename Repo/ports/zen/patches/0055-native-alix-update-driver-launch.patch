@@ -1,0 +1,44 @@
+--- a/toolkit/xre/nsUpdateDriver.cpp
++++ b/toolkit/xre/nsUpdateDriver.cpp
+@@ -5,6 +5,11 @@
+ #include <stdlib.h>
+ #include <iterator>
+ #include "nsUpdateDriver.h"
++#ifdef __ALIX__
++#  include <errno.h>
++#  include <spawn.h>
++#  include <alix_process.h>
++#endif
+
+ #include "nsDebug.h"
+ #include "nsXULAppAPI.h"
+@@ -562,7 +567,7 @@
+   // the updater.
+   nsAutoCString pid;
+   if (restart) {
+-#if defined(XP_UNIX) & !defined(XP_MACOSX)
++#if defined(XP_UNIX) && !defined(XP_MACOSX) && !defined(__ALIX__)
+     // When execv is used for an update that requires a restart 0 is passed
+     // which is ignored by the updater.
+     pid.AssignLiteral("0");
+@@ -622,7 +627,19 @@
+
+   LOG(("spawning updater process [%s]\n", updaterPath.get()));
+
+-#if defined(XP_UNIX) && !defined(XP_MACOSX)
++#if defined(__ALIX__)
++  char** environment = alix_environment_copy();
++  int error = environment
++      ? posix_spawn(outpid, updaterPath.get(), nullptr, nullptr, argv, environment)
++      : ENOMEM;
++  alix_environment_free(environment);
++  if (error) {
++    *outpid = -1;
++    free(argv);
++    LOG(("Failed to spawn updater: %d", error));
++    return;
++  }
++#elif defined(XP_UNIX) && !defined(XP_MACOSX)
+   // We use execv to spawn the updater process on all UNIX systems except Mac
+   // OSX since it is known to cause problems on the Mac.  Windows has execv, but
+   // it is a faked implementation that doesn't really replace the current

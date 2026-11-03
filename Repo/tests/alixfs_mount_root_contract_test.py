@@ -18,6 +18,7 @@ def main():
 #define CHECK(c) do { if(!(c)) { fprintf(stderr,"AlixFS check line %u: %s\n",__LINE__,#c); abort(); } } while(0)
 #define VFS_UID_ROOT 0u
 #define VFS_GID_ROOT 0u
+#define VFS_PATH_MAX 4096u
 typedef struct { bool locked; } spinlock_t;
 static void spinlock_init(spinlock_t *l) { l->locked=false; }
 static void spinlock_lock(spinlock_t *l) { CHECK(!l->locked); l->locked=true; }
@@ -47,6 +48,11 @@ static bool block_write(block_device_t *d,uint64_t lba,uint32_t count,const void
     memcpy(d->bytes+lba*d->sector_size,in,(size_t)count*d->sector_size); return true;
 }
 typedef struct alixfs_mount alixfs_mount_t;
+typedef struct vfs_filesystem_info {
+    uint64_t block_size, fragment_size, blocks, free_blocks, available_blocks;
+    uint64_t files, free_files, available_files, filesystem_id, flags, name_max;
+} vfs_filesystem_info_t;
+static bool block_flush(block_device_t *d) { (void)d; return true; }
 '''
     code += source + r'''
 static char *copy(const char *s) { size_t n=strlen(s)+1; char *p=malloc(n); CHECK(p); memcpy(p,s,n); return p; }
@@ -133,7 +139,7 @@ static void mount_read_regression(void) {
     CHECK(alixfs_mount_load(fs,mount));
     printf("AlixFS mount reads=%u bytes=%zu\n",disk->reads,disk->read_bytes);fflush(stdout);
     CHECK(disk->reads<32); /* Thousands of tiny requests caused the boot stall. */
-    CHECK(disk->read_bytes<data_bytes+192*1024); /* Large payload is read once. */
+    CHECK(disk->read_bytes<data_bytes+fs->header_span+fs->chunk_table_bytes+192*1024); /* Large payload is read once. */
     dir=root->first_child;CHECK(dir&&dir->parent==root&&!strcmp(dir->name,"directory"));
     unsigned count=0;
     for(vfs_node_t *file=dir->first_child;file;file=file->next_sibling) {

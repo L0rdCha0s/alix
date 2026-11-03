@@ -299,7 +299,17 @@ static void configure_heap_from_e820(void)
         return;
     }
 
-    const uint64_t desired_size = KERNEL_HEAP_SIZE;
+    uint64_t usable_bytes = 0;
+    for (uint32_t i = 0; i < count; ++i)
+    {
+        if (boot_info.e820[i].type != 1) continue;
+        uint64_t length = boot_info.e820[i].length;
+        if (length > UINT64_MAX - usable_bytes) { usable_bytes = UINT64_MAX; break; }
+        usable_bytes += length;
+    }
+    uint64_t desired_size = (usable_bytes / 4u) & ~0x1FFFFFULL;
+    if (desired_size > KERNEL_HEAP_SIZE) desired_size = KERNEL_HEAP_SIZE;
+    if (desired_size < 16u * 1024u * 1024u) desired_size = 16u * 1024u * 1024u;
     const uint64_t max_addr = 0xFFFFFFFFULL; /* identity mapped limit */
     const uint64_t align = 0x200000ULL;
     uint64_t min_base = 0x02000000ULL; /* avoid low memory */

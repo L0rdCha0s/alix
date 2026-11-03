@@ -25,7 +25,7 @@
 #define ALIXFS2_VERSION_OWNERSHIP 3u
 #define ALIXFS2_VERSION_LEGACY 2u
 #define ALIXFS2_MAX_FREE_CHUNKS 128u
-#define ALIXFS2_DEFAULT_NODE_CAPACITY 4096u
+#define ALIXFS2_DEFAULT_NODE_CAPACITY 65536u
 
 /*
  * On-disk structures (packed).
@@ -447,7 +447,7 @@ static vfs_node_t *alixfs_new_node(vfs_node_type_t type)
 
 static bool alixfs_ensure_capacity(vfs_node_t *node, size_t need)
 {
-    if (!node || node->type != VFS_NODE_FILE)
+    if (!node || (node->type != VFS_NODE_FILE && node->type != VFS_NODE_SYMLINK))
     {
         return false;
     }
@@ -976,6 +976,131 @@ static bool alixfs_load_chunk_table(alixfs_mount_t *fs)
     return true;
 }
 
+/* Older volumes have only 4096 IDs. Expand before publishing the mount, while
+ * VFS owns the tree lock and no other thread can use or free its chunk table.
+ * Keep the format and node IDs unchanged: move records out of the enlarged
+ * table's way, persist their old-table pointers, then publish the new capacity.
+ * Every IO buffer is heap-owned and relocation uses bounded scratch space. */
+static bool alixfs_expand_legacy_node_table(alixfs_mount_t *fs)
+{
+    uint32_t old_capacity = fs->header.node_capacity;
+    if (old_capacity >= ALIXFS2_DEFAULT_NODE_CAPACITY) return true;
+
+    size_t table_bytes = (size_t)ALIXFS2_DEFAULT_NODE_CAPACITY * sizeof(*fs->chunks);
+    uint64_t data_offset = fs->node_table_offset + alixfs_align_size(table_bytes, fs->sector_size);
+    if (data_offset < fs->header.data_region_offset) data_offset = fs->header.data_region_offset;
+    uint64_t device_bytes, data_end;
+    if (__builtin_mul_overflow(fs->device->sector_count, (uint64_t)fs->sector_size, &device_bytes) ||
+        __builtin_add_overflow(fs->header.data_region_offset, fs->header.data_region_size, &data_end) ||
+        data_end > device_bytes || fs->header.free_chunk_count > ALIXFS2_MAX_FREE_CHUNKS)
+        return false;
+
+    uint64_t next_offset = data_end > data_offset ? data_end : data_offset;
+    uint64_t reserved_end = next_offset;
+    for (uint32_t id = 0; id < old_capacity; ++id)
+    {
+        const alixfs2_chunk_entry_t *entry = &fs->chunks[id];
+        if (!entry->capacity) continue;
+        if (entry->length > entry->capacity || entry->offset < fs->header.data_region_offset ||
+            entry->offset > data_end || entry->capacity > data_end - entry->offset ||
+            entry->offset % fs->sector_size || entry->capacity % fs->sector_size)
+            return false;
+        if (entry->offset < data_offset &&
+            __builtin_add_overflow(reserved_end, (uint64_t)entry->capacity, &reserved_end))
+            return false;
+    }
+    /* A full device remains mountable with its existing table. Writes will
+     * report failure instead of waiting forever for unavailable node IDs. */
+    if (reserved_end > device_bytes) return true;
+
+    size_t bitmap_bytes = (ALIXFS2_DEFAULT_NODE_CAPACITY + 7u) / 8u;
+    alixfs2_chunk_entry_t *chunks = calloc(ALIXFS2_DEFAULT_NODE_CAPACITY, sizeof(*chunks));
+    uint8_t *bitmap = calloc(1, bitmap_bytes);
+    const size_t copy_bytes = 64u * 1024u;
+    uint8_t *buffer = malloc(copy_bytes);
+    if (!chunks || !bitmap || !buffer)
+    {
+        free(chunks); free(bitmap); free(buffer);
+        return true; /* Preserve access to the old volume under memory pressure. */
+    }
+    memcpy(chunks, fs->chunks, fs->chunk_table_bytes);
+
+    /* Reserve the destinations durably before any table entry points at them.
+     * Until the final header update, the original capacity remains authoritative. */
+    fs->header.data_region_size = reserved_end - fs->header.data_region_offset;
+    fs->header_dirty = true;
+    bool ok = alixfs_flush_header(fs) && block_flush(fs->device);
+    for (uint32_t id = 0; ok && id < old_capacity; ++id)
+    {
+        const alixfs2_chunk_entry_t *entry = &fs->chunks[id];
+        if (!entry->capacity || entry->offset >= data_offset) continue;
+        for (size_t copied = 0; ok && copied < entry->length; )
+        {
+            size_t count = entry->length - copied;
+            if (count > copy_bytes) count = copy_bytes;
+            ok = alixfs_device_read(fs->device, fs->sector_size, entry->offset + copied, buffer, count) &&
+                 alixfs_device_write(fs->device, fs->sector_size, next_offset + copied, buffer, count);
+            copied += count;
+        }
+        chunks[id].offset = next_offset;
+        next_offset += entry->capacity;
+    }
+    /* Flush copied payloads, then replace only the old table and flush again.
+     * Both old and relocated payloads remain valid if an intermediate IO fails.
+     * Only after these pointers are durable may the extension cover old data. */
+    if (ok) ok = block_flush(fs->device) &&
+        alixfs_device_write(fs->device, fs->sector_size, fs->node_table_offset,
+                            chunks, fs->chunk_table_bytes) && block_flush(fs->device);
+    if (ok) ok = alixfs_device_write(fs->device, fs->sector_size, fs->node_table_offset,
+                                     chunks, table_bytes) && block_flush(fs->device);
+    if (ok)
+    {
+        /* Drop free spans covered by the table and retain the usable suffix of
+         * any relocated record that extended beyond the enlarged table. */
+        uint32_t kept = 0;
+        for (uint32_t i = 0; i < fs->header.free_chunk_count; ++i)
+        {
+            alixfs2_free_chunk_t chunk = fs->header.free_chunks[i];
+            if (chunk.offset < data_offset)
+            {
+                uint64_t covered = data_offset - chunk.offset;
+                if (chunk.length <= covered) continue;
+                chunk.offset = data_offset;
+                chunk.length -= covered;
+            }
+            if (chunk.length) fs->header.free_chunks[kept++] = chunk;
+        }
+        fs->header.free_chunk_count = kept;
+        for (uint32_t id = 0; id < old_capacity; ++id)
+        {
+            const alixfs2_chunk_entry_t *entry = &fs->chunks[id];
+            if (!entry->capacity || entry->offset >= data_offset) continue;
+            uint64_t end = entry->offset + entry->capacity;
+            if (end > data_offset)
+                alixfs_chunk_release(fs, data_offset, (uint32_t)(end - data_offset));
+        }
+        fs->header.node_capacity = ALIXFS2_DEFAULT_NODE_CAPACITY;
+        fs->header.data_region_offset = data_offset;
+        fs->header.data_region_size = reserved_end - data_offset;
+        fs->header_dirty = true;
+        ok = alixfs_flush_header(fs) && block_flush(fs->device);
+    }
+    free(buffer);
+    if (!ok)
+    {
+        free(chunks); free(bitmap);
+        return false;
+    }
+    free(fs->chunks);
+    free(fs->chunk_dirty_bitmap);
+    fs->chunks = chunks;
+    fs->chunk_table_bytes = table_bytes;
+    fs->chunk_dirty_bitmap = bitmap;
+    fs->chunk_dirty_capacity = bitmap_bytes;
+    fs->free_node_hint = old_capacity;
+    return true;
+}
+
 /* Mount-only scratch stays on the heap, never on a process/DMA stack. Small
  * adjacent records share a bounded read-ahead window; large file payloads go
  * directly to their destination. Remember parent IDs from that first read so
@@ -1071,6 +1196,7 @@ bool alixfs_mount_load(alixfs_mount_t *fs, vfs_mount_t *mount)
     {
         return false;
     }
+    if (!alixfs_expand_legacy_node_table(fs)) return false;
     size_t nodes_bytes;
     if (__builtin_mul_overflow((size_t)fs->header.node_capacity, sizeof(alixfs_load_node_t), &nodes_bytes) ||
         nodes_bytes > SIZE_MAX - sizeof(alixfs_load_state_t))
@@ -1106,13 +1232,13 @@ bool alixfs_mount_load(alixfs_mount_t *fs, vfs_mount_t *mount)
         {
             continue;
         }
-        uint8_t *buffer = (uint8_t *)malloc(entry->length);
+        uint8_t *buffer = (uint8_t *)malloc(node_header_size);
         if (!buffer)
         {
             free(load);
             return false;
         }
-        if (!alixfs_mount_read(fs, load, entry->offset, buffer, entry->length))
+        if (!alixfs_mount_read(fs, load, entry->offset, buffer, node_header_size))
         {
             free(buffer);
             free(load);
@@ -1164,13 +1290,24 @@ bool alixfs_mount_load(alixfs_mount_t *fs, vfs_mount_t *mount)
         if (__builtin_add_overflow(node_header_size, (size_t)disk_common.name_len, &content_end) ||
             __builtin_add_overflow(content_end, (size_t)disk_common.data_len, &content_end) || content_end > entry->length)
         { free(buffer); free(load); return false; }
+        size_t metadata_bytes = node_header_size + disk_common.name_len;
+        uint8_t *metadata = realloc(buffer, metadata_bytes + sizeof(alixfs_mode_disk_t));
+        if (!metadata) { free(buffer); free(load); return false; }
+        buffer = metadata;
+        if (entry->offset > UINT64_MAX - content_end ||
+            (disk_common.name_len && !alixfs_mount_read(fs, load, entry->offset + node_header_size,
+                buffer + node_header_size, disk_common.name_len)))
+        { free(buffer); free(load); return false; }
         uint32_t permissions = disk_common.type == VFS_NODE_FILE ? 0666u :
                                disk_common.type == VFS_NODE_BLOCK ? 0600u : 0777u;
         if (entry->length != content_end)
         {
             if (entry->length - content_end != sizeof(alixfs_mode_disk_t))
             { free(buffer); free(load); return false; }
-            const alixfs_mode_disk_t *mode = (const void *)(buffer + content_end);
+            if (!alixfs_mount_read(fs, load, entry->offset + content_end,
+                                     buffer + metadata_bytes, sizeof(alixfs_mode_disk_t)))
+            { free(buffer); free(load); return false; }
+            const alixfs_mode_disk_t *mode = (const void *)(buffer + metadata_bytes);
             if (mode->magic != ALIXFS_MODE_MAGIC || mode->version != 1 || (mode->permissions & ~0777u))
             { free(buffer); free(load); return false; }
             permissions = mode->permissions;
@@ -1230,7 +1367,29 @@ bool alixfs_mount_load(alixfs_mount_t *fs, vfs_mount_t *mount)
                 free(load);
                 return false;
             }
-            memcpy(node->data, buffer + offset, disk_common.data_len);
+            /* Files are not linked into the mount until the second pass.
+             * Read into their final owned storage without a second file-sized
+             * allocation or a data spinlock held across device I/O. */
+            spinlock_unlock(&node->data_lock);
+            bool read_ok = true;
+            size_t copied = 0;
+            size_t read_limit = fs->sector_size < sizeof(load->data) ?
+                                  sizeof(load->data) - fs->sector_size : sizeof(load->data);
+            while (copied < disk_common.data_len)
+            {
+                size_t bytes = disk_common.data_len - copied;
+                if (bytes > read_limit) bytes = read_limit;
+                if (!alixfs_mount_read(fs, load, entry->offset + offset + copied,
+                                         node->data + copied, bytes))
+                { read_ok = false; break; }
+                copied += bytes;
+            }
+            spinlock_lock(&node->data_lock);
+            if (!read_ok)
+            {
+                spinlock_unlock(&node->data_lock);
+                free(buffer); free(load); return false;
+            }
             node->size = disk_common.data_len;
             node->data[disk_common.data_len] = '\0';
         }
@@ -1470,4 +1629,33 @@ bool alixfs_mount_supports_times(const alixfs_mount_t *fs)
         return false;
     }
     return fs->header.version >= ALIXFS2_VERSION;
+}
+
+
+bool alixfs_mount_filesystem_info(const alixfs_mount_t *fs, struct vfs_filesystem_info *output)
+{
+    if (!fs || !output || !fs->device || !fs->sector_size || !fs->chunks ||
+        fs->header.free_chunk_count > ALIXFS2_MAX_FREE_CHUNKS) return false;
+    uint64_t bytes;
+    if (__builtin_mul_overflow(fs->device->sector_count, (uint64_t)fs->sector_size, &bytes) ||
+        fs->header.data_region_offset > bytes || fs->header.data_region_size > bytes - fs->header.data_region_offset)
+        return false;
+    uint64_t free_bytes = bytes - fs->header.data_region_offset - fs->header.data_region_size;
+    for (uint32_t i = 0; i < fs->header.free_chunk_count; ++i)
+    {
+        uint64_t length = fs->header.free_chunks[i].length;
+        if (length > bytes - free_bytes) return false;
+        free_bytes += length;
+    }
+    if (free_bytes > bytes - fs->header.data_region_offset) return false;
+    uint64_t free_files = 0;
+    for (uint32_t i = 0; i < fs->header.node_capacity; ++i)
+        if (!fs->chunks[i].capacity) ++free_files;
+    *output = (vfs_filesystem_info_t){
+        .block_size = fs->sector_size, .fragment_size = fs->sector_size,
+        .blocks = (bytes - fs->header.data_region_offset) / fs->sector_size,
+        .free_blocks = free_bytes / fs->sector_size, .available_blocks = free_bytes / fs->sector_size,
+        .files = fs->header.node_capacity, .free_files = free_files, .available_files = free_files,
+        .flags = 2u, .name_max = VFS_PATH_MAX - 1u};
+    return true;
 }

@@ -41,7 +41,11 @@
 
 #define PROCESS_STACK_GUARD_SIZE         (4096UL)
 #define STACK_GUARD_PATTERN              0x5A
-#define ENABLE_SMP_BOOT_STACK_SCAN         1
+#ifndef ENABLE_SMP_BOOT_STACK_SCAN
+/* Optional bootstrap-pointer diagnostics; scheduling keeps its bounds,
+ * canary, saved-context and stack-owner checks without scanning every word. */
+#define ENABLE_SMP_BOOT_STACK_SCAN         0
+#endif
 #define SMP_BOOT_STACK_SCAN_MAX_QWORDS     8192ULL
 #define STACK_SCAN_DUMP_CONTEXT_QWORDS     16ULL
 #ifndef ENABLE_SCHEDULER_STACK_DUMP

@@ -69,6 +69,8 @@ static void user_memory_free_page(paddr_t p) {CHECK(physical_live,"physical page
 static void *phys_to_virt(paddr_t p) {return (void *)p;}
 static uint64_t timekeeping_now_seconds(void) {return 123456;}
 """
+    vfs = (ROOT / "src/kernel/vfs.c").read_text()
+    program += function_definition(vfs, "void vfs_queue_dirty_node") + "\n"
     program += without_includes("src/kernel/vfs_mapping.c")
     program += without_includes("src/kernel/alixfs.c")
     vfs = (ROOT / "src/kernel/vfs.c").read_text()
@@ -93,7 +95,7 @@ static void serial_printf(const char *fmt, ...) { (void)fmt; }
 static void vfs_log_sync_result(const char *name, const char *status, uint64_t start, size_t bytes)
 { (void)name; (void)status; (void)start; (void)bytes; }
 '''
-    for signature in ("static bool vfs_mount_flush_tree", "static bool vfs_mount_flush_single", "static bool vfs_mount_writeback"):
+    for signature in ("static bool vfs_mount_flush_tree", "static void vfs_dequeue_clean_node", "static bool vfs_mount_flush_single", "static bool vfs_mount_collect_mapped", "static bool vfs_mount_flush_queued", "static bool vfs_mount_writeback"):
         program += function_definition(vfs, signature) + "\n"
     program += r'''
 bool vfs_flush_node(vfs_node_t *n) {return vfs_mount_flush_single(n);}
@@ -106,7 +108,7 @@ static vfs_node_t *add_node(vfs_mount_t *mount, vfs_node_t *parent, const char *
     if (bytes) { node->data = malloc(bytes); memset(node->data, 0x57, bytes); }
     node->disk_data_dirty = bytes != 0; node->disk_meta_dirty = true;
     node->next_sibling = parent->first_child; parent->first_child = node;
-    parent->disk_meta_dirty = true; vfs_mark_mount_dirty(mount);
+    parent->disk_meta_dirty = true; vfs_queue_dirty_node(parent); vfs_queue_dirty_node(node);
     return node;
 }
 static vfs_node_t *child(vfs_node_t *parent, const char *name)
@@ -170,7 +172,7 @@ int main(void)
     CHECK(writes == 0 && flushes == 1, "forced clean sync rewrote clean files");
     node->data[111] ^= 0x44; node->disk_data_dirty = true; node->dirty_seq++;
     node->pending_dirty_bytes = 1; node->last_data_write_tick = now_ticks;
-    mount.dirty_bytes = 1; vfs_mark_mount_dirty(&mount);
+    mount.dirty_bytes = 1; vfs_queue_dirty_node(node);
     reset_counts(); CHECK(vfs_mount_writeback(&mount, false), "background sync failed");
     CHECK(writes == 0 && node->disk_data_dirty && mount.dirty, "active writer grace was not retained");
     CHECK(vfs_mount_writeback(&mount, true), "forced dirty sync failed");
@@ -189,7 +191,7 @@ int main(void)
 
     reset_counts(); node->disk_meta_dirty = true; fail_flush = true;
     CHECK(!vfs_mount_flush_single(node), "device flush failure reported success");
-    CHECK(mount.dirty && mount.needs_full_sync, "flush failure was not queued for recovery");
+    CHECK(mount.dirty && !mount.needs_full_sync, "flush failure was not queued for incremental recovery");
     reset_counts(); CHECK(vfs_mount_writeback(&mount, true), "recovery sync failed");
     CHECK(!mount.needs_full_sync, "recovery state was not cleared"); check_remount(&dev, node);
     /* Production shared-page cache and writeback: independent alias identity,
@@ -206,7 +208,7 @@ int main(void)
     reset_counts();fail_write=1;
     CHECK(vfs_mapping_sync(mapping)==-EIO && node->disk_data_dirty,"mapped write failure lost dirty state");
     reset_counts();fail_flush=true;
-    CHECK(vfs_mapping_sync(mapping)==-EIO && mount.needs_full_sync,"mapped flush failure ignored");
+    CHECK(vfs_mapping_sync(mapping)==-EIO && mount.dirty && !mount.needs_full_sync,"mapped flush failure ignored");
     reset_counts();CHECK(!vfs_mapping_sync(mapping) && flushes==1,"mapped synchronous retry failed");
     CHECK(node->data[111]==(char)(original^0x2a),"shared store missing from file buffer");
     check_remount(&dev,node);

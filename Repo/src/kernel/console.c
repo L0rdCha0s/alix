@@ -212,10 +212,12 @@ static void console_putc_unlocked(char c)
     }
     if (c == '\t')
     {
-        size_t next_tab = (cursor_col + 8) & ~(size_t)7;
-        while (cursor_col < next_tab)
+        /* The caller owns g_console_lock. Count spaces before writing because
+         * the last column can wrap cursor_col back to zero. */
+        size_t spaces = 8 - (cursor_col & (size_t)7);
+        for (size_t index = 0; index < spaces; ++index)
         {
-            console_putc(' ');
+            console_putc_unlocked(' ');
         }
         return;
     }

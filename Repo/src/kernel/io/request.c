@@ -234,6 +234,25 @@ int io_request_submit(io_request_t *request)
     return result;
 }
 
+int io_request_complete_inline(io_request_t *request, int64_t result)
+{
+    if (!request) return -EINVAL;
+    io_queue_t *queue = request->queue;
+    spinlock_lock(&queue->lock);
+    int status = 0;
+    if (queue->closed || request->cancelled) status = -ECANCELED;
+    else if (request->owners != IO_OWNER_WAITER || !request->bound ||
+             request->submitted || request->state != IO_REQUEST_NEW) status = -EINVAL;
+    else
+    {
+        request->submitted = true;
+        request->result = result;
+        request->state = IO_REQUEST_COMPLETED;
+    }
+    spinlock_unlock(&queue->lock);
+    return status;
+}
+
 io_request_t *io_queue_take(io_queue_t *queue)
 {
     if (!queue) return NULL;

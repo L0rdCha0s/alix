@@ -64,6 +64,8 @@ typedef enum
     USER_ATK_CONTROL_TITLE,
     USER_ATK_CONTROL_CHROME,
     USER_ATK_CONTROL_DISPLAY,
+    USER_ATK_CONTROL_WORK_AREA,
+    USER_ATK_CONTROL_INPUT_IDLE,
 } user_atk_control_opcode_t;
 #define USER_ATK_STATE_VISIBLE 1u
 #define USER_ATK_STATE_FOCUSED 2u
@@ -71,12 +73,17 @@ typedef enum
 #define USER_ATK_STATE_RESIZABLE 8u
 /* Every successful operation returns actual state in this fixed-size record.
  * Bounds use client-area screen pixels. VISIBLE/CHROME accept flags 0 or 1.
- * DISPLAY requires handle 0 and returns physical screen dimensions. */
+ * DISPLAY requires handle 0 and returns physical screen dimensions.
+ * WORK_AREA also requires handle 0; its client rectangle excludes the desktop
+ * menu bar, while screen_width/screen_height retain the physical dimensions.
+ * Request flag USER_ATK_STATE_CHROME also reserves the native window frame.
+ * INPUT_IDLE requires handle/flags 0 and returns elapsed input-idle milliseconds. */
 typedef struct
 {
     uint32_t version, size;
     int32_t x, y;
-    uint32_t width, height, flags, screen_width, screen_height, reserved;
+    union { uint32_t width; uint32_t idle_milliseconds; };
+    uint32_t height, flags, screen_width, screen_height, reserved;
     char title[USER_ATK_TITLE_MAX];
 } user_atk_window_control_t;
 

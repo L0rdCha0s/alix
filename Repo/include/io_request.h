@@ -71,6 +71,10 @@ uint32_t io_request_gid(const io_request_t *request);
  * before submit/block. Successful submit adds EXECUTOR ownership; take moves
  * that same owner from the queue to the service worker. */
 int io_request_submit(io_request_t *request);
+/* Complete a bound NEW request without an executor/queue round trip. The live
+ * caller owns its registered WAITER throughout a bounded nonblocking operation;
+ * result bytes/resources remain request-owned and use ordinary waiter cleanup. */
+int io_request_complete_inline(io_request_t *request, int64_t result);
 io_request_t *io_queue_take(io_queue_t *queue);
 /* Cancellation never frees resources or interrupts an active continuation.
  * NEW/QUEUED requests complete with -ECANCELED; RUNNING requests remain owned

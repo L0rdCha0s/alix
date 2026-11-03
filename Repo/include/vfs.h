@@ -7,6 +7,13 @@
 
 typedef struct vfs_node vfs_node_t;
 typedef struct vfs_mount vfs_mount_t;
+typedef struct vfs_filesystem_info
+{
+    uint64_t block_size, fragment_size, blocks, free_blocks, available_blocks;
+    uint64_t files, free_files, available_files, filesystem_id, flags, name_max;
+} vfs_filesystem_info_t;
+int vfs_node_filesystem_info(vfs_node_t *node, vfs_filesystem_info_t *output);
+int vfs_path_filesystem_info(vfs_node_t *cwd, const char *path, vfs_filesystem_info_t *output);
 
 typedef struct
 {
@@ -22,6 +29,7 @@ typedef enum
     VFS_NODE_FILE = 1,
     VFS_NODE_BLOCK = 2,
     VFS_NODE_SYMLINK = 3,
+    VFS_NODE_CHARACTER = 5,
     VFS_NODE_FIFO = 6
 } vfs_node_type_t;
 
@@ -176,6 +184,9 @@ int vfs_set_times_owned(vfs_node_t *node, uint32_t uid, uint32_t gid, bool expli
 typedef bool (*vfs_enum_cb_t)(const vfs_node_t *child, void *context);
 size_t vfs_enum_children(vfs_node_t *dir, vfs_enum_cb_t callback, void *context);
 vfs_node_t *vfs_add_block_device(vfs_node_t *dir, const char *name, block_device_t *device);
+enum { VFS_CHARACTER_ENTROPY = 1 };
+vfs_node_t *vfs_add_character_device(vfs_node_t *dir, const char *name, uint32_t kind);
+ssize_t vfs_character_read(vfs_node_t *node, void *buffer, size_t count, bool nonblock);
 void vfs_clear_directory(vfs_node_t *dir);
 bool vfs_format(block_device_t *device);
 bool vfs_mount_device(block_device_t *device, vfs_node_t *mount_point);

@@ -746,10 +746,12 @@ bool thread_stack_guard_intact(const thread_t *thread)
     {
         return false;
     }
-    const uint8_t *guard = thread->stack_guard_base;
-    for (size_t i = 0; i < PROCESS_STACK_GUARD_SIZE; ++i)
+    _Static_assert(PROCESS_STACK_GUARD_SIZE % sizeof(uint64_t) == 0, "stack canary words");
+    const uint64_t *guard = (const uint64_t *)thread->stack_guard_base;
+    const uint64_t pattern = UINT64_C(0x0101010101010101) * STACK_GUARD_PATTERN;
+    for (size_t i = 0; i < PROCESS_STACK_GUARD_SIZE / sizeof(*guard); ++i)
     {
-        if (guard[i] != STACK_GUARD_PATTERN)
+        if (guard[i] != pattern)
         {
             return false;
         }
@@ -1962,7 +1964,7 @@ static void __attribute__((unused)) thread_assert_stack_guard_only(thread_t *thr
     }
 }
 
-static void scheduler_debug_dump_stack(const uint64_t *base, size_t count)
+static void __attribute__((unused)) scheduler_debug_dump_stack(const uint64_t *base, size_t count)
 {
     if (!base || count == 0)
     {
@@ -2046,6 +2048,7 @@ static void scheduler_debug_dump_thread_stack(thread_t *thread, const char *labe
 #endif
 }
 
+#if ENABLE_SMP_BOOT_STACK_SCAN
 static bool stack_value_is_suspicious(uint64_t value,
                                       const char **reason_out)
 {
@@ -2219,6 +2222,8 @@ static void __attribute__((unused)) scheduler_debug_check_resume(thread_t *threa
 
     fatal("scheduler detected context rip inside SMP bootstrap page");
 }
+
+#endif
 
 void thread_scan_stack_for_suspicious_values(thread_t *thread,
                                              uintptr_t rsp,

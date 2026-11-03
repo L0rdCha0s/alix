@@ -13,8 +13,11 @@ including mappings in independently spawned processes. VFS reads observe mapped
 stores, and VFS writes update the affected shared bytes. Closing, duplicating or
 reusing the source FD does not change a mapping. Rename preserves the retained
 node identity. Private mappings are eager isolated snapshots; their stores are
-never written back to the file. This is an eager implementation, without a
-copy-on-write fault path or disk demand paging.
+never written back to the file. Shared mappings from read-only descriptors allocate/cache physical pages on
+first use. Splits preserve their original backing offsets. The per-file page
+index avoids repeated linked-list searches while constructing large mappings.
+Private snapshots remain eager, without copy-on-write or disk demand paging;
+the VFS still holds the source file contents in memory.
 
 The descriptor must be open for reading. A writable shared mapping also requires
 write access and a mutable node. Read-only shared descriptions cannot gain write
@@ -42,9 +45,11 @@ pointer, borrowed process pointer or user virtual address.
 
 VFS data locks serialize cache metadata and ordinary I/O. CPU stores use the
 shared physical pages directly. VFS access and filesystem serialization merge
-changed cache bytes into the file buffer and dirty metadata. Flushd also scans
-mounts with live shared caches, so stores made after a previous clean writeback
-are discoverable. The final backing release merges remaining stores before
+changed cache bytes into the file buffer and dirty metadata. Flushd snapshots only nodes with shared mappings that can become writable,
+then merges their changed bytes outside the filesystem namespace lock.
+Read-only library mappings do not participate in dirty discovery. Changed
+nodes enter a reference-owned writeback queue, so ordinary writeback does not
+walk the mounted filesystem. The final backing release merges remaining stores before
 reclaiming the cache.
 
 `msync` validates the entire rounded mapping range before submitting I/O. It

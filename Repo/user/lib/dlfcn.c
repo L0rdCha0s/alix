@@ -12,10 +12,13 @@
 #include "sys/mman.h"
 #include "sys/stat.h"
 #include "unistd.h"
+#include "usyscall.h"
 
 #define DL_PAGE 4096u
 #define DL_MODULE_LIMIT 1024u
 #define DL_SYMBOL_LIMIT 2000000u
+#define DL_SHARED_PAGE 0x80u
+#define DL_FILE_PAGE 0x40u
 typedef struct dl_module dl_module;
 typedef struct
 {
@@ -53,7 +56,7 @@ struct dl_module
         retiring;
     uintptr_t init, fini, init_array, fini_array, rela, jmprel, relr;
     size_t init_bytes, fini_bytes, rela_bytes, jmp_bytes, relr_bytes;
-    const char *runpath, *rpath;
+    const char *runpath, *rpath, *soname;
     uintptr_t tls_image;
     size_t tls_filesz, tls_memsz, tls_align, tls_skew;
 };
@@ -61,6 +64,7 @@ typedef struct dl_tls_block
 {
     struct dl_tls_block *next;
     uint64_t id;
+    size_t bytes;
     void *allocation, *value;
 } dl_tls_block;
 static alix_mutex_t dl_mutex;
@@ -68,10 +72,12 @@ static _Thread_local unsigned dl_depth;
 static _Thread_local char dl_message[256];
 static _Thread_local bool dl_pending;
 static _Thread_local dl_tls_block *dl_thread_blocks;
+static _Thread_local dl_tls_block *dl_recent_block;
 static dl_module dl_main, *dl_modules;
 static uint64_t dl_next_id = 2, dl_sequence;
 static bool dl_collecting, dl_exit_registered;
 static bool dl_startup_done;
+static bool dl_startup_dynamic, dl_startup_mapped;
 
 _Static_assert(sizeof(dl_phdr) == sizeof(Elf64_Phdr), "native ELF program header ABI");
 extern char __alix_user_pointer_base[], __alix_user_text_end[], __alix_user_data_start[],
@@ -103,7 +109,9 @@ static void dl_main_startup(void)
             relocations = d->value;
         if (d->tag == DL_RELASZ)
             bytes = d->value;
-        if ((d->tag == DL_NEEDED || d->tag == DL_JMPREL || d->tag == DL_REL || d->tag == DL_RELR) && d->value)
+        if (d->tag == DL_NEEDED || ((d->tag == DL_JMPREL || d->tag == DL_RELR) && d->value))
+            dl_startup_dynamic = true;
+        if (d->tag == DL_REL && d->value)
             valid = false;
     }
     if (bytes % sizeof(dl_rela) || (bytes && !dl_startup_range(relocations, bytes, false)))
@@ -115,6 +123,8 @@ static void dl_main_startup(void)
         dl_rela *r = &((dl_rela *)relocations)[i];
         uint64_t index = r->info >> 32;
         uint32_t type = (uint32_t)r->info;
+        if (dl_startup_dynamic && type != DL_TPOFF64 && type != DL_GLOB_DAT)
+            continue;
         if ((type != DL_TPOFF64 && type != DL_GLOB_DAT) ||
             index > (UINTPTR_MAX - symbols) / sizeof(dl_sym) ||
             !dl_startup_range(symbols + index * sizeof(dl_sym), sizeof(dl_sym), false) || r->offset % 8 ||
@@ -128,6 +138,8 @@ static void dl_main_startup(void)
         if (type == DL_GLOB_DAT)
         {
             unsigned symbol_type = s->info & 15;
+            if (dl_startup_dynamic && !s->section && (s->info >> 4) != 2)
+                continue;
             if (r->addend || symbol_type > 2 ||
                 (!s->section && ((s->info >> 4) != 2 || s->value || s->size)) ||
                 (s->section && s->section != 0xfff1 && !dl_startup_range(value, s->size, false)))
@@ -352,7 +364,7 @@ static bool dl_meta(dl_module *m)
         return dl_fail("unaligned ELF dynamic table");
     uintptr_t str = 0, sym = 0, hash = 0, gnu = 0;
     size_t syment = 0, relaent = sizeof(dl_rela), relrent = 8;
-    uint64_t run = UINT64_MAX, rpath = UINT64_MAX;
+    uint64_t run = UINT64_MAX, rpath = UINT64_MAX, soname = UINT64_MAX;
     bool terminated = false;
     unsigned version_tags = 0;
     for (size_t i = 0; i < m->dynamic_count; ++i)
@@ -397,6 +409,11 @@ static bool dl_meta(dl_module *m)
         }
         case DL_NEEDED:
             ++m->dependency_count;
+            break;
+        case DL_SONAME:
+            if (soname != UINT64_MAX)
+                return dl_fail("duplicate ELF SONAME");
+            soname = d.value;
             break;
         case DL_RUNPATH:
             run = d.value;
@@ -538,6 +555,8 @@ static bool dl_meta(dl_module *m)
         return dl_fail("invalid ELF RUNPATH");
     if (rpath != UINT64_MAX && !(m->rpath = dl_string(m, rpath)))
         return dl_fail("invalid ELF RPATH");
+    if (soname != UINT64_MAX && (!(m->soname = dl_string(m, soname)) || !*m->soname))
+        return dl_fail("invalid ELF SONAME");
     if ((m->rela_bytes && !dl_pointer(m, m->rela, m->rela_bytes, DL_R)) ||
         (m->jmp_bytes && !dl_pointer(m, m->jmprel, m->jmp_bytes, DL_R)) ||
         (m->relr_bytes && !dl_pointer(m, m->relr, m->relr_bytes, DL_R)) ||
@@ -551,6 +570,7 @@ static bool dl_main_initialize(void)
     if (dl_modules)
         return true;
     dl_main.main = dl_main.global = dl_main.nodelete = dl_main.initialized = dl_main.relocated = true;
+    dl_main.relocated = !dl_startup_dynamic;
     dl_main.id = 1;
     dl_main.low = (uintptr_t)__alix_user_pointer_base;
     dl_main.high = (uintptr_t)__alix_user_image_loaded_end;
@@ -587,8 +607,8 @@ static bool dl_main_initialize(void)
         memset(&dl_main, 0, sizeof(dl_main));
         return false;
     }
-    if ((dl_main.rela_bytes && !dl_startup_done) || dl_main.jmp_bytes || dl_main.relr_bytes ||
-        dl_main.dependency_count)
+    if ((dl_main.rela_bytes && !dl_startup_done) ||
+        (!dl_startup_dynamic && (dl_main.jmp_bytes || dl_main.relr_bytes || dl_main.dependency_count)))
     {
         free(path);
         free(dl_main.segments);
@@ -760,6 +780,7 @@ static void *dl_tls_address(dl_module *m, uint64_t offset)
     if (m->tls_filesz)
         memcpy((void *)value, (void *)m->tls_image, m->tls_filesz);
     b->id = m->id;
+    b->bytes = m->tls_memsz;
     b->allocation = allocation;
     b->value = (void *)value;
     b->next = dl_thread_blocks;
@@ -769,12 +790,29 @@ static void *dl_tls_address(dl_module *m, uint64_t offset)
 }
 void *__tls_get_addr(const uint64_t *index)
 {
+    /* Each block pins its module until this thread's cleanup. Repeated TLS
+     * access needs no process-wide loader lock or module-list traversal. */
+    dl_tls_block *cached = dl_recent_block;
+    if (cached && cached->id == index[0])
+    {
+        if (index[1] >= cached->bytes) abort();
+        return (char *)cached->value + index[1];
+    }
+    for (dl_tls_block *block = dl_thread_blocks; block; block = block->next)
+    {
+        if (block->id != index[0]) continue;
+        if (index[1] >= block->bytes) abort();
+        dl_recent_block = block;
+        return (char *)block->value + index[1];
+    }
     dl_lock();
     dl_module *m = dl_by_id(index[0]);
     void *result = m ? dl_tls_address(m, index[1]) : NULL;
     dl_unlock();
     if (!result)
         abort();
+    /* dl_tls_address inserts newly allocated dynamic blocks at the head. */
+    if (dl_thread_blocks && dl_thread_blocks->id == index[0]) dl_recent_block = dl_thread_blocks;
     return result;
 }
 void *__alix_dl_pin(const void *address)
@@ -807,6 +845,7 @@ void __alix_dl_unpin(void *owner)
 void __alix_dl_thread_cleanup(void)
 {
     dl_lock();
+    dl_recent_block = NULL;
     while (dl_thread_blocks)
     {
         dl_tls_block *block = dl_thread_blocks;
@@ -956,7 +995,18 @@ static bool dl_relocate_table(dl_module *m, dl_module *scope, uintptr_t table, s
             result = (symbol ? symbol->value : 0) + (uint64_t)r.addend;
             break;
         case DL_TPOFF64:
-            return dl_fail("initial-exec DSO TLS requires static TLS allocation");
+        {
+            if (!owner || !owner->main || !symbol || (symbol->info & 15) != 6 ||
+                !symbol->section || symbol->section == 0xfff1 ||
+                symbol->value > owner->tls_memsz || symbol->size > owner->tls_memsz - symbol->value ||
+                (r.addend >= 0 && (uint64_t)r.addend > owner->tls_memsz - symbol->value) ||
+                (r.addend < 0 && (uint64_t)(-(r.addend + 1)) + 1 > symbol->value))
+                return dl_fail("initial-exec DSO TLS requires static TLS allocation");
+            uintptr_t tp, block;
+            __asm__ volatile("movq %%fs:0,%0\n\tmovq %%fs:8,%1" : "=r"(tp), "=r"(block));
+            result = block - tp + symbol->value + (uint64_t)r.addend;
+            break;
+        }
         default:
             return dl_fail("unsupported x86-64 ELF relocation");
         }
@@ -1127,6 +1177,12 @@ static char *dl_find_path(dl_module *requester, const char *name)
         if (found || dl_pending)
             return found;
     }
+    if (requester != &dl_main && (!requester || !requester->runpath) && !dl_main.runpath)
+    {
+        found = dl_search_list(&dl_main, dl_main.rpath, name);
+        if (found || dl_pending)
+            return found;
+    }
     return dl_search_list(requester, "/usr/lib:/lib", name);
 }
 static bool dl_read_exact(int fd, void *buffer, size_t bytes, uint64_t offset)
@@ -1293,6 +1349,41 @@ static bool dl_map_file(dl_module *m)
         for (size_t page = first; page < last; ++page)
             permissions[page] |= (unsigned char)(p->flags | DL_R);
     }
+    /* Read-only load pages need no relocation writes. Retain the native file
+     * mapping instead of copying the same engine into every browser process.
+     * The kernel shares its cache and faults pages in as they are used. Keep
+     * mixed-protection boundary pages and BSS-bearing segments private. */
+    for (size_t i = 0; i < m->segment_count; ++i)
+    {
+        dl_phdr *p = &m->segments[i];
+        if (!p->filesz || p->vaddr % DL_PAGE != p->offset % DL_PAGE)
+            continue;
+        size_t first = (p->vaddr - low) / DL_PAGE;
+        size_t last = (p->vaddr + p->filesz - low + DL_PAGE - 1) / DL_PAGE;
+        bool compatible = true;
+        for (size_t page = first; page < last; ++page)
+            if (permissions[page] != (unsigned char)(p->flags | DL_R)) compatible = false;
+        if (!compatible) continue;
+        bool shared = !(p->flags & DL_W) && p->filesz == p->memsz;
+        void *target = (void *)(start + first * DL_PAGE);
+        if (mmap(target, (last - first) * DL_PAGE, shared ? PROT_READ : PROT_READ | PROT_WRITE,
+                 (shared ? MAP_SHARED : MAP_PRIVATE) | MAP_FIXED, fd,
+                 (off_t)(p->offset & ~(uint64_t)(DL_PAGE - 1))) == MAP_FAILED)
+        {
+            free(permissions);
+            dl_fail("cannot map ELF load segment");
+            goto failed;
+        }
+        for (size_t page = first; page < last; ++page)
+            permissions[page] |= DL_FILE_PAGE | (shared ? DL_SHARED_PAGE : 0);
+        if (p->memsz > p->filesz)
+        {
+            size_t tail = DL_PAGE - (p->vaddr + p->filesz) % DL_PAGE;
+            if (tail == DL_PAGE) tail = 0;
+            if (tail > p->memsz - p->filesz) tail = p->memsz - p->filesz;
+            if (tail) memset((void *)(m->bias + p->vaddr + p->filesz), 0, tail);
+        }
+    }
     for (size_t page = 0; page < m->span / DL_PAGE;)
     {
         unsigned char flags = permissions[page];
@@ -1300,7 +1391,7 @@ static bool dl_map_file(dl_module *m)
         while (end < m->span / DL_PAGE && permissions[end] == flags)
             ++end;
         if ((flags & (DL_W | DL_X)) == (DL_W | DL_X) ||
-            (flags &&
+            (flags && !(flags & DL_FILE_PAGE) &&
              mprotect((void *)(start + page * DL_PAGE), (end - page) * DL_PAGE, PROT_READ | PROT_WRITE)))
         {
             free(permissions);
@@ -1312,6 +1403,7 @@ static bool dl_map_file(dl_module *m)
     for (size_t i = 0; i < m->segment_count; ++i)
     {
         dl_phdr *p = &m->segments[i];
+        if (permissions[(p->vaddr - low) / DL_PAGE] & DL_FILE_PAGE) continue;
         if (p->filesz && !dl_read_exact(fd, (void *)(m->bias + p->vaddr), p->filesz, p->offset))
         {
             free(permissions);
@@ -1407,7 +1499,8 @@ static dl_module *dl_load(const char *name, dl_module *requester, dl_module *sco
         return NULL;
     }
     for (dl_module *existing = dl_modules; existing; existing = existing->next)
-        if (!strcmp(name, existing->path))
+        if (!strcmp(name, existing->path) ||
+            (!strchr(name, '/') && existing->soname && !strcmp(name, existing->soname)))
         {
             if (existing->retiring)
             {
@@ -1559,7 +1652,8 @@ static bool dl_relocate_group(dl_module *scope)
         if (m->relocated)
             continue;
         if (!dl_versions_requirements(m) || !dl_relocate_table(m, scope, m->rela, m->rela_bytes) ||
-            !dl_relocate_table(m, scope, m->jmprel, m->jmp_bytes) || !dl_relocate_packed(m) || !dl_protect(m))
+            !dl_relocate_table(m, scope, m->jmprel, m->jmp_bytes) || !dl_relocate_packed(m) ||
+            (!m->main && !dl_protect(m)))
             return false;
         m->relocated = true;
     }
@@ -1695,6 +1789,78 @@ static void dl_at_exit(void)
     }
     dl_unlock();
 }
+
+int __attribute__((visibility("default"))) __alix_dynamic_startup(int initialize)
+{
+    if (!dl_startup_dynamic) return 0;
+    dl_pending = false;
+    dl_lock();
+    if (!dl_main_initialize()) goto failed;
+    if (!initialize && !dl_startup_mapped)
+    {
+        if (dl_main.dependency_count > DL_MODULE_LIMIT)
+        {
+            dl_fail("too many executable startup libraries");
+            goto failed;
+        }
+        if (dl_main.dependency_count)
+        {
+            dl_main.dependencies = calloc(dl_main.dependency_count, sizeof(*dl_main.dependencies));
+            if (!dl_main.dependencies)
+            {
+                dl_fail("out of memory tracking executable startup libraries");
+                goto failed;
+            }
+        }
+        size_t dependency = 0;
+        for (size_t i = 0; i < dl_main.dynamic_count && dl_main.dynamic[i].tag; ++i)
+            if (dl_main.dynamic[i].tag == DL_NEEDED)
+            {
+                const char *name = dl_string(&dl_main, dl_main.dynamic[i].value);
+                if (!name || !*name)
+                {
+                    dl_fail("invalid executable startup library name");
+                    goto failed;
+                }
+                dl_module *module = dl_load(name, &dl_main, &dl_main, RTLD_NOW | RTLD_GLOBAL, 0);
+                if (!module) goto failed;
+                dl_main.dependencies[dependency++] = module;
+            }
+        for (dl_module *module = dl_modules; module; module = module->next)
+            module->global = true;
+        if (!dl_relocate_group(&dl_main)) goto failed;
+        dl_startup_mapped = true;
+    }
+    if (initialize)
+    {
+        if (!dl_startup_mapped)
+        {
+            dl_fail("executable startup libraries were not relocated");
+            goto failed;
+        }
+        for (size_t i = 0; i < dl_main.dependency_count; ++i)
+            if (!dl_initialize(dl_main.dependencies[i])) goto failed;
+        if (!dl_exit_registered)
+        {
+            if (atexit(dl_at_exit))
+            {
+                dl_fail("cannot register startup library finalizers");
+                goto failed;
+            }
+            dl_exit_registered = true;
+        }
+    }
+    dl_unlock();
+    return 0;
+failed:
+    dl_fail("cannot initialize executable startup libraries");
+    dl_unlock();
+    size_t bytes = strnlen(dl_message, sizeof(dl_message) - 2);
+    dl_message[bytes++] = '\n';
+    sys_serial_write(dl_message, bytes);
+    return -1;
+}
+
 void *dlopen(const char *path, int flags)
 {
     dl_pending = false;

@@ -23,6 +23,7 @@ typedef struct process_vm_area
     uint32_t protection;
     paddr_t *pages;
     fd_description_t *file;
+    size_t file_offset;
     struct process_vm_area *next;
 } process_vm_area_t;
 
@@ -184,12 +185,20 @@ static bool vm_commit_page_locked(process_t *process, process_vm_area_t *area,
     bool allocated = false;
     if (!page)
     {
-        if (!user_memory_alloc_page(&page))
+        if (area->file)
+        {
+            page = io_vfs_mapping_page(area->file, area->file_offset / VM_PAGE_SIZE + index);
+            if (!page) return false;
+        }
+        else if (!user_memory_alloc_page(&page))
         {
             return false;
         }
-        memset(phys_to_virt(page), 0, VM_PAGE_SIZE);
-        allocated = true;
+        else
+        {
+            memset(phys_to_virt(page), 0, VM_PAGE_SIZE);
+            allocated = true;
+        }
     }
     if (page & VM_NEW_PAGE)
     {
@@ -294,6 +303,7 @@ static bool vm_area_append(process_vm_transaction_t *transaction, const process_
     if (old && old->file) {
         if (!fd_description_get(old->file)) { free(area); return false; }
         area->file = old->file;
+        area->file_offset = old->file_offset + base - old->base;
     }
     if (transaction->new_tail)
     {
@@ -325,8 +335,14 @@ static bool vm_area_append(process_vm_transaction_t *transaction, const process_
             }
             else if (old && old->file && !old->pages)
             {
-                area->pages[index] = io_vfs_mapping_page(old->file, (base-old->base)/VM_PAGE_SIZE+index);
-                if (!area->pages[index]) return false;
+                /* Shared read-only files retain the mapping, but fault their
+                 * physical cache pages in only when used. Preserve the backing
+                 * offset across mprotect/munmap splits. */
+                if (io_vfs_mapping_writable(old->file))
+                {
+                    area->pages[index] = io_vfs_mapping_page(old->file, area->file_offset/VM_PAGE_SIZE+index);
+                    if (!area->pages[index]) return false;
+                }
             }
             else if (old && old->pages)
             {

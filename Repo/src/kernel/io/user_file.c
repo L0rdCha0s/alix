@@ -4,6 +4,7 @@
 #include "io_tcp.h"
 #include "io_udp.h"
 #include "io_pipe.h"
+#include "io_local.h"
 #include "io_audio.h"
 #include "io_poll.h"
 #include "io_record_lock.h"
@@ -52,6 +53,7 @@ static bool user_tcp_handler(io_request_t *request, io_service_result_t *result)
     if (io_audio_description_valid(io_request_description(request)))
         return io_audio_execute(request, result);
     if (io_udp_request_valid(request)) return io_udp_execute(request, result, process_fd_retirement_queue());
+    if (io_local_description_valid(io_request_description(request))) return io_local_execute(request, result);
     return io_tcp_execute(request, result, process_fd_retirement_queue());
 }
 
@@ -180,6 +182,26 @@ static void user_file_abort(io_request_t *request)
 
 static int user_file_submit(user_file_service_t kind, io_request_t *request)
 {
+    fd_description_t *description = io_request_description(request);
+    if (kind == USER_TCP && io_local_description_valid(description) &&
+        io_request_buffer_size(request) >= sizeof(io_tcp_operation_t))
+    {
+        io_tcp_operation_t *operation = io_request_buffer(request);
+        if ((operation->opcode == IO_TCP_READ || operation->opcode == IO_TCP_WRITE) &&
+            ((operation->flags & SYSCALL_MSG_DONTWAIT) ||
+             (fd_description_status_flags(description) & FD_STATUS_NONBLOCK)))
+        {
+            /* Capture the per-call policy even if an alias changes NONBLOCK
+             * concurrently. This bounded step never waits or retains a stack. */
+            operation->flags |= SYSCALL_MSG_DONTWAIT;
+            io_service_result_t completed = {.result = -EIO, .description_owned = NULL};
+            if (!io_local_execute(request, &completed) || completed.description_owned)
+                fatal("nonblocking local operation retained executor work");
+            int result = io_request_complete_inline(request, completed.result);
+            if (result) user_file_abort(request);
+            return result;
+        }
+    }
     int result = kind == USER_TCP || kind == USER_PIPE || kind == USER_AUDIO || kind == USER_POLL || kind == USER_FLOCK ?
         io_event_service_submit(__atomic_load_n(&g_user_tcp_service, __ATOMIC_ACQUIRE), request) :
         io_service_submit(kind == USER_STORAGE ? io_vfs_service_current() :
@@ -319,6 +341,11 @@ wait_again:;
         if ((uint64_t)value > capacity) value = -EIO;
         else if (!user_copy_to_user(output, data, (size_t)value)) value = -EFAULT;
     }
+    else if (!result && !value && (operation == SYSCALL_FILE_STATVFS || operation == SYSCALL_FILE_PATH_STATVFS))
+    {
+        io_vfs_operation_t *work = io_request_buffer(request);
+        if (!user_copy_to_user(output, work->data, sizeof(syscall_statvfs_t))) value = -EFAULT;
+    }
     else if (!result && !value && (operation == SYSCALL_FILE_STAT_INFO || operation == SYSCALL_FILE_PATH_INFO ||
                                   operation == SYSCALL_FILE_STAT_TIMES || operation == SYSCALL_FILE_PATH_TIMES))
     {
@@ -353,7 +380,8 @@ wait_again:;
         (void)fd_table_reservation_cancel(io_request_description(request));
     bool broken_pipe = request && value == -EPIPE &&
                        (operation == SYSCALL_FILE_WRITE || operation == SYSCALL_FILE_WRITEV) &&
-                       io_pipe_description_valid(io_request_description(request));
+                       (io_pipe_description_valid(io_request_description(request)) ||
+                        io_local_description_valid(io_request_description(request)));
     if (request && value == -EPIPE && operation == SYSCALL_FILE_NET_SEND &&
         !(slot_flags & SYSCALL_MSG_NOSIGNAL)) broken_pipe = true;
     (void)process_io_finish_current(result != 0);
@@ -670,7 +698,7 @@ static int64_t user_file_ioctl(uint64_t fd, uint64_t command, void *argument, ui
     }
     if (!result && (!argument || !user_ptr_range_valid(argument, sizeof(int32_t)))) result = -EFAULT;
     bool udp = !result && io_udp_description_valid(description);
-    bool tcp = !result && (io_tcp_description_valid(description) || udp);
+    bool tcp = !result && (io_tcp_description_valid(description) || io_local_description_valid(description) || udp);
     bool pipe = !result && io_pipe_description_valid(description);
     if (!result && !tcp && !pipe && !io_vfs_description_valid(description)) result = -ENOTTY;
     user_file_service_t kind = tcp ? USER_TCP : pipe ? USER_PIPE : USER_STORAGE;
@@ -812,7 +840,8 @@ static int64_t user_path_operation(uint32_t operation, const char *path, void *o
 {
     if (flags & ~((uint64_t)SYSCALL_STAT_NOFOLLOW)) return -EINVAL;
     bool times = operation == SYSCALL_FILE_PATH_TIMES;
-    size_t reply_size = times ? sizeof(syscall_stat_times_t) :
+    size_t reply_size = operation == SYSCALL_FILE_PATH_STATVFS ? sizeof(syscall_statvfs_t) :
+        times ? sizeof(syscall_stat_times_t) :
         operation == SYSCALL_FILE_PATH_INFO ? sizeof(syscall_stat_info_t) : sizeof(syscall_stat_t);
     if (operation != SYSCALL_FILE_CHDIR &&
         (!output || !user_ptr_range_valid(output, reply_size))) return -EFAULT;
@@ -825,7 +854,8 @@ static int64_t user_path_operation(uint32_t operation, const char *path, void *o
     if (!result)
     {
         io_vfs_operation_t *work = io_request_buffer(request);
-        work->opcode = operation == SYSCALL_FILE_CHDIR ? IO_VFS_RESOLVE_CWD :
+        work->opcode = operation == SYSCALL_FILE_PATH_STATVFS ? IO_VFS_PATH_STATVFS :
+                       operation == SYSCALL_FILE_CHDIR ? IO_VFS_RESOLVE_CWD :
                        operation == SYSCALL_FILE_PATH_INFO || times ? IO_VFS_PATH_INFO : IO_VFS_STAT_PATH;
         work->flags = (uint32_t)flags | (times ? SYSCALL_STAT_TIME_FIELDS : 0);
         result = user_copy_cstring_from_user((char *)work->data, VFS_PATH_MAX, path, NULL);
@@ -857,6 +887,24 @@ static int64_t user_file_stat_info(uint64_t fd, void *output, bool times)
     spinlock_preempt_enable();
     return result ? result : user_file_finish(USER_STORAGE,
         times ? SYSCALL_FILE_STAT_TIMES : SYSCALL_FILE_STAT_INFO, output, 0, 0);
+}
+
+static int64_t user_file_filesystem_info(uint64_t fd, void *output)
+{
+    if (!output || !user_ptr_range_valid(output, sizeof(syscall_statvfs_t))) return -EFAULT;
+    spinlock_preempt_disable();
+    fd_description_t *description = NULL;
+    int result = user_file_pin(fd, &description);
+    io_request_t *request = NULL;
+    if (!result) result = user_file_create(USER_STORAGE, sizeof(io_vfs_operation_t) + sizeof(syscall_statvfs_t), description, NULL, &request);
+    else fd_description_put(description);
+    if (!result)
+    {
+        ((io_vfs_operation_t *)io_request_buffer(request))->opcode = IO_VFS_STATVFS;
+        result = user_file_submit(USER_STORAGE, request);
+    }
+    spinlock_preempt_enable();
+    return result ? result : user_file_finish(USER_STORAGE, SYSCALL_FILE_STATVFS, output, 0, 0);
 }
 
 static int64_t user_file_metadata(uint32_t operation, uint64_t fd, uint32_t first, uint32_t second)
@@ -968,7 +1016,7 @@ static int64_t user_file_writev(uint64_t fd,const void *input,uint64_t count)
     }
     bool udp=!result && io_udp_description_valid(description);
     if(!result && udp && total>NET_UDP_MAX_PAYLOAD)result=-EMSGSIZE;
-    bool tcp=!result && (io_tcp_description_valid(description) || udp);
+    bool tcp=!result && (io_tcp_description_valid(description) || io_local_description_valid(description) || udp);
     bool pipe=!result && io_pipe_description_valid(description);
     bool audio=!result && io_audio_description_valid(description);
     user_file_service_t kind=tcp?USER_TCP:pipe?USER_PIPE:audio?USER_AUDIO:USER_STORAGE;
@@ -1059,15 +1107,29 @@ static int64_t user_file_message_finish(uint32_t operation, size_t metadata_offs
             if (value >= 0)
             {
                 metadata->message.name_length = 0;
+                size_t control_capacity = metadata->message.control_length;
                 metadata->message.control_length = 0;
                 metadata->message.flags = io_udp_description_valid(io_request_description(request)) &&
                     io_udp_state(request)->packet.length > (uint64_t)value ? 0x20 : 0;
-                if (!user_copy_to_user((void *)(metadata->header + offsetof(syscall_msghdr_t, name_length)),
+                bool local = io_local_description_valid(io_request_description(request));
+                if (local)
+                {
+                    io_local_control_t *control = io_request_cwd(request);
+                    value = io_local_control_install(control, process_current_fd_table(), control_capacity, (flags & (1u << 17)) != 0) ? -EIO : value;
+                    size_t control_bytes = 0; uint32_t control_flags = 0;
+                    const void *control_data = io_local_control_output(control, &control_bytes, &control_flags);
+                    metadata->message.control_length = control_bytes;
+                    metadata->message.flags |= (int32_t)control_flags;
+                    if (value >= 0 && control_bytes && !user_copy_to_user((void *)(uintptr_t)metadata->message.control,
+                        control_data, control_bytes)) value = -EFAULT;
+                }
+                if (value >= 0 && (!user_copy_to_user((void *)(metadata->header + offsetof(syscall_msghdr_t, name_length)),
                                         &metadata->message.name_length, sizeof(metadata->message.name_length)) ||
                     !user_copy_to_user((void *)(metadata->header + offsetof(syscall_msghdr_t, control_length)),
                                         &metadata->message.control_length, sizeof(metadata->message.control_length)) ||
                     !user_copy_to_user((void *)(metadata->header + offsetof(syscall_msghdr_t, flags)),
-                                        &metadata->message.flags, sizeof(metadata->message.flags))) value = -EFAULT;
+                                        &metadata->message.flags, sizeof(metadata->message.flags)))) value = -EFAULT;
+                if (local && value >= 0) io_local_control_commit(io_request_cwd(request));
             }
         }
     }
@@ -1083,14 +1145,16 @@ static int64_t user_file_message(uint32_t operation, uint64_t fd, const void *he
 {
     _Static_assert(sizeof(syscall_msghdr_t) == 56, "native message header");
     bool reading = operation == SYSCALL_FILE_NET_RECVMSG;
-    uint32_t known = reading ? SYSCALL_MSG_PEEK | SYSCALL_MSG_DONTWAIT :
+    uint32_t known = reading ? SYSCALL_MSG_PEEK | SYSCALL_MSG_DONTWAIT | (1u << 17) :
                               SYSCALL_MSG_DONTWAIT | SYSCALL_MSG_NOSIGNAL;
     if (flags & ~known) return -EOPNOTSUPP;
     spinlock_preempt_disable();
     fd_description_t *description = NULL;
     int result = user_file_pin(fd, &description);
     bool udp = !result && io_udp_description_valid(description);
-    if (!result && !io_tcp_description_valid(description) && !udp) result = -ENOTSOCK;
+    bool local = !result && io_local_description_valid(description);
+    if (!result && !io_tcp_description_valid(description) && !udp && !local) result = -ENOTSOCK;
+    if (!result && !local && (flags & (1u << 17))) result = -EOPNOTSUPP;
     user_message_prepare_t *prepare = NULL;
     if (!result)
     {
@@ -1101,7 +1165,7 @@ static int64_t user_file_message(uint32_t operation, uint64_t fd, const void *he
     uint64_t count = prepare ? prepare->message.vector_count : 0;
     if (!result && count > SYSCALL_IOV_MAX) result = -EINVAL;
     if (!result && (prepare->message.name || (!reading && prepare->message.name_length) ||
-                    (!reading && prepare->message.control_length))) result = -EOPNOTSUPP;
+                    (!reading && !local && prepare->message.control_length))) result = -EOPNOTSUPP;
     if (!result && count && !user_copy_from_user(prepare->vectors,
         (const void *)(uintptr_t)prepare->message.vectors, (size_t)count * sizeof(syscall_iovec_t))) result = -EFAULT;
     uint64_t total = 0;
@@ -1116,9 +1180,21 @@ static int64_t user_file_message(uint32_t operation, uint64_t fd, const void *he
     if (udp && capacity > NET_UDP_MAX_PAYLOAD) capacity = NET_UDP_MAX_PAYLOAD;
     size_t bytes = total < capacity ? (size_t)total : capacity;
     size_t metadata_offset = sizeof(io_tcp_operation_t) + ((bytes + 7) & ~(size_t)7);
+    fd_description_t *control_owner = NULL;
+    if (!result && local) result = io_local_control_create(process_fd_retirement_queue(), &control_owner);
+    if (!result && local && !reading && prepare->message.control_length)
+    {
+        size_t control_bytes = prepare->message.control_length;
+        unsigned char *captured = control_bytes <= IO_LOCAL_CONTROL_BYTES ? malloc(control_bytes) : NULL;
+        if (control_bytes > IO_LOCAL_CONTROL_BYTES) result = -EMSGSIZE;
+        else if (!captured) result = -ENOMEM;
+        else if (!user_copy_from_user(captured, (const void *)(uintptr_t)prepare->message.control, control_bytes)) result = -EFAULT;
+        else result = io_local_control_capture(fd_description_context(control_owner), process_current_fd_table(), captured, control_bytes);
+        free(captured);
+    }
     io_request_t *request = NULL;
-    if (!result) result = user_file_create(USER_TCP, metadata_offset + metadata_bytes + (udp ? sizeof(io_udp_state_t) : 0), description, NULL, &request);
-    else fd_description_put(description);
+    if (!result) result = user_file_create(USER_TCP, metadata_offset + metadata_bytes + (udp ? sizeof(io_udp_state_t) : 0), description, control_owner, &request);
+    else { fd_description_put(description); fd_description_put(control_owner); }
     if (!result)
     {
         io_tcp_operation_t *work = io_request_buffer(request);
@@ -1160,7 +1236,7 @@ static int64_t user_file_data(uint32_t operation, uint64_t fd, void *buffer, siz
     bool udp = !result && io_udp_description_valid(description) && (reading || writing || operation == SYSCALL_FILE_SOCKET_AVAILABLE);
     if (!result && !udp && (message_flags & 0x20u)) result = -EOPNOTSUPP;
     if (!result && udp && writing && count > NET_UDP_MAX_PAYLOAD) result = -EMSGSIZE;
-    bool tcp = !result && (io_tcp_description_valid(description) || udp) &&
+    bool tcp = !result && (io_tcp_description_valid(description) || io_local_description_valid(description) || udp) &&
                (reading || writing || operation == SYSCALL_FILE_SOCKET_AVAILABLE);
     if (!result && socket_operation && !tcp) result = -ENOTSOCK;
     bool pipe = !result && io_pipe_description_valid(description) &&
@@ -1506,14 +1582,15 @@ static int64_t user_socket_query_finish(uint32_t operation, void *output, void *
         io_tcp_operation_t *work = io_request_buffer(request);
         io_tcp_query_reply_t *reply = (void *)work->data;
         bool name = operation == SYSCALL_FILE_NET_GETNAME;
-        uint32_t expected = name ? sizeof(reply->address) : sizeof(reply->value);
+        bool local = io_local_description_valid(io_request_description(request));
+        uint32_t expected = name ? (local ? sizeof(uint16_t) : sizeof(reply->address)) : sizeof(reply->value);
         uint32_t copied = capacity < expected ? capacity : expected;
         const void *data = name ? (const void *)&reply->address : (const void *)&reply->value;
         uint32_t returned = name ? expected : copied;
         if (reply->length != expected) value = -EIO;
         else if ((copied && !user_copy_to_user(output, data, copied)) ||
                  !user_copy_to_user(length_output, &returned, sizeof(returned))) value = -EFAULT;
-        else value = io_udp_description_valid(io_request_description(request)) ? 0 : io_tcp_query_commit(io_request_description(request));
+        else value = (local || io_udp_description_valid(io_request_description(request))) ? 0 : io_tcp_query_commit(io_request_description(request));
     }
     (void)process_io_finish_current(result != 0);
     spinlock_preempt_enable();
@@ -1530,7 +1607,7 @@ static int64_t user_socket_query(uint32_t operation, uint64_t fd, void *data, ui
     fd_description_t *description = NULL, *query = NULL;
     int result = user_file_pin(fd, &description);
     bool udp = !result && io_udp_description_valid(description);
-    if (!result && udp) query = description;
+    if (!result && (udp || io_local_description_valid(description))) query = description;
     else if (!result) result = io_tcp_query_create(description, process_fd_retirement_queue(), &query);
     else fd_description_put(description);
     io_request_t *request = NULL;
@@ -1580,6 +1657,41 @@ static int64_t user_pipe_open(void *output, uint64_t flags)
         result = -EFAULT;
     }
     fd_description_put(reader); fd_description_put(writer);
+    spinlock_preempt_enable();
+    return result;
+}
+
+static int64_t user_local_pair(uint64_t domain, uint64_t type, uint64_t protocol, void *output)
+{
+    if (domain != 1) return -EAFNOSUPPORT;
+    if (protocol) return -EPROTONOSUPPORT;
+    if ((type & ~((uint64_t)SYSCALL_OPEN_CLOEXEC | SYSCALL_OPEN_NONBLOCK)) != SYSCALL_SOCK_STREAM) return -EPROTONOSUPPORT;
+    if (!output || !user_ptr_range_valid(output, 2 * sizeof(int32_t))) return -EFAULT;
+    spinlock_preempt_disable();
+    fd_table_t *table = process_current_fd_table();
+    fd_description_t *first = NULL, *second = NULL;
+    int result = table ? io_local_create_pair(process_fd_retirement_queue(), (uint32_t)type & FD_STATUS_NONBLOCK, &first, &second) : -ESRCH;
+    int slots[2] = {-1, -1};
+    if (!result) result = fd_table_install_pair(table, first, second, type & SYSCALL_OPEN_CLOEXEC ? FD_TABLE_CLOEXEC : 0, slots);
+    if (!result && !user_copy_to_user(output, slots, sizeof(slots)))
+    {
+        (void)fd_table_close_if(table, slots[0], first);
+        (void)fd_table_close_if(table, slots[1], second);
+        result = -EFAULT;
+    }
+    fd_description_put(first); fd_description_put(second);
+    spinlock_preempt_enable();
+    return result;
+}
+static int64_t user_local_shutdown(uint64_t fd, uint64_t direction)
+{
+    if (direction > 2) return -EINVAL;
+    spinlock_preempt_disable();
+    fd_description_t *description = NULL;
+    int result = user_file_pin(fd, &description);
+    if (!result) result = io_local_description_valid(description) ? io_local_shutdown(description, (unsigned)direction) :
+        io_tcp_description_valid(description) || io_udp_description_valid(description) ? -EOPNOTSUPP : -ENOTSOCK;
+    fd_description_put(description);
     spinlock_preempt_enable();
     return result;
 }
@@ -1878,6 +1990,16 @@ int64_t io_user_file_dispatch(uint32_t operation, uint64_t first, uint64_t secon
             return user_dns_resolve((const char *)first, (void *)second, third, fourth);
         case SYSCALL_FILE_SOCKET_CONNECT: return user_socket_connect(first, (const char *)second, third);
         case SYSCALL_FILE_SOCKET_AVAILABLE: return user_file_data(operation, first, NULL, 0, 0, 0, 0);
+        case SYSCALL_FILE_STATVFS:
+            if (third != sizeof(syscall_statvfs_t) || fourth) return -EINVAL;
+            return user_file_filesystem_info(first, (void *)second);
+        case SYSCALL_FILE_PATH_STATVFS:
+            if (third != sizeof(syscall_statvfs_t) || fourth) return -EINVAL;
+            return user_path_operation(operation, (const char *)first, (void *)second, 0);
+        case SYSCALL_FILE_NET_PAIR: return user_local_pair(first, second, third, (void *)fourth);
+        case SYSCALL_FILE_NET_SHUTDOWN:
+            if (third || fourth) return -EINVAL;
+            return user_local_shutdown(first, second);
         case SYSCALL_FILE_PIPE: return user_pipe_open((void *)first, second);
         case SYSCALL_FILE_AUDIO_OPEN: return user_audio_open(first);
         case SYSCALL_FILE_AUDIO_WRITE:

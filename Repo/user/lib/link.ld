@@ -1,4 +1,6 @@
-/* Native user VA contract; checked against include/memory_layout.h. */
+/* Native user VA contract; checked against include/memory_layout.h.
+ * The E820-selected kernel heap stays below the 4 GiB identity-map boundary:
+ * at most 1 GiB and one quarter of usable RAM. User addresses remain above it. */
 __alix_user_pointer_base = 0x0000000100000000;
 __alix_user_pointer_limit = 0x00003FFFFFFFFFFF;
 __alix_user_stack_top = 0x0000000140000000;
@@ -39,6 +41,13 @@ SECTIONS
     {
         *(.text*)
         *(.ltext*)
+    } :text
+
+    __lcxx_override : ALIGN(16)
+    {
+        __start___lcxx_override = .;
+        KEEP(*(__lcxx_override))
+        __stop___lcxx_override = .;
     } :text
 
     .rodata : ALIGN(16)
@@ -83,6 +92,7 @@ SECTIONS
     {
         __preinit_array_start = .;
         KEEP(*(.preinit_array.alix_runtime))
+        __alix_runtime_preinit_end = .;
         KEEP(*(.preinit_array))
         __preinit_array_end = .;
     } :data

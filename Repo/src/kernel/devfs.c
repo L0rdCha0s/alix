@@ -49,7 +49,12 @@ static vfs_node_t *devfs_root_node(void)
 
 void devfs_init(void)
 {
-    (void)devfs_root_node();
+    vfs_node_t *directory = devfs_root_node();
+    if (!directory) return;
+    devfs_set_mutable(true);
+    (void)vfs_add_character_device(directory, "random", VFS_CHARACTER_ENTROPY);
+    (void)vfs_add_character_device(directory, "urandom", VFS_CHARACTER_ENTROPY);
+    devfs_set_mutable(false);
 }
 
 /*

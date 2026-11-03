@@ -1,0 +1,35 @@
+--- a/toolkit/mozapps/update/updater/updater.cpp
++++ b/toolkit/mozapps/update/updater/updater.cpp
+@@ -124,7 +124,10 @@
+
+ // We want to use execv to invoke the callback executable on platforms where
+ // we were launched using execv.  See nsUpdateDriver.cpp.
+-#if defined(XP_UNIX) && !defined(XP_MACOSX)
++#if defined(__ALIX__)
++#  include <spawn.h>
++#  include <alix_process.h>
++#elif defined(XP_UNIX) && !defined(XP_MACOSX)
+ #  define USE_EXECV
+ #endif
+
+@@ -2768,7 +2771,19 @@
+     LOG(("Warning: chdir failed"));
+   }
+
+-#if defined(USE_EXECV)
++#if defined(__ALIX__)
++  char** environment = alix_environment_copy();
++  if (!environment) {
++    LOG(("LaunchCallbackApp: cannot copy environment"));
++    return;
++  }
++  pid_t child;
++  int error = posix_spawn(&child, argv[0], nullptr, nullptr, argv, environment);
++  alix_environment_free(environment);
++  if (error) {
++    LOG(("LaunchCallbackApp: posix_spawn failed: %d", error));
++  }
++#elif defined(USE_EXECV)
+   execv(argv[0], argv);
+ #elif defined(XP_MACOSX)
+   LaunchMacApp(argc, (const char**)argv, gCallbackWaitPid);

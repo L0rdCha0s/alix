@@ -19,6 +19,12 @@ This kernel has four major memory layers:
 
 `kernel_entry_main` computes/adjusts parts of this layout from the E820 map in `boot_info`.
 
+The kernel heap target is capped at 1 GiB and one quarter of usable E820 RAM,
+rounded down to 2 MiB. Region selection preserves the 16 MiB minimum and keeps
+the heap inside available RAM below the 4 GiB identity-map boundary, excluding
+the framebuffer. Its actual reservation remains excluded from PMM/user backing.
+The user virtual-address contract in both linker scripts is unchanged.
+
 ## Kernel Heap (`src/kernel/heap.c`)
 
 The heap is a bin-based allocator with:

@@ -9,12 +9,15 @@ extern char __bss_end[];
 /* This statically linked executable is its own C++ destructor registration
  * domain; no host crtbegin.o is linked into an Alix application. */
 void *__dso_handle __attribute__((visibility("hidden"))) = &__dso_handle;
+const unsigned __alix_startup_loader_abi __attribute__((visibility("default"))) = 1;
 
 typedef void (*runtime_hook_t)(void);
 extern runtime_hook_t __preinit_array_start[];
+extern runtime_hook_t __alix_runtime_preinit_end[];
 extern runtime_hook_t __preinit_array_end[];
 extern runtime_hook_t __init_array_start[];
 extern runtime_hook_t __init_array_end[];
+extern int __alix_dynamic_startup(int initialize) __attribute__((weak));
 
 void _start(uint64_t argc, char **argv, char **environment)
 {
@@ -26,10 +29,16 @@ void _start(uint64_t argc, char **argv, char **environment)
 
     if (__alix_environment_initialize(environment) != 0) sys_exit(127);
     /* ELF constructors run only after BSS and libc globals are initialized. */
-    for (runtime_hook_t *hook = __preinit_array_start; hook < __preinit_array_end; ++hook)
+    for (runtime_hook_t *hook = __preinit_array_start; hook < __alix_runtime_preinit_end; ++hook)
     {
         (*hook)();
     }
+    if (__alix_dynamic_startup && __alix_dynamic_startup(0)) sys_exit(127);
+    for (runtime_hook_t *hook = __alix_runtime_preinit_end; hook < __preinit_array_end; ++hook)
+    {
+        (*hook)();
+    }
+    if (__alix_dynamic_startup && __alix_dynamic_startup(1)) sys_exit(127);
     for (runtime_hook_t *hook = __init_array_start; hook < __init_array_end; ++hook)
     {
         (*hook)();

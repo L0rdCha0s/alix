@@ -38,6 +38,15 @@ The normal build packages the vendored, hash-pinned files without network
 access. See [system font assets](../../vendor/fonts/README.md) for the inventory,
 source revisions and Gecko integration boundary.
 
+Boot also seeds `/usr/bin/dl-zen.sh` from the repository's `dl-zen.sh`. With
+`./serve-dl.sh` running on the host, run `./dl-zen.sh` from `/usr/bin` (or
+`/usr/bin/dl-zen.sh` from anywhere) to install `build/ports/zen/zen-browser.zip`
+into `/usr/lib/zen`, together with the system fonts. It bootstraps its own
+unzip executable, so it can run before `dl.sh`. Close Zen before updating;
+start it afterward with the desktop Browser tile or `runelf /usr/lib/zen/zen`.
+See [Zen installation](../zen_port.md#installing-and-launching-zen) for host
+build and packaging instructions.
+
 The full `build/` tree is never exported to QEMU. Its debug symbols, object
 files, ports and test output can grow beyond virtual FAT16's capacity without
 affecting boot. The staged files refresh when the kernel or loader changes.

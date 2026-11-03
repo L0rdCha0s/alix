@@ -2,6 +2,8 @@
 #include "stdio.h"
 #include "sys/stat.h"
 #include "serial.h"
+#include "unistd.h"
+#include "errno.h"
 
 #ifndef UNZIP_TRACE
 #define UNZIP_TRACE 1
@@ -327,6 +329,17 @@ static bool shell_mkdir(int shell_handle, const char *path)
     {
         return false;
     }
+
+    /* /usr is a directory symlink on Alix. Check the resolved existing
+     * directory before asking mkdir to create a node with that name. */
+    struct stat *metadata = malloc(sizeof(*metadata));
+    if (!metadata) return false;
+    int result = stat(path, metadata);
+    int error = errno;
+    bool directory = result == 0 && S_ISDIR(metadata->st_mode);
+    free(metadata);
+    if (result == 0) return directory;
+    if (error != ENOENT) return false;
 
     size_t path_len = strlen(path);
     size_t cmd_len = sizeof("mkdir ") - 1 + path_len;
@@ -1326,19 +1339,22 @@ static bool zip_extract_entry(const uint8_t *zip_data,
 
 static void usage(void)
 {
-    printf("usage: unzip <zip-file> [output-dir]\n");
+    printf("usage: unzip [--discard-archive] <zip-file> [output-dir]\n");
 }
 
 int main(int argc, char **argv)
 {
-    if (argc < 2)
+    int input = 1;
+    bool discard_archive = argc > 1 && strcmp(argv[1], "--discard-archive") == 0;
+    if (discard_archive) ++input;
+    if (argc <= input)
     {
         usage();
         return 1;
     }
 
-    const char *zip_path = argv[1];
-    const char *out_dir = (argc >= 3) ? argv[2] : ".";
+    const char *zip_path = argv[input];
+    const char *out_dir = argc > input + 1 ? argv[input + 1] : ".";
     UNZIP_LOG("start zip=%s out=%s", zip_path, out_dir);
 
     int shell_handle = sys_shell_open();
@@ -1444,6 +1460,14 @@ int main(int argc, char **argv)
     if ((size_t)cd_offset + (size_t)cd_size > zip_size)
     {
         printf("unzip: central directory out of range\n");
+        free(zip_data);
+        sys_shell_close(shell_handle);
+        return 1;
+    }
+
+    if (discard_archive && unlink(zip_path) != 0)
+    {
+        printf("unzip: unable to discard loaded archive %s\n", zip_path);
         free(zip_data);
         sys_shell_close(shell_handle);
         return 1;

@@ -58,8 +58,8 @@ transport state. Concurrent readers cannot all consume the same error.
 
 `sys/socket.h`, `netinet/in.h`, `netinet/tcp.h`, `arpa/inet.h` and `sys/uio.h`
 declare the native types and intended API. Remaining socket options, TCP
-bind/listen/accept, shutdown and complete half-close behavior, local sockets,
-descriptor passing, POSIX addressed/ancillary messages and signal-aware
+bind/listen/accept, TCP shutdown and complete TCP half-close behavior,
+named local sockets, POSIX addressed messages and signal-aware
 data-I/O interruption remain required work. Unsupported server/local/half-close
 entry points now report their standard failure path, validating an existing
 owned socket where applicable. They do not return success or alter outputs.
@@ -74,6 +74,24 @@ send; failed receive copies may leave a prefix and the stream read can already
 have consumed bytes. PEEK, per-call DONTWAIT, empty vectors, EOF and NOSIGNAL use
 the existing TCP policies. Unsupported destination addresses and sent ancillary
 data fail before I/O. Receiver ancillary output is empty for this TCP backend.
+Native `AF_UNIX` stream socket pairs use two kernel-owned byte rings and the
+existing readiness executor. NONBLOCK/CLOEXEC publication, read/write/send/recv,
+poll/select, socket queries and local half-close operate on the same retained
+descriptions across dup and native spawn. `sendmsg` captures SCM_RIGHTS into a
+deferred ownership record before submission. The stream retains those references;
+the receiving caller installs descriptors in its own table, honors
+MSG_CMSG_CLOEXEC, reports truncated control data, and rolls back newly installed
+slots on failed copyout. Workers never dereference caller addresses. Local
+socket naming/listening and collection of unreachable descriptor-passing cycles
+remain separate work. The actual Gecko parent now passes socket-pair creation
+and launches its native socket subprocess; full browser startup remains ongoing.
+
+Nonblocking local reads/writes and message operations execute their bounded
+ring-buffer step in the calling syscall. Their registered request is completed
+without an executor round trip; payloads, descriptor references and failed-copy
+rollback still use the same request-owned records and deferred cleanup. Blocking
+operations and poll/select continue to use the readiness executor.
+
 The initial IPv4 DNS/netdb layer now has native lookup, ownership and cancellation
 evidence; see [resolver.md](resolver.md) for capability and verification limits.
 

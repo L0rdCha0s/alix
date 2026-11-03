@@ -539,7 +539,7 @@ static void ensure_system_layout(void)
 
     if (!dl_script_install_default())
     {
-        serial_printf("%s", "[alix] warn: unable to install dl.sh\r\n");
+        serial_printf("%s", "[alix] warn: unable to install download scripts");
     }
 
 
@@ -605,7 +605,7 @@ static void mount_default_fstab(void)
                       (unsigned long long)(timer_monotonic_millis() - mount_start_ms));
         if (!mounted)
         {
-            serial_printf("[alix] fstab: mount failed for %s -> %s; leaving disk unchanged (mkfs must be requested explicitly)",
+            serial_printf("[alix] fstab: mount failed for %s -> %s; not formatting disk (mkfs must be requested explicitly)",
                           entry->device_name, entry->mount_path);
             ensure_system_layout(); /* usable RAM-backed shell on an unformatted disk */
             vfs_set_subtree_mutable(mount_point, true);

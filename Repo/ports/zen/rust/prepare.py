@@ -22,7 +22,7 @@ def rust_info():
     host = next(line.split(": ", 1)[1] for line in info.splitlines() if line.startswith("host: "))
     return root, host
 
-def prepare():
+def prepare(sysroot=SYSROOT):
     installed, host = rust_info()
     original = installed / "lib/rustlib/src/rust/library"
     if not (original / "std/src/lib.rs").is_file():
@@ -38,7 +38,7 @@ def prepare():
                 return {"library"} if Path(directory) == original else set()
             shutil.copytree(original, stage / "library", copy_function=shutil.copyfile, ignore=ignore)
             stage.rename(SOURCE)
-    rustlib = SYSROOT / "lib/rustlib"
+    rustlib = sysroot / "lib/rustlib"
     rustlib.mkdir(parents=True, exist_ok=True)
     for name in (host, "etc"):
         destination = rustlib / name
@@ -48,7 +48,7 @@ def prepare():
     destination = rustsrc / "rust"
     if not destination.exists(): destination.symlink_to(SOURCE, target_is_directory=True)
     apply_overlay()
-    return SOURCE, SYSROOT
+    return SOURCE, sysroot
 
 def apply_overlay():
     state_path = SOURCE / ".alix-overlay.json"

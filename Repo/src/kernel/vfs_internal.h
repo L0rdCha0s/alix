@@ -40,6 +40,12 @@ struct vfs_node
     uint64_t last_data_write_tick;
     spinlock_t data_lock;
     struct vfs_mapped_page *mapped_pages;
+    struct vfs_mapped_page **mapped_page_index;
+    size_t mapped_page_capacity;
+    size_t mapped_writers;
+    struct vfs_node *mapped_writer_next;
+    struct vfs_node *writeback_next;
+    bool writeback_queued;
     struct vfs_file_mapping *mappings;
     struct io_pipe *fifo;
 
@@ -49,6 +55,7 @@ struct vfs_node
     bool disk_data_dirty;
 
     block_device_t *block_device;
+    uint32_t character_kind;
     bool dirty;
 
     vfs_read_cb_t read_cb;
@@ -66,6 +73,8 @@ struct vfs_mount
     bool supports_times;
     size_t dirty_bytes;
     size_t mapped_files; /* Shared page caches scanned for CPU stores by flushd. */
+    struct vfs_node *mapped_writer_head;
+    struct vfs_node *writeback_head;
     size_t dirty_bytes_limit;
     uint64_t dirty_seq;
     spinlock_t dirty_lock;
@@ -75,5 +84,8 @@ struct vfs_mount
     uint64_t sync_owner_ticks;
     struct alixfs_mount *backend;
 };
+
+/* Queue ownership is a node reference. Safe with node data_lock held. */
+void vfs_queue_dirty_node(vfs_node_t *node);
 
 #endif /* VFS_INTERNAL_H */

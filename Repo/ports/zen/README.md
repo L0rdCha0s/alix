@@ -1,7 +1,7 @@
 # Native upstream engine build
 
 The pinned Firefox 159 standalone SpiderMonkey shell now passes native runtime
-smoke tests for **Alix**. The current phase is Gecko, followed by Zen. The source is not configured as Linux and
+smoke tests for **Alix**. Native Gecko now runs in Alix QEMU: upstream browser chrome, local/HTTP HTML and CSS, mouse/keyboard input, and interactive JavaScript are verified. The Zen 1.24b application now completes a full native Alix build, including the updater and process helpers; actual Zen GUI execution is still pending. The source is not configured as Linux and
 does not use host C/C++ archives. Successful configuration or small runtime
 fixtures do not establish that SpiderMonkey or Zen runs.
 

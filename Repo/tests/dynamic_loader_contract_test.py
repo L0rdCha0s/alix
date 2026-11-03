@@ -17,6 +17,7 @@ body=function_definition(source,'static bool dl_call(')
 source=source.replace(body,'static bool dl_call(uintptr_t address) { if (!dl_callable(address)) return false; if (address && address != UINTPTR_MAX) ++callbacks; return true; }',1)
 source=source.replace('static bool dl_startup_done;','')
 source=source.replace('__asm__ volatile("movq %%fs:8,%0" : "=r"(base));','base=(uintptr_t)model_static_tls;')
+source=source.replace('__asm__ volatile("movq %%fs:0,%0\\n\\tmovq %%fs:8,%1" : "=r"(tp), "=r"(block));', 'tp=(uintptr_t)model_static_tls; block=(uintptr_t)model_static_tls;')
 assert '__asm__' not in source
 for name in ('dlopen','dlclose','dlsym','dlvsym','dlerror','dladdr','__tls_get_addr','dl_iterate_phdr'):
     source=re.sub(r'\b'+name+r'\b','model_'+name,source)
@@ -45,6 +46,7 @@ static void alix_mutex_lock(alix_mutex_t *m){while(atomic_exchange_explicit(&m->
 static void alix_mutex_unlock(alix_mutex_t *m){atomic_store_explicit(&m->state,0,memory_order_release);}
 static unsigned allocations,calls,fail_at,callbacks;
 static unsigned live_files;
+static void sys_serial_write(const char *data,size_t bytes){(void)data;(void)bytes;}
 static bool injected;
 static unsigned char model_static_tls[16384];
 static bool step(void){++calls;if(calls==fail_at){injected=true;errno=ENOMEM;return true;}return false;}
@@ -61,13 +63,25 @@ static int checked_close(int fd){CHECK(live_files);--live_files;return close(fd)
 typedef struct {void *data;size_t bytes;} mapping;
 static mapping mappings[1024];static unsigned live_maps;static bool fail_unmap;
 #define MAP_FAILED ((void*)-1)
+#define MAP_SHARED 1
 #define MAP_PRIVATE 2
+#define MAP_FIXED 16
 #define MAP_ANONYMOUS 32
 #define PROT_NONE 0
 #define PROT_READ 1
 #define PROT_WRITE 2
 #define PROT_EXEC 4
 static void *model_mmap(void *where,size_t n,int prot,int flags,int fd,int64_t offset){
+    if(where){
+        CHECK((flags== (MAP_SHARED|MAP_FIXED) || flags==(MAP_PRIVATE|MAP_FIXED)) && fd>=0 && offset>=0);
+        bool owned=false;
+        for(unsigned i=0;i<1024;++i)if(mappings[i].data && (uintptr_t)where>=(uintptr_t)mappings[i].data &&
+            (uintptr_t)where-(uintptr_t)mappings[i].data<=mappings[i].bytes && n<=mappings[i].bytes-((uintptr_t)where-(uintptr_t)mappings[i].data))owned=true;
+        CHECK(owned); if(step())return MAP_FAILED;
+        size_t done=0;
+        while(done<n){ssize_t got=checked_pread(fd,(char*)where+done,n-done,offset+done);if(got<0)return MAP_FAILED;if(!got)break;done+=(size_t)got;}
+        memset((char*)where+done,0,n-done);return where;
+    }
     CHECK(!where&&prot==0&&flags==(MAP_PRIVATE|MAP_ANONYMOUS)&&fd==-1&&!offset);
     void *data=owned_calloc(1,n);if(!data)return MAP_FAILED;
     for(unsigned i=0;i<1024;++i)if(!mappings[i].data){mappings[i]=(mapping){data,n};++live_maps;return data;}abort();

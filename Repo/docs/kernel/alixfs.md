@@ -47,7 +47,7 @@ Key fields:
 
 - `magic[8]`: `"ALIXFS2"`
 - `version`: currently `4` (version `2` is accepted for legacy mounts without ownership metadata; version `3` omits timestamps)
-- `node_capacity`: fixed number of chunk table entries (default `4096` at format time)
+- `node_capacity`: number of chunk table entries (default `65536` at format time; smaller legacy tables grow to this capacity on mount when space and memory permit)
 - `node_count`: count of allocated node IDs (best-effort bookkeeping)
 - `root_id`: chunk table ID for the mount root
 - `free_chunk_count` + `free_chunks[]`: free list of released payload spans
@@ -55,7 +55,13 @@ Key fields:
 
 Notes:
 
-- `node_capacity` is fixed; AlixFS2 does not currently grow the chunk table.
+- The table remains fixed during a mounted session. Mounting an older volume
+  expands a smaller table to `65536` entries without reformatting or changing
+  existing node IDs, record versions, names or file contents. Relocation uses
+  a heap-owned 64 KiB buffer. Payloads overlapping the enlarged table move to
+  reserved tail space; their original-table pointers are flushed before the
+  extension is written, and the new capacity is published last. A volume
+  without enough tail space or scratch memory keeps its original capacity.
 - The free list is capped (`ALIXFS2_MAX_FREE_CHUNKS`); if it fills up, additional frees may be dropped (space leak until reformat).
 
 ## Chunk Table (`alixfs2_chunk_entry_t`)
@@ -117,13 +123,16 @@ Mounting is initiated by VFS:
 1. Read and validate the on-disk header.
 2. Read the chunk table into `fs->chunks`.
 3. For each chunk entry with `capacity != 0`:
-   - Read `entry->length` bytes from `entry->offset`
+   - Read the record header, name and optional mode extension
    - Parse the payload header and create/initialise a `vfs_node_t`
+   - Read file and symlink contents into their final owned buffers in bounded chunks
    - Retain `parent_id` in mount-only heap metadata
 4. Link nodes into the VFS tree using the retained parent IDs, without more disk reads.
 
-Mount reads share a 64 KiB, sector-aligned read-ahead window for small adjacent
-records. Larger records bypass it. The window is clipped to the device boundary;
+Mount reads share a 64 KiB, sector-aligned read-ahead window for adjacent
+metadata and payload chunks. Large files no longer require a second file-sized
+temporary allocation. Symlink targets use the same buffer-loading path as files.
+The window is clipped to the device boundary;
 failed speculative reads fall back to the requested record. All scratch memory
 is heap-owned and released before mount returns. This avoids thousands of tiny
 AHCI requests and the former second read of every complete file payload.
@@ -142,6 +151,12 @@ parent ID from another mounted filesystem. Older records containing their
 former mount name remain readable without renaming the destination directory.
 The serialized-length calculation uses the same root-name policy as the
 payload writer, including metadata-only updates.
+
+`statvfs` and the owned-descriptor `fstatvfs` report AlixFS data-block capacity,
+free blocks (unused tail plus tracked free chunks), fixed inode capacity and
+currently unused inode slots. VFS serializes the snapshot with mount writeback
+and supplies the same filesystem identity used by `stat`. There are no reserved
+user blocks or inode slots. Memory-only VFS trees currently return `ENOTSUP`.
 
 `tests/alixfs_mount_root_contract_test.py` executes the complete backend with a
 memory block device, old named roots, file payload readback, foreign parent IDs
@@ -186,6 +201,12 @@ Design note: payload writes happen before the chunk table entry is persisted, wh
 Node IDs are indices into the chunk table. A node ID is considered free when `chunks[id].capacity == 0`.
 
 `alixfs_assign_node_id` uses a simple “next hint then wraparound” scan to find a free entry.
+
+Legacy 4096-entry tables can exhaust node IDs while gigabytes of data space
+remain free. The mount-time expansion handles those volumes. If writeback
+still fails (for example, a full device or failed IO), VFS backpressure returns
+an error to a blocked writer rather than retrying indefinitely at its 64 MiB
+dirty-data limit. Existing dirty records remain available for a sync retry.
 
 ### Payload chunk allocation
 

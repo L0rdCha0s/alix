@@ -56,6 +56,7 @@ typedef struct
 #define SYSCALL_MAX_PATH_LEN     4096u
 #define SYSCALL_MAX_COMMAND_LEN  4096u
 #define SYSCALL_MAX_SERIAL_BYTES 4096u
+#define SYSCALL_MAX_COPY_BYTES   65536u
 #define SYSCALL_MAX_IP_TEXT_LEN  256u
 #define SYSCALL_MAX_PROMPT_LEN   256u
 
@@ -639,12 +640,14 @@ static ssize_t syscall_file_pread(void *ctx, void *buffer, size_t count, size_t 
     {
         return -1;
     }
+    if (vfs_node_type(handle->node) == VFS_NODE_CHARACTER) return -ESPIPE;
     return vfs_read_at(handle->node, offset, buffer, count);
 }
 
 static int64_t syscall_file_lseek(void *ctx, int64_t offset, int whence)
 {
     file_handle_t *handle = (file_handle_t *)ctx;
+    if (handle && vfs_node_type(handle->node) == VFS_NODE_CHARACTER) return -ESPIPE;
     if (!handle || !handle->node)
     {
         return -1;
@@ -718,6 +721,10 @@ static int64_t syscall_do_write(uint64_t fd, const void *buffer, size_t count)
     {
         return -1;
     }
+    if (count > SYSCALL_MAX_COPY_BYTES)
+    {
+        count = SYSCALL_MAX_COPY_BYTES;
+    }
     if (!user_ptr_range_valid(buffer, count))
     {
         return -1;
@@ -747,6 +754,10 @@ static int64_t syscall_do_read(uint64_t fd, void *buffer, size_t count)
     if (!buffer)
     {
         return -1;
+    }
+    if (count > SYSCALL_MAX_COPY_BYTES)
+    {
+        count = SYSCALL_MAX_COPY_BYTES;
     }
     if (!user_ptr_range_valid(buffer, count))
     {

@@ -8,6 +8,8 @@ bool vfs_mapping_write_allowed(const vfs_node_t *node);
  * and all page metadata. owner stays alive until release unlinks the registry. */
 int vfs_mapping_create(vfs_node_t *node, uint64_t offset, size_t length,
                        bool shared, fd_description_t *owner, vfs_file_mapping_t **out);
+int vfs_mapping_create_access(vfs_node_t *node, uint64_t offset, size_t length,
+                       bool shared, bool writable, fd_description_t *owner, vfs_file_mapping_t **out);
 void vfs_mapping_release(vfs_file_mapping_t *mapping);
 paddr_t vfs_mapping_page(const vfs_file_mapping_t *mapping, size_t index);
 int vfs_mapping_sync(vfs_file_mapping_t *mapping);

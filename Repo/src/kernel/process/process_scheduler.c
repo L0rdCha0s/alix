@@ -69,7 +69,11 @@ static inline bool scheduler_saved_rip_valid(const thread_t *thread, uint64_t ri
 
 static bool scheduler_stack_make_writable(thread_t *thread, const char *context)
 {
-#if ENABLE_STACK_WRITE_DEBUG || ENABLE_CONTEXT_GUARD
+    /* Context hashes do not write-protect stacks. Only the optional page
+     * protection modes require a per-switch permission/TLB repair. Walking
+     * every kernel-stack PTE here serialized all CPUs on paging_lock even
+     * with both protection modes disabled. */
+#if ENABLE_STACK_WRITE_DEBUG || (ENABLE_CONTEXT_GUARD && ENABLE_STACK_GUARD_PROTECT)
     if (!thread || !thread->stack_base || thread->kernel_stack_top == 0)
     {
         return true;
@@ -140,7 +144,7 @@ static inline run_queue_t *scheduler_run_queue(uint32_t cpu_index)
 
 static uint32_t g_ui_cpu_index = RUN_QUEUE_CPU_INVALID;
 
-/* A required CPU is a placement constraint, unlike the default PID-based
+/* A required CPU is a placement constraint, unlike the default TID-based
  * distribution policy. Explicit affinity takes precedence over the UI pin. */
 static uint32_t scheduler_required_cpu(const thread_t *thread)
 {
@@ -700,12 +704,12 @@ uint32_t scheduler_select_target_cpu(thread_t *thread)
         return ui_cpu;
     }
 
-    /* Spread work; hash by pid for stability, otherwise random. Avoid the UI CPU for
+    /* Spread threads by stable TID, otherwise random. Avoid the UI CPU for
        non-UI work when we have more than one CPU online. */
     uint32_t start = 0;
-    if (thread && thread->process)
+    if (thread)
     {
-        start = (uint32_t)(thread->process->pid % (uint64_t)limit);
+        start = (uint32_t)(thread->tid % (uint64_t)limit);
     }
     else
     {
@@ -2157,6 +2161,14 @@ bool process_threads_quiescent_locked(process_t *process)
 
 static void process_reap_orphans(void)
 {
+    /* This maintenance scan is global, not per CPU/context switch. Coalesce
+     * simultaneous requests to one sweep per timer tick; process wait/join
+     * retains its independent exact completion path. */
+    static uint64_t next_sweep;
+    uint64_t now = timer_ticks();
+    uint64_t expected = __atomic_load_n(&next_sweep, __ATOMIC_RELAXED);
+    if (now < expected || !__atomic_compare_exchange_n(&next_sweep, &expected,
+            now + 1, false, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) return;
     while (1)
     {
         process_t *target = NULL;

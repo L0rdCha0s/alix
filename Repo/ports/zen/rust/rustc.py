@@ -5,7 +5,8 @@ from pathlib import Path
 import shutil
 import sys
 
-sysroot = Path(__file__).resolve().parents[1] / "upstream/rust-alix-sysroot"
+sysroot = Path(os.environ.get("ALIX_RUST_SYSROOT", str(
+    Path(__file__).resolve().parents[1] / "upstream/rust-alix-sysroot"))).resolve()
 default_specification = Path(__file__).resolve().with_name("x86_64-unknown-alix.json")
 specification = Path(os.environ.get("RUST_TARGET_SPEC", str(default_specification))).resolve()
 if specification.name != default_specification.name or not specification.is_file():

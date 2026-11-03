@@ -16,6 +16,16 @@ and returns the physical display dimensions. Unsupported versions return
 return negative errno values. The low-level syscall wrappers return those
 values directly.
 
+`USER_ATK_CONTROL_WORK_AREA` also uses handle zero and reports the desktop
+rectangle below the menu bar. Supplying `USER_ATK_STATE_CHROME` reserves native
+window borders and the title bar as well, returning the client rectangle that
+fits a maximized decorated window. Gecko uses the outer work area for its screen
+service and the frame-adjusted client area when maximizing.
+
+Focus and mouse capture boost the application's main thread, rather than all
+of its workers. Background rendering/IPC threads keep their normal priority so
+they cannot collectively starve the kernel I/O workers on which the UI waits.
+
 Bounds allow off-screen positions within +/-1,048,576 pixels and client
 dimensions from 1 to 16,384 pixels. Actual allocation can fail with `-ENOMEM`.
 Allocation/image-binding failure preserves the previous surface and geometry.
@@ -33,9 +43,11 @@ one or zero; programmatic client moves enqueue `USER_ATK_EVENT_MOVE` with screen
 coordinates. Existing resize events report committed client dimensions.
 
 Create, control, present, close, capture and nonblocking event polling protect
-temporary ownership from caller abandonment. Presentation and resize use the
-same ATK-state-then-pixel lock order: a front surface cannot be released between
-the pointer swap and image binding. Concurrent closes unlink and release list
+temporary ownership from caller abandonment. Presenters serialize per window and copy into the back surface under its pixel
+lock, outside the global ATK state lock. Publication and resize retain the
+ATK-state-then-pixel lock order: a front surface cannot be released between the
+pointer swap and image binding. A surface generation prevents an old-sized
+frame from being published after a concurrent resize. Concurrent closes unlink and release list
 ownership once, preserving sibling windows. Handles are owned by the creating
 process; inheriting the integer through argv does not grant another process
 access. Existing legacy blocking UI waits retain their previous implementation.
@@ -54,6 +66,21 @@ The existing MP3 GUI also passes a fresh 20-second continuous-tone capture plus
 restart, pause/resume, seek and clean close after the surface-locking change;
 see `build/test-out/audio-widget-controls-paced-long/result.json`.
 
-These checks establish the Alix window boundary. The Gecko widget/event-loop
-adapter is now selected and full configuration succeeds; compilation and runtime
-validation of that adapter and the complete browser remain unfinished.
+These earlier checks establish the Alix window boundary. The actual Gecko
+adapter now compiles, links and displays the upstream browser chrome in Alix.
+Native Zen now renders local content and executes interactive JavaScript;
+remaining painting defects are recorded in docs/zen_port.md.
+
+### Input idle time
+
+`USER_ATK_CONTROL_INPUT_IDLE` is a handle-0 query using the existing 104-byte
+control record. Flags and reserved fields must be zero. The `idle_milliseconds`
+alias shares the width field's offset and returns time since keyboard activity
+or a meaningful mouse packet, clamped to UINT32_MAX. Repeated zero-motion mouse
+reports do not reset the timer. Recording uses an atomic maximum of monotonic
+time, so input arriving on different CPUs cannot move the timestamp backward.
+The query does not retain a user buffer or depend on a particular window.
+
+Alix's Gecko idle-service provider uses this query for the standard
+`@mozilla.org/widget/useridleservice;1` contract needed by session saving.
+Fresh-profile execution of the new provider is the next runtime checkpoint.

@@ -1,7 +1,9 @@
 #include "user_atk_host.h"
+#include "input_activity.h"
 
 #include "atk_internal.h"
 #include "atk_window.h"
+#include "atk_menu_bar.h"
 #include "atk/atk_image.h"
 #include "heap.h"
 #include "libc.h"
@@ -37,6 +39,8 @@ typedef struct user_atk_window
     bool destroying;
     bool listed;
     spinlock_t pixel_lock;
+    spinlock_t presentation_lock;
+    uint64_t surface_generation;
     user_atk_event_t events[USER_ATK_EVENT_QUEUE_MAX];
     size_t event_head;
     size_t event_tail;
@@ -146,12 +150,12 @@ void user_atk_init(void)
     g_capture_relative = false;
     if (g_focus_priority_owner)
     {
-        process_clear_priority_override(g_focus_priority_owner);
+        process_set_main_thread_priority_override(g_focus_priority_owner, false, THREAD_PRIORITY_NORMAL);
         g_focus_priority_owner = NULL;
     }
     if (g_capture_priority_owner)
     {
-        process_clear_priority_override(g_capture_priority_owner);
+        process_set_main_thread_priority_override(g_capture_priority_owner, false, THREAD_PRIORITY_NORMAL);
         g_capture_priority_owner = NULL;
     }
     spinlock_init(&g_windows_lock);
@@ -319,6 +323,7 @@ static bool user_atk_resize_window(user_atk_window_t *win)
         win->stride_bytes = new_width * (int)sizeof(video_color_t);
         win->content_width = new_width;
         win->content_height = new_height;
+        ++win->surface_generation;
         spinlock_unlock(&win->pixel_lock);
         if (old_front)
         {
@@ -945,6 +950,8 @@ static int64_t user_atk_create_impl(const user_atk_window_desc_t *desc_user)
     win->closed = false;
     win->destroying = false;
     spinlock_init(&win->pixel_lock);
+    spinlock_init(&win->presentation_lock);
+    win->surface_generation = 1;
     win->event_head = 0;
     win->event_tail = 0;
     win->event_count = 0;
@@ -971,34 +978,46 @@ int64_t user_atk_sys_present(uint32_t handle, const video_color_t *pixels, size_
     int64_t result = -1;
     if (win)
     {
-        /* Match resize/destroy order. Holding the state lock through the swap
-         * and image update prevents a renderer using a freed previous surface. */
-        uint64_t irq_state = atk_state_lock_acquire();
+        /* Serialize presenters per window. Copy the potentially multi-megabyte
+         * surface without the global ATK state lock/IRQ disable, so input and
+         * other windows can continue. pixel_lock pins the back surface while
+         * it is copied; resize/destroy use that same lock before releasing it. */
+        spinlock_lock(&win->presentation_lock);
         spinlock_lock(&win->pixel_lock);
-        if (!win->closed && win->window && win->image && win->pixels)
+        video_color_t *destination = win->back_pixels;
+        uint64_t generation = win->surface_generation;
+        bool copied = false;
+        if (destination && win->pixels)
         {
             size_t bytes = byte_len < win->pixel_bytes ? byte_len : win->pixel_bytes;
-            video_color_t *destination = win->back_pixels ? win->back_pixels : win->pixels;
             if (!bytes || user_copy_from_user(destination, pixels, bytes))
             {
                 if (bytes < win->pixel_bytes)
                     memset((uint8_t *)destination + bytes, 0, win->pixel_bytes - bytes);
-                if (win->back_pixels)
-                {
-                    win->back_pixels = win->pixels;
-                    win->pixels = destination;
-                }
-                if (atk_image_set_pixels(win->image, win->pixels, win->content_width,
+                copied = true;
+            }
+        }
+        spinlock_unlock(&win->pixel_lock);
+        /* Publish only under the established state -> pixel lock order. A
+         * resized surface supersedes the frame copied for the old geometry. */
+        uint64_t irq_state = atk_state_lock_acquire();
+        spinlock_lock(&win->pixel_lock);
+        if (copied && !win->closed && win->window && win->image && win->pixels)
+        {
+            if (generation != win->surface_generation || destination != win->back_pixels) result = 0;
+            else if (atk_image_set_pixels(win->image, destination, win->content_width,
                                            win->content_height, win->stride_bytes, false))
-                {
-                    atk_window_mark_dirty(win->window);
-                    video_request_refresh_window(win->window);
-                    result = 0;
-                }
+            {
+                win->back_pixels = win->pixels;
+                win->pixels = destination;
+                atk_window_mark_dirty(win->window);
+                video_request_refresh_window(win->window);
+                result = 0;
             }
         }
         spinlock_unlock(&win->pixel_lock);
         atk_state_lock_release(irq_state);
+        spinlock_unlock(&win->presentation_lock);
         user_atk_window_release(win);
     }
     spinlock_preempt_enable();
@@ -1404,12 +1423,12 @@ static void user_atk_apply_priorities(void)
     {
         if (g_capture_priority_owner == focus_owner)
         {
-            process_set_priority_override(g_capture_priority_owner, THREAD_PRIORITY_HIGH);
+            process_set_main_thread_priority_override(g_capture_priority_owner, true, THREAD_PRIORITY_HIGH);
             g_focus_priority_owner = g_capture_priority_owner;
         }
         else
         {
-            process_clear_priority_override(g_capture_priority_owner);
+            process_set_main_thread_priority_override(g_capture_priority_owner, false, THREAD_PRIORITY_NORMAL);
         }
         g_capture_priority_owner = NULL;
     }
@@ -1418,13 +1437,13 @@ static void user_atk_apply_priorities(void)
         g_focus_priority_owner != focus_owner &&
         g_focus_priority_owner != capture_owner)
     {
-        process_clear_priority_override(g_focus_priority_owner);
+        process_set_main_thread_priority_override(g_focus_priority_owner, false, THREAD_PRIORITY_NORMAL);
         g_focus_priority_owner = NULL;
     }
 
     if (capture_owner)
     {
-        process_set_priority_override(capture_owner, THREAD_PRIORITY_UI);
+        process_set_main_thread_priority_override(capture_owner, true, THREAD_PRIORITY_UI);
         g_capture_priority_owner = capture_owner;
     }
 
@@ -1436,13 +1455,13 @@ static void user_atk_apply_priorities(void)
         }
         else
         {
-            process_set_priority_override(focus_owner, THREAD_PRIORITY_HIGH);
+            process_set_main_thread_priority_override(focus_owner, true, THREAD_PRIORITY_HIGH);
             g_focus_priority_owner = focus_owner;
         }
     }
     else if (!capture_owner && g_focus_priority_owner)
     {
-        process_clear_priority_override(g_focus_priority_owner);
+        process_set_main_thread_priority_override(g_focus_priority_owner, false, THREAD_PRIORITY_NORMAL);
         g_focus_priority_owner = NULL;
     }
 
@@ -1541,7 +1560,8 @@ int64_t user_atk_sys_control(uint32_t handle, uint32_t operation,
                               user_atk_window_control_t *output, size_t bytes)
 {
     if (bytes != sizeof(*output)) return -EINVAL;
-    if (operation > USER_ATK_CONTROL_DISPLAY) return -EINVAL;
+    if (operation > USER_ATK_CONTROL_INPUT_IDLE) return -EINVAL;
+    bool display_query = operation == USER_ATK_CONTROL_DISPLAY || operation == USER_ATK_CONTROL_WORK_AREA;
     spinlock_preempt_disable();
     user_atk_window_control_t *control = calloc(1, sizeof(*control));
     user_atk_window_t *win = NULL;
@@ -1549,9 +1569,28 @@ int64_t user_atk_sys_control(uint32_t handle, uint32_t operation,
     if (!result && !user_copy_from_user(control, output, bytes)) result = -EFAULT;
     if (!result && control->version != USER_ATK_CONTROL_VERSION) result = -ENOTSUP;
     if (!result && (control->size != bytes || control->reserved)) result = -EINVAL;
+    if (!result && operation == USER_ATK_CONTROL_WORK_AREA &&
+        (control->flags & ~USER_ATK_STATE_CHROME)) result = -EINVAL;
+    bool work_area_chrome = !result && operation == USER_ATK_CONTROL_WORK_AREA &&
+                            (control->flags & USER_ATK_STATE_CHROME);
+    if (operation == USER_ATK_CONTROL_INPUT_IDLE)
+    {
+        if (!result && (handle || control->flags)) result = -EINVAL;
+        if (!result)
+        {
+            memset(control, 0, sizeof(*control));
+            control->version = USER_ATK_CONTROL_VERSION;
+            control->size = sizeof(*control);
+            control->idle_milliseconds = input_activity_idle_millis();
+            if (!user_copy_to_user(output, control, bytes)) result = -EFAULT;
+        }
+        free(control);
+        spinlock_preempt_enable();
+        return result;
+    }
     if (!result && !user_copy_to_user(output, control, bytes)) result = -EFAULT;
-    if (!result && operation == USER_ATK_CONTROL_DISPLAY && handle) result = -EINVAL;
-    if (!result && operation != USER_ATK_CONTROL_DISPLAY)
+    if (!result && display_query && handle) result = -EINVAL;
+    if (!result && !display_query)
     {
         win = user_atk_find(handle, process_current());
         if (!win) result = -EBADF;
@@ -1609,7 +1648,27 @@ int64_t user_atk_sys_control(uint32_t handle, uint32_t operation,
                 video_request_refresh_window(win->window);
             }
         }
-        if (!result) user_atk_snapshot_window(win, control);
+        if (!result)
+        {
+            user_atk_snapshot_window(win, control);
+            if (operation == USER_ATK_CONTROL_WORK_AREA)
+            {
+                int menu = atk_menu_bar_height(atk_state_get());
+                uint32_t top = menu > 0 ? (uint32_t)menu : 0;
+                if (top > control->height) top = control->height;
+                control->y = (int32_t)top;
+                control->height -= top;
+                if (work_area_chrome)
+                {
+                    uint32_t margin = 8, title = ATK_WINDOW_TITLE_HEIGHT + margin;
+                    control->x = (int32_t)margin;
+                    control->y += (int32_t)title;
+                    control->width = control->width > 2 * margin ? control->width - 2 * margin : 0;
+                    control->height = control->height > title + margin ? control->height - title - margin : 0;
+                    control->flags = USER_ATK_STATE_CHROME;
+                }
+            }
+        }
         atk_state_lock_release(irq_state);
         if (!result && !user_copy_to_user(output, control, bytes)) result = -EFAULT;
     }

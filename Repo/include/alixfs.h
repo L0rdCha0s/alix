@@ -6,6 +6,7 @@
 
 struct vfs_node;
 struct vfs_mount;
+struct vfs_filesystem_info;
 
 typedef struct alixfs_mount alixfs_mount_t;
 
@@ -57,5 +58,7 @@ void alixfs_mount_snapshot(const alixfs_mount_t *fs, bool *header_dirty);
 /* True when the on-disk format supports atime/mtime/ctime. */
 bool alixfs_mount_supports_times(const alixfs_mount_t *fs);
 bool alixfs_mount_supports_ownership(const alixfs_mount_t *fs);
+/* Caller holds the owning mount's synchronization gate. */
+bool alixfs_mount_filesystem_info(const alixfs_mount_t *fs, struct vfs_filesystem_info *output);
 
 #endif /* ALIXFS_H */

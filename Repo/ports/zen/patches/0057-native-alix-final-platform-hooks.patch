@@ -1,0 +1,42 @@
+--- a/accessible/other/Platform.cpp
++++ b/accessible/other/Platform.cpp
+@@ -37,3 +37,8 @@
+                                      uint16_t aPriority) {}
+
+ void a11y::GetHumanReadableInstantiatorStr(nsAString& aResult) {}
++
++uint64_t a11y::GetCacheDomainsForKnownClients(uint64_t aCacheDomains) {
++  // This generic platform has no additional native accessibility clients.
++  return aCacheDomains;
++}
+--- a/gfx/angle/moz.build
++++ b/gfx/angle/moz.build
+@@ -5,6 +5,11 @@
+ DIRS += [
+     "/third_party/angle",
+ ]
++
++if CONFIG["MOZ_WIDGET_TOOLKIT"] == "alix":
++    SOURCES += ["/third_party/angle/src/common/system_utils_alix.cpp"]
++    LOCAL_INCLUDES += ["/third_party/angle/src"]
++    FINAL_LIBRARY = "xul"
+
+ LICENSES += ["angle"]
+ LICENSES["angle"].title = "ANGLE License"
+--- /dev/null
++++ b/third_party/angle/src/common/system_utils_alix.cpp
+@@ -0,0 +1,14 @@
++// Copyright 2026 Alix contributors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#include "system_utils.h"
++namespace angle {
++bool IsDebuggerAttached() {
++    // Alix has no process-debugger attachment API. External QEMU debugging
++    // does not create a debugger relationship inside the guest OS.
++    return false;
++}
++void BreakDebugger() {
++    __builtin_debugtrap();
++}
++}

@@ -12,10 +12,14 @@ BUILD = ROOT / "ports/zen/upstream/libcxx-alix-build"
 REVISION = "ca7933e47d3a3451d81e72ac174dcb5aa28b59d1"
 
 def main():
+    global BUILD
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--configure-only", action="store_true")
+    parser.add_argument("--pic", action="store_true", help="build native PIC libraries for Gecko DSOs")
     parser.add_argument("--smoke", action="store_true", help="link the native standard-library acceptance ELF")
     args = parser.parse_args()
+    if args.pic:
+        BUILD = ROOT / "ports/zen/upstream/libcxx-alix-pic-build"
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=SOURCE, text=True).strip()
     if revision != REVISION:
         raise RuntimeError("LLVM source does not match the pinned runtime revision")
@@ -26,6 +30,7 @@ def main():
             subprocess.run(["git", "apply", "--check", str(patch)], cwd=SOURCE, check=True)
             subprocess.run(["git", "apply", str(patch)], cwd=SOURCE, check=True)
     options = {
+        "ALIX_POSITION_INDEPENDENT": "ON" if args.pic else "OFF",
         "CMAKE_TOOLCHAIN_FILE": ROOT / "ports/zen/libcxx/alix-toolchain.cmake",
         "CMAKE_BUILD_TYPE": "Release", "CMAKE_INSTALL_PREFIX": BUILD / "install",
         "LLVM_ENABLE_RUNTIMES": "libcxx;libcxxabi", "LLVM_INCLUDE_TESTS": "OFF",
@@ -60,6 +65,9 @@ def main():
                  "-ftls-model=local-exec", "-nostdinc", "-nostdinc++", "-D__ALIX__",
                  "-isystem", resource + "/include", "-isystem", str(ROOT / "include"),
                  "-I" + str(ROOT / "user/lib"), "-I" + str(ROOT / "ports/zen/libcxx")]
+        if args.pic:
+            flags = [{"-fno-pic": "-fPIC", "-mcmodel=large": "-mcmodel=small",
+                      "-ftls-model=local-exec": "-ftls-model=global-dynamic"}.get(flag, flag) for flag in flags]
         support = BUILD / "alix-support"
         support.mkdir(exist_ok=True)
         inputs = [(ROOT / "ports/zen/libcxx/alix_threading.cpp", "threading.o",
@@ -67,6 +75,10 @@ def main():
                   (ROOT / "user/lib/strtofloat.cpp", "strtofloat.o",
                    ["-I" + str(SOURCE / "libc"), "-DLIBC_NAMESPACE=alix_llvm_libc"]),
                   (ROOT / "user/lib/wcstofloat.c", "wcstofloat.o", [])]
+        if args.pic:
+            # Stateless CSPRNG wrappers share the executable's errno and kernel
+            # entropy provider, while satisfying statically bound Rust imports.
+            inputs.append((ROOT / "user/lib/random.c", "random.o", []))
         objects = []
         for source, output, extra in inputs:
             object_file = support / output
@@ -83,7 +95,8 @@ def main():
         temporary_archive = archive.with_name(f".{archive.name}.{os.getpid()}.tmp")
         subprocess.run([str(llvm / "bin/llvm-ar"), "rcs", str(temporary_archive)] + list(map(str, objects)), check=True)
         temporary_archive.replace(archive)
-        subprocess.run(["python3", str(ROOT / "ports/zen/libm/build.py")], check=True)
+        if not args.pic:
+            subprocess.run(["python3", str(ROOT / "ports/zen/libm/build.py")], check=True)
         if args.smoke:
             core = shlex.split(os.environ.get("ALIX_RUNTIME_OBJECTS", ""))
             if not core:

@@ -1963,8 +1963,8 @@ static const atk_user_launch_info_t g_atk_fileman_launch = {
 };
 
 static const atk_user_launch_info_t g_atk_browser_launch = {
-    .path = "/usr/bin/atk_browser.elf",
-    .name = "atk_browser"
+    .path = "/usr/lib/zen/zen",
+    .name = "zen"
 };
 
 static const atk_user_launch_info_t g_control_panel_launch = {
@@ -2538,9 +2538,10 @@ static void atk_launch_user_binary(void *arg)
         process_exit(1);
     }
 
-    vfs_node_t *node = vfs_resolve(root, path);
-    if (!node)
+    vfs_node_t *node = NULL;
+    if (vfs_resolve_owned(root, path, &node) || !vfs_is_file(node))
     {
+        vfs_node_release_owned(node);
         serial_printf("%s", "atk: binary not found\r\n");
         process_exit(1);
     }
@@ -2549,17 +2550,36 @@ static void atk_launch_user_binary(void *arg)
     const uint8_t *data = (const uint8_t *)vfs_data(node, &size);
     if (!data || size == 0)
     {
+        vfs_node_release_owned(node);
         serial_printf("%s", "atk: binary empty\r\n");
         process_exit(1);
     }
 
-    process_t *proc = process_create_user_elf_with_parent(name,
-                                                          data,
-                                                          size,
-                                                          -1,
-                                                          process_current(),
-                                                          NULL,
-                                                          0);
+    char *canonical_path = malloc(VFS_PATH_MAX);
+    if (!canonical_path || vfs_node_path_snapshot(node, canonical_path, VFS_PATH_MAX) < 0)
+    {
+        free(canonical_path);
+        vfs_node_release_owned(node);
+        serial_printf("%s", "atk: executable path unavailable\r\n");
+        process_exit(1);
+    }
+    /* The constructor copies both path and arguments before publishing the
+     * new process. Keep its library/resource origin when launched by a tile. */
+    const char **arguments = malloc(sizeof(*arguments));
+    if (!arguments)
+    {
+        free(canonical_path);
+        vfs_node_release_owned(node);
+        process_exit(1);
+    }
+    arguments[0] = path;
+    process_t *proc = process_create_user_elf_from_path(name, canonical_path,
+                                                       data, size, -1,
+                                                       process_current(),
+                                                       arguments, 1);
+    free(arguments);
+    free(canonical_path);
+    vfs_node_release_owned(node);
     if (!proc)
     {
         serial_printf("%s", "atk: failed to start user binary\r\n");

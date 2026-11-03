@@ -154,9 +154,15 @@ single actively growing node is flushed early at 48 MiB so backpressure still
 has a bounded recovery path. Forced sync and shutdown always bypass the grace
 period.
 
+If synchronous writeback fails while a writer waits for dirty-data space,
+the wait fails too: regular writes and resize return `EIO`, and append reports
+failure. This prevents an exhausted AlixFS node table or failed device from
+leaving a download/extraction blocked indefinitely. Smaller legacy AlixFS
+tables are expanded on mount; see [AlixFS allocation](alixfs.md#node-ids).
+
 Forced sync commits dirty nodes and flushes the device cache; it does not
-rewrite clean files. A full rewrite is reserved for recovery after a writeback
-failure. `vfs_flush_node()` immediately persists the file and its directory
+rewrite clean files. Writeback failures retain dirty records and backend
+metadata for incremental retry. `vfs_flush_node()` immediately persists the file and its directory
 ancestors, commits the chunk table/header, and flushes the device cache. It is
 a successful no-op for RAM-backed files such as `/tmp`.
 
@@ -219,3 +225,28 @@ without changing file content or mode.
 - `src/kernel/procfs.c`:
   - Creates `/proc` and leaves it mutable.
   - Allows creating callback-backed files anywhere under `/proc/...` via `procfs_create_file_at`.
+
+### Large browser files and profile writeback
+
+Atomic profile-file renames dirty the moved node and its old/new directories.
+They do not request a rewrite of unchanged files in the mounted filesystem.
+Writeback retries retain the failed records and uncommitted backend metadata;
+they also avoid escalating a transient allocation failure into a full rewrite.
+This prevents repeated 197 MiB libxul serialization while Zen saves its profile.
+Large resident file buffers grow by at most 16 MiB of spare capacity per growth
+instead of doubling a mounted, exact-size library after a small update.
+The new kernel installs the full bundle and runs the desktop-launched Zen
+profile without writeback failures, then exits the browser with status 0.
+The actual run is recorded in build/ports/zen/zen-launch-6/serial.log.
+
+## Incremental writeback
+
+Mutations queue retained nodes on the mount's writeback list. A flush detaches a
+bounded batch and writes only those nodes and their directory ancestors; full
+tree traversal is reserved for an explicit full rebuild. Failed and active
+writes retain their queue ownership for retry. Unlinked subtrees are excluded
+from serialization, and synchronous file flush removes clean live queue entries.
+Shared mapping discovery visits only writable-capable mapped nodes, outside
+the namespace lock. Node reference counting does not scan mapped contents.
+Read access updates in-memory atime; persistence follows a relatime policy
+(after metadata/data change, clock rollback, or 24 hours).

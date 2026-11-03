@@ -33,6 +33,7 @@ static void spinlock_init(spinlock_t *lock){CHECK(!pthread_mutex_init(&lock->loc
 static void spinlock_lock(spinlock_t *lock){CHECK(!pthread_mutex_lock(&lock->lock));}
 static void spinlock_unlock(spinlock_t *lock){CHECK(!pthread_mutex_unlock(&lock->lock));}
 static pthread_mutex_t atk_lock=PTHREAD_MUTEX_INITIALIZER;
+static uint32_t input_activity_idle_millis(void){return 0;}
 static uint64_t atk_state_lock_acquire(void){CHECK(!atk_depth);CHECK(!pthread_mutex_lock(&atk_lock));++atk_depth;return 1;}
 static void atk_state_lock_release(uint64_t flags){CHECK(flags==1&&atk_depth==1);--atk_depth;CHECK(!pthread_mutex_unlock(&atk_lock));}
 static void atk_state_lock_init(void){}
@@ -47,6 +48,7 @@ typedef struct {
  void *drag_window_surface;bool drag_active,drag_scene_valid;unsigned resize_edges;struct {bool active;}resize_band;
 } atk_state_t;
 static atk_state_t state;
+static int atk_menu_bar_height(const atk_state_t *s){(void)s;return 24;}
 static atk_state_t *atk_state_get(void){CHECK(atk_depth);return &state;}
 static atk_widget_t *atk_state_focus_widget(atk_state_t *s){return s->focus_widget;}
 static void atk_state_set_focus_widget(atk_state_t *s,atk_widget_t *w){s->focus_widget=w;}
@@ -137,7 +139,7 @@ static user_atk_window_t *new_window(void){
  w->content_width=w->image->width=64;w->content_height=w->image->height=18;w->pixel_bytes=64*18*4;w->stride_bytes=64*4;
  w->pixels=calloc(1,w->pixel_bytes);w->back_pixels=calloc(1,w->pixel_bytes);CHECK(w->pixels&&w->back_pixels);w->image->pixels=w->pixels;
  w->handle=next_handle++;w->refcount=1;w->owner=&owner;w->flags=USER_ATK_WINDOW_FLAG_RESIZABLE;window_priv_mut(w->window)->chrome_visible=true;
- spinlock_init(&w->pixel_lock);spinlock_init(&w->event_lock);user_atk_insert(w);return w;
+ spinlock_init(&w->pixel_lock);spinlock_init(&w->presentation_lock);spinlock_init(&w->event_lock);user_atk_insert(w);return w;
 }
 static int command(unsigned h,unsigned op,user_atk_window_control_t*c){c->version=1;c->size=sizeof(*c);c->reserved=0;return(int)user_atk_sys_control(h,op,c,sizeof(*c));}
 static void transactions(void){

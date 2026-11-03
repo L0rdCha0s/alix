@@ -8,6 +8,7 @@
 #include "io_tcp.h"
 #include "io_udp.h"
 #include "io_pipe.h"
+#include "io_local.h"
 #include "io_audio.h"
 #include "system_identity.h"
 #include "vfs_mapping.h"
@@ -99,6 +100,9 @@ static ssize_t io_vfs_file_read(void *context, void *buffer, size_t count)
     io_vfs_file_t *file = context;
     if (!file || !file->readable) return -EBADF;
     if (!buffer && count) return -EINVAL;
+    if (vfs_node_type(file->node) == VFS_NODE_CHARACTER)
+        return vfs_character_read(file->node, buffer, count,
+                                 (fd_description_status_flags(file->description) & FD_STATUS_NONBLOCK) != 0);
     io_vfs_offset_lock(file);
     ssize_t result = count > 0x7fffffffffffffffULL - file->offset ? -EOVERFLOW :
         vfs_read_data_at(file->node, (size_t)file->offset, buffer, count);
@@ -113,6 +117,8 @@ static ssize_t io_vfs_file_write(void *context, const void *buffer, size_t count
     io_vfs_file_t *file = context;
     if (!file || !file->writable) return -EBADF;
     if (!buffer && count) return -EINVAL;
+    if (vfs_node_type(file->node) == VFS_NODE_CHARACTER)
+        return vfs_write_data_at(file->node, 0, buffer, count);
     io_vfs_offset_lock(file);
     uint32_t status = fd_description_status_flags(file->description);
     bool append = (status & FD_STATUS_APPEND) != 0;
@@ -136,6 +142,7 @@ static ssize_t io_vfs_file_pread(void *context, void *buffer, size_t count, size
 {
     io_vfs_file_t *file = context;
     if (!file || !file->readable) return -EBADF;
+    if (vfs_node_type(file->node) == VFS_NODE_CHARACTER) return -ESPIPE;
     if ((!buffer && count) || offset > 0x7fffffffffffffffULL ||
         count > 0x7fffffffffffffffULL - offset) return -EINVAL;
     ssize_t result = vfs_read_data_at(file->node, offset, buffer, count);
@@ -147,6 +154,7 @@ static int64_t io_vfs_file_seek(void *context, int64_t offset, int whence)
 {
     io_vfs_file_t *file = context;
     if (!file) return -EBADF;
+    if (vfs_node_type(file->node) == VFS_NODE_CHARACTER) return -ESPIPE;
     io_vfs_offset_lock(file);
     uint64_t base = 0;
     int64_t result = -EINVAL;
@@ -487,6 +495,22 @@ void io_vfs_execute(io_request_t *request, io_service_result_t *result,
         result->result = io_record_lock_resolve(description);
         return;
     }
+    if (operation->opcode == IO_VFS_STATVFS || operation->opcode == IO_VFS_PATH_STATVFS)
+    {
+        _Static_assert(sizeof(vfs_filesystem_info_t) == sizeof(syscall_statvfs_t), "filesystem capacity ABI");
+        if (available < sizeof(syscall_statvfs_t)) return;
+        bool path = operation->opcode == IO_VFS_PATH_STATVFS;
+        if (path && (description || !io_request_cwd(request) ||
+            strnlen((const char *)operation->data, available) == available)) return;
+        if (!path && !io_vfs_description_valid(description)) { result->result = -EBADF; return; }
+        vfs_filesystem_info_t *info = calloc(1, sizeof(*info));
+        if (!info) { result->result = -ENOMEM; return; }
+        result->result = path ? vfs_path_filesystem_info(io_request_cwd(request), (const char *)operation->data, info) :
+            vfs_node_filesystem_info(((io_vfs_file_t *)fd_description_context(description))->node, info);
+        if (!result->result) memcpy(operation->data, info, sizeof(*info));
+        free(info);
+        return;
+    }
     if (operation->opcode == IO_VFS_STAT_INFO || operation->opcode == IO_VFS_PATH_INFO)
     {
         bool path = operation->opcode == IO_VFS_PATH_INFO;
@@ -778,7 +802,7 @@ void io_vfs_execute(io_request_t *request, io_service_result_t *result,
         }
         return;
     }
-    if (io_tcp_description_valid(description) || io_udp_description_valid(description))
+    if (io_tcp_description_valid(description) || io_udp_description_valid(description) || io_local_description_valid(description))
     {
         if (operation->opcode == IO_VFS_STAT)
         {
@@ -852,8 +876,8 @@ void io_vfs_execute(io_request_t *request, io_service_result_t *result,
             fd_description_t *owner = m ? fd_description_create_deferred(&io_vfs_mapping_ops,m,retirement) : NULL;
             if (!owner) { free(m); result->result = -ENOMEM; break; }
             m->writable = !shared || (file->writable && vfs_mapping_write_allowed(file->node));
-            result->result = vfs_mapping_create(file->node,(uint64_t)operation->offset,
-                (size_t)operation->count,shared,owner,&m->mapping);
+            result->result = vfs_mapping_create_access(file->node,(uint64_t)operation->offset,
+                (size_t)operation->count,shared,m->writable,owner,&m->mapping);
             if (result->result) fd_description_put(owner);
             else result->description_owned = owner;
             break;

@@ -74,6 +74,24 @@ static void entropy_clear(uint8_t *buffer, size_t length)
     }
 }
 
+ssize_t entropy_read_kernel(void *buffer, size_t length, uint32_t flags)
+{
+    if (flags & ~ENTROPY_NONBLOCK) return -EINVAL;
+    if (!length) return 0;
+    if (!buffer) return -EINVAL;
+    size_t count = length > ENTROPY_MAX_BYTES ? ENTROPY_MAX_BYTES : length;
+    spinlock_preempt_disable();
+    ssize_t result = -ENOSYS;
+    if (entropy_cpu_has_rdrand())
+    {
+        result = entropy_fill(buffer, count) ? (ssize_t)count :
+                 (flags & ENTROPY_NONBLOCK) ? -EAGAIN : -EIO;
+        if (result < 0) entropy_clear(buffer, count);
+    }
+    spinlock_preempt_enable();
+    return result;
+}
+
 ssize_t syscall_do_getrandom(void *user_buffer, size_t length, uint32_t flags)
 {
     if (flags & ~ENTROPY_NONBLOCK)

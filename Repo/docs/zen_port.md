@@ -7,13 +7,131 @@ layout, JavaScript and browser chrome. Alix supplies the operating-system and
 window-system interfaces. The existing `user/lib/web` and `atk_html_view` engine
 is not part of the new port.
 
-**Zen does not build or run on Alix yet.** The pinned standalone SpiderMonkey
-configuration and full static-shell build succeed for `x86_64-unknown-alix`.
-The real shell runs inside eight-CPU Alix, including observed Ion JIT execution,
-eight GC cycles with 10,000 rooted objects, WebAssembly execution/bounds trapping
-and worker shared Atomics. Gecko configures in a separate native object tree
-with `widget/alix` selected. The complete widget, NSS and browser runtime
-still require compile and runtime acceptance.
+**Zen 1.24b builds and runs natively in Alix QEMU. The full port remains in
+runtime bring-up.** `make zen-build` completes with exit status 0 in
+`build/ports/zen/gecko-build.log`. The application contains 273 real Zen patches,
+release preferences/branding/locales/settings and all 59 native Alix patches.
+The pinned engine is Firefox 159.0, with native `cairo-alix`, executable `zen`,
+process helpers, updater, libc++, Rust standard library and Alix libc/loader.
+The actual updater initializes NSS and reaches its usage message after adding
+secure random character devices.
+
+Zen is installed at `/usr/lib/zen` in the private browser data image. The desktop
+Browser tile now launches it with its canonical executable path, so libraries
+and resources resolve beside the installed executable. In
+`build/ports/zen/zen-launch-6/`, the real desktop launch displays Zen's vertical
+tabs and renders the existing local calculator. Keyboard replacement input and
+clicking Add produce 4 + 7 = 11. Confirming Quit Zen returns the browser parent
+and desktop launcher with status 0. The actual browser performs profile writes
+without filesystem writeback failures. No debugger was attached during this
+boot's initial browser startup; later read-only snapshots diagnosed content
+painting. This is QEMU evidence, rather than physical-hardware evidence.
+
+Runtime fixes include a FreeType getter that discarded a newly opened temporary
+face, a real native input-idle service, bounded large-file cache growth, and
+profile writeback that flushes changed records instead of rewriting the entire
+filesystem after each atomic rename. Native console tab expansion no longer
+recursively acquires its own lock or loops across a line wrap. The updated
+unzip installer accepts directory symlinks such as `/usr` and can explicitly
+discard a guest ZIP after reading it, reducing installation memory pressure.
+Normal `make` passes; no new tests or test harnesses were added.
+
+There are still rendering defects. A clean explicit profile in `zen-launch-4`
+renders the calculator text and produces 11; see
+`build/ports/zen/zen-launch-4/interactive.png`. The normal desktop/default-profile
+run in `zen-launch-6` sometimes omits text glyphs while controls and JavaScript
+continue to work; `zoom-focused.png` shows the numeric result 11. HTTP navigation
+in that run receives the complete HTTP 200 response, recorded in `network.pcap`,
+but its content painting remains incomplete. The earlier working profile in
+`zen-launch-3` renders HTTP and `https://example.com/` without a certificate
+warning; `build/ports/zen/zen-http.png` and `zen-https.png` record those pages.
+The current focus is rendering correctness and the default-profile content
+handoff, followed by the remaining native browser integration. The mouse wheel
+has not yet been connected to Gecko. Do not describe this checkpoint as a fully
+finished browser port.
+
+**The preceding native Gecko checkpoint renders HTML/CSS and runs interactive
+JavaScript inside Alix QEMU.** The actual Firefox launcher loads native `libxul.so`, starts native
+child processes, and displays upstream tabs, the address bar and toolbar through
+`widget/alix` and the software compositor. The first window is recorded in
+`build/ports/zen/gecko-first-window.png`. The existing `test1.htm` calculator
+renders from `file:///root/test1.htm`, accepts mouse/keyboard input, and computes
+4 + 7 = 11 after Ctrl+A, replacement input, and clicking Add; see `build/ports/zen/gecko-interactive.png`
+and `build/ports/zen/gecko-launch-16/`. This proves native content layout,
+painting and interactive JavaScript. The same page also renders over HTTP from
+`http://10.0.2.2:8765/test1.htm`, with its JavaScript producing Result: 3;
+`build/ports/zen/gecko-http.png` records the browser and
+`build/ports/zen/gecko-launch-14/network.pcap` records the complete HTTP 200
+response.
+These screenshots establish the native Gecko foundation; they show the
+upstream Firefox UI before the Zen overlay import.
+
+Browser startup now uses the existing LLVM C++ library and PIC Rust standard
+library with Alix's libc, dynamic loader, local stream socket pairs and native
+spawn. Live Gecko execution has exercised AlixFS disk-capacity queries while
+initializing IndexedDB and loaded all nine bundled font faces. Larger-machine
+kernel heaps, bounded file transfers, symlink remounting and lower-memory mount
+loading support the actual browser bundle. Allocator free bins, batched heap
+growth, direct nonblocking local IPC completion, main-thread-only focus priority
+and native work-area geometry have been exercised by the running browser.
+The latest launch also exercises default per-thread SMP placement across seven
+CPUs, with explicit affinity and the reserved UI CPU still honored.
+
+The successful targeted link is recorded in
+`build/ports/zen/gecko-edit-bindings-ready-link.log`. The canonical `gecko-build.log`
+now records the successful full native Zen build and is the current build log.
+Executable startup dependencies use the native loader; the actual updater's NSS
+initialization is recorded in `build/ports/zen/zen-launch-2/serial.log`. Normal `make` does not
+rebuild Gecko.
+
+Mozilla's own omnijar packager stages the browser resources, and
+`ports/zen/package_browser.py` materializes and strips native images while
+checking that runtime segments and TLS are preserved. Current bring-up uses a
+private AlixFS image and OVMF variables through `run-via-agent.sh`; it does not
+write the user's main `data.img`. Follow the root AGENTS.md policy: prioritize
+real build/link/launch work and do not add tests unless requested.
+
+`python3 ports/zen/package_browser.py --output build/ports/zen/gecko-native-current`
+now runs Mozilla's omnijar packager by default and verifies every staged native
+image's load segments and TLS against `obj-gecko-alix/dist/bin`. The earlier Gecko
+archive has 43 files and 20 native ELF images. The current Zen bundle
+`build/ports/zen/zen-browser.zip` has 49 payload files, 26 native ELF images,
+the updater and an image/hash manifest. Existing output paths are preserved.
+`--source` accepts an already staged browser tree; an old generated manifest is
+excluded and regenerated for the new package.
+
+### Installing and launching Zen
+
+Run `make zen-build`, then `make zen-package` on the host. The default output
+is `build/ports/zen/zen-browser.zip`; use `ZEN_BROWSER_PACKAGE_DIR` to preserve a
+separate build. Serve the repository on port 8000, then in Alix:
+
+```text
+/usr/bin/dl-zen.sh
+```
+
+The kernel seeds this script from the repository's `dl-zen.sh` on boot, just
+like `dl.sh`. Run `make` on the host to embed changes to it and publish the
+unzip bootstrap and `build/fonts.zip`; `./serve-dl.sh` serves all three
+downloads. From `/usr/bin`, `./dl-zen.sh` runs the same installer. It installs
+the latest published Zen bundle (native libraries, process helpers, updater,
+certificates and browser resources) into `/usr/lib/zen`, and system fonts into
+`/usr/share/fonts`. Running `dl.sh` first is unnecessary. The installer does
+not touch browser profiles.
+
+Close any running browser before replacing its bundle. The explicit
+`--discard-archive` option removes the downloaded guest ZIP after it has been
+read and validated, keeping the kernel file cache small during installation.
+The host ZIP is retained. Start Zen with the desktop Browser tile or
+`runelf /usr/lib/zen/zen`; the tile now uses this native browser path and records
+its canonical executable path for library and resource discovery. Existing
+legacy browser sources remain available as separate applications. The OS does
+not download the browser automatically during a normal `make` or boot.
+
+### Earlier bring-up checkpoints
+
+The notes below record earlier component and build checkpoints. Their open-gate
+statements describe those checkpoints, rather than the current launch status.
 
 The thirteenth full build completes Gecko's entire configured Rust root in
 19m03s and produces a fresh 1,196,948,572-byte `libgkrust.a`. Cross objdump

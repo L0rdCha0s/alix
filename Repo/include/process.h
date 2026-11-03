@@ -312,6 +312,10 @@ process_t *process_create_user_elf_from_path(const char *name, const char *execu
 void process_set_priority(process_t *process, thread_priority_t priority);
 void process_set_priority_override(process_t *process, thread_priority_t priority);
 void process_clear_priority_override(process_t *process);
+/* Interactive focus boosts the UI/main thread without elevating every worker
+ * above the kernel services on which those workers may synchronously wait. */
+void process_set_main_thread_priority_override(process_t *process, bool enabled,
+                                                thread_priority_t priority);
 void process_set_thread_priority(thread_t *thread, thread_priority_t priority);
 void process_set_affinity(process_t *process, uint32_t cpu_index);
 void process_clear_affinity(process_t *process);

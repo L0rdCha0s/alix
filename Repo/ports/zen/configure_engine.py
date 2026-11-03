@@ -30,6 +30,11 @@ def main():
     log_prefix = "spidermonkey" if args.project == "js" else "gecko"
     engine = args.engine_dir.resolve()
     object_dir = engine.parent / ("obj-js-alix" if args.project == "js" else "obj-gecko-alix")
+    zen = None
+    if args.project == "browser" and (engine / ".alix-zen-overlay.json").exists():
+        from import_zen import verify_active_overlay
+        zen = verify_active_overlay(engine)
+        label = "Zen"
     apply_patches(engine)
     objects = shlex.split(os.environ.get("ALIX_RUNTIME_OBJECTS", ""))
     if not objects:
@@ -55,6 +60,21 @@ def main():
         "ac_add_options --disable-debug",
         "ac_add_options --enable-optimize",
         "ac_add_options --without-system-zlib",
+        *([
+            "ac_add_options --with-app-name=zen",
+            "ac_add_options --with-app-basename=Zen",
+            "ac_add_options --with-branding=browser/branding/release",
+            "ac_add_options --with-distribution-id=app.zen-browser",
+            "ac_add_options --with-l10n-base=" + shlex.quote(str(engine / "browser/locales")),
+            "ac_add_options --enable-update-channel=release",
+            "export MOZ_APP_BASENAME=Zen",
+            "export MOZ_BRANDING_DIRECTORY=browser/branding/release",
+            "export MOZ_OFFICIAL_BRANDING_DIRECTORY=browser/branding/release",
+            "export ACCEPTED_MAR_CHANNEL_IDS=release",
+            "export MAR_CHANNEL_ID=release",
+            "export ZEN_FIREFOX_VERSION=" + json.loads((ROOT / "ports/zen/upstream.json").read_text())["firefox_version"],
+            "export MOZ_APPUPDATE_HOST=updates.zen-browser.app",
+        ] if zen else []),
         "",
     ]))
     env = os.environ.copy()
@@ -89,10 +109,14 @@ def main():
         env.setdefault("WASI_SYSROOT", str(wasi / "share/wasi-sysroot"))
         wasi_receipt = wasi / "alix-sdk-receipt.json"
     rust_wrapper = ROOT / "ports/zen/rust/rustc.py"
-    rust_specification = ROOT / "ports/zen/rust/x86_64-unknown-alix.json"
+    rust_profile = "rust-alix-pic" if args.project == "browser" else "rust-alix"
+    rust_sysroot = ROOT / ("ports/zen/upstream/" + rust_profile + "-sysroot")
+    rust_specification = ROOT / "ports/zen/rust" / (
+        "pic/x86_64-unknown-alix.json" if args.project == "browser" else "x86_64-unknown-alix.json")
     if rust_wrapper.is_file() and rust_specification.is_file():
         env.setdefault("RUSTC", str(rust_wrapper))
         env.setdefault("RUST_TARGET_SPEC", str(rust_specification))
+        env.setdefault("ALIX_RUST_SYSROOT", str(rust_sysroot))
         selected_specification = Path(env["RUST_TARGET_SPEC"]).expanduser().resolve()
         env["RUST_TARGET_SPEC"] = str(selected_specification)
         env["RUST_TARGET_PATH"] = str(selected_specification.parent)
@@ -101,8 +125,7 @@ def main():
         # publishes immutable snapshots, so include their content identifier in
         # target-crate fingerprints when the selected snapshot changes. This
         # cfg is deliberately unused by source and changes no engine feature.
-        native_std = (ROOT / "ports/zen/upstream/rust-alix-sysroot/lib/rustlib/"
-                      "x86_64-unknown-alix/lib").resolve(strict=True)
+        native_std = (Path(env["ALIX_RUST_SYSROOT"]) / "lib/rustlib/x86_64-unknown-alix/lib").resolve(strict=True)
         snapshot = re.fullmatch(r"rust-alix-stdlib-([0-9a-f]{16})", native_std.name)
         if not snapshot:
             raise RuntimeError("native Rust sysroot must select a managed immutable std snapshot")

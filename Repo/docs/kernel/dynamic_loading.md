@@ -1,8 +1,11 @@
 # Native ELF dynamic loading
 
 The user runtime implements dlopen, dlsym, dlclose, dlerror and dladdr in
-`user/lib/dlfcn.c`. Libraries are real x86-64 ET_DYN files whose load segments
-are copied into owned anonymous VM reservations. Code runs inside Alix; there
+`user/lib/dlfcn.c`. Libraries are real x86-64 ET_DYN files loaded into owned VM reservations.
+Compatible read-only segments use shared native file mappings, whose physical
+cache pages and PTEs populate on first access. Writable segments use private
+file snapshots, with explicit BSS zeroing; incompatible boundary pages retain
+the anonymous-copy path. Read-only code is shared across browser processes. Code runs inside Alix; there
 is no host dynamic linker or secondary libc instance.
 
 The upstream compiler driver builds shared objects with PIC, global-dynamic
@@ -53,13 +56,35 @@ ownership and is retried by a later collection.
 Process exit finalizes resident images, including NODELETE and TLS-pinned
 libraries. It keeps their code mapped through remaining exit handlers and
 process-wide thread termination. The kernel then reclaims the address space.
-Registry operations use a recursive loader gate; error state and TLS block
-ownership are per thread. No caller stack or user process pointer is retained
+Registry changes and first TLS allocation use a recursive loader gate. Existing
+TLS blocks use a per-thread fast path: the block pins its module until thread
+cleanup, so ordinary TLS access needs no global loader lock. Error state and
+TLS block ownership are per thread. No caller stack or user process pointer is retained
 by another worker.
 
-Current limits are explicit. Startup DT_NEEDED executables still require a
-startup dependency loader; executable linkage currently uses native static
-archives plus runtime dlopen. Initial-exec TLS in loaded DSOs,
+Native executable startup now uses the existing loader for DT_NEEDED libraries.
+The CRT first resolves its own GOT/TLS and initializes SSP, then maps and eagerly
+relocates the complete dependency graph. Ordinary executable preinit callbacks
+run next, dependency constructors run in dependency order, and the CRT then runs
+its main constructor array and `main`. Executable TLS keeps its kernel-owned
+static block; DSOs retain the existing dynamic TLS path. Startup libraries remain
+owned by the executable dependency graph, and their finalizers run after later
+main-program exit registrations. Load failure reports a native loader error and
+exits before `main`. The fixed executable keeps its kernel-established segment
+permissions. DSOs still receive final permissions and RELRO after relocation.
+
+The native driver supplies a literal `$ORIGIN` executable RPATH so a relocated
+browser bundle can find both direct and transitive startup libraries beside its
+launcher. RUNPATH remains local to its requesting object. The ELF validator
+requires the defined startup loader and ABI version 1 for executable dynamic
+imports, and checks all relocation tables, symbol versions and writable targets.
+It also accepts disjoint RELA/JMPREL tables sharing one SHT_RELA section, while
+rejecting uncovered or overlapping table ranges. The actual Zen updater now
+links through these checks and loads its startup libraries in Alix QEMU. It
+initializes NSS and reaches its normal usage message; see
+`build/ports/zen/zen-launch-2/serial.log`. Applying an update remains unverified.
+
+Current limits are explicit. Initial-exec TLS defined by loaded DSOs,
 GNU indirect functions and GNU unique-symbol semantics are not established.
 Unsupported TLS/relocation forms and malformed version tables return a loader error. This is native
 ELF support for the port, not a Linux binary compatibility layer. The full

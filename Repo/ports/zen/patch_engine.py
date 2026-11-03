@@ -31,10 +31,27 @@ def valid_digest(value):
 def apply_patches(engine, package=PATCHES):
     upstream = json.loads((ROOT / "ports/zen/upstream.json").read_text())
     series = json.loads((package / "series.json").read_text())
+    overlay = engine / ".alix-zen-overlay.json"
+    overrides = {}
+    if overlay.exists():
+        active = json.loads(overlay.read_text())
+        if (active["zen_revision"] != upstream["revision"] or
+                active["firefox_revision"] != upstream["firefox_revision"]):
+            raise RuntimeError("active Zen overlay does not match pinned source")
+        overrides = active["native_overrides"]
+
+    def expected_after(item):
+        record = overrides.get(item["path"])
+        if record:
+            if record["native_after"] != item["after"] or not valid_digest(record["composed_after"]):
+                raise RuntimeError(f"native patch changed beneath Zen overlay: {item['path']}")
+            return record["composed_after"]
+        return item["after"]
     if (series["firefox_revision"] != upstream["firefox_revision"] or
             series["firefox_version"] != upstream["firefox_version"]):
         raise RuntimeError("patch series does not match the pinned Firefox source")
-    if (engine / "browser/config/version.txt").read_text().strip() != series["firefox_version"]:
+    engine_version = active["release"] if overlay.exists() else series["firefox_version"]
+    if (engine / "browser/config/version.txt").read_text().strip() != engine_version:
         raise RuntimeError("engine release does not match the patch series")
     repository = Path(subprocess.check_output(
         ["git", "rev-parse", "--show-toplevel"], cwd=ROOT, text=True).strip())
@@ -60,7 +77,7 @@ def apply_patches(engine, package=PATCHES):
             actual = digest(path)
             if actual == item["before"]:
                 states.append("base")
-            elif actual == item["after"]:
+            elif actual == expected_after(item):
                 states.append("applied")
             else:
                 raise RuntimeError(f"unrecognized edits in {item['path']}; source left untouched")
@@ -76,7 +93,7 @@ def apply_patches(engine, package=PATCHES):
             subprocess.run(["git", "apply", "--directory=" + prefix, str(patch)],
                            cwd=repository, check=True)
         for item in entry["files"]:
-            if digest(engine / item["path"]) != item["after"]:
+            if digest(engine / item["path"]) != expected_after(item):
                 raise RuntimeError(f"post-apply digest mismatch in {item['path']}")
         print(f"Verified Alix patch: {patch.name} ({'applied' if state == 'base' else 'already present'})")
 

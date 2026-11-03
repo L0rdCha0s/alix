@@ -42,6 +42,23 @@ apart from the existing short allocator/user-copy critical sections. There is
 no blocking wait or cross-thread stack pointer. The generation work is bounded
 to 256 bytes and at most 320 instruction attempts per syscall.
 
+## Random devices
+
+Devfs publishes `/dev/random` and `/dev/urandom` as character devices with mode
+0666. Both use the same bounded RDRAND backend as `getrandom`; neither uses a
+software seed, pool, or fallback generator. They return up to 256 bytes per read
+and have no persistent file offset. The owned descriptor path honors O_NONBLOCK
+for exhausted hardware retries. Seeking and positional reads return ESPIPE.
+Writes are discarded without changing the entropy source or crediting entropy.
+
+The character-device implementation runs against retained VFS nodes and owned
+kernel request buffers. It does not invoke borrowed device callbacks on storage
+workers. Native NSS initialization in the actual Zen updater previously failed
+because `/dev/urandom` was absent. After adding these devices, that same binary
+initializes NSS and reaches its normal usage message in Alix QEMU; the serial
+record is `build/ports/zen/zen-launch-2/serial.log`. This does not establish update
+installation or cryptographic certification.
+
 ## QEMU backend and validation limits
 
 For QEMU 10.1.2 under TCG, the upstream

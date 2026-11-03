@@ -23,6 +23,8 @@ OBJDIR      := build
 GENERATED_DIR := $(OBJDIR)/generated
 DL_SCRIPT_SRC := $(GENERATED_DIR)/dl_script_data.c
 DL_SCRIPT_OBJ := $(GENERATED_DIR)/dl_script_data.o
+DL_ZEN_SCRIPT_SRC := $(GENERATED_DIR)/dl_zen_script_data.c
+DL_ZEN_SCRIPT_OBJ := $(GENERATED_DIR)/dl_zen_script_data.o
 JS_DEMO := $(OBJDIR)/wasm-demo.js
 FONT_DIR := vendor/fonts
 FONT_ARCHIVE := $(OBJDIR)/fonts.zip
@@ -73,6 +75,7 @@ C_SOURCES += $(KERNEL_DIR)/io/event_service.c
 C_SOURCES += $(KERNEL_DIR)/io/tcp.c
 C_SOURCES += $(KERNEL_DIR)/io/udp.c
 C_SOURCES += $(KERNEL_DIR)/io/pipe.c
+C_SOURCES += $(KERNEL_DIR)/io/local.c
 C_SOURCES += $(KERNEL_DIR)/io/audio.c
 C_SOURCES += $(KERNEL_DIR)/io/poll.c
 C_SOURCES += $(KERNEL_DIR)/io/flock.c
@@ -83,6 +86,7 @@ C_SOURCES += $(KERNEL_DIR)/io/process.c
 
 C_OBJECTS := $(patsubst $(SRC_DIR)/%.c,$(OBJDIR)/%.o,$(C_SOURCES))
 C_OBJECTS += $(DL_SCRIPT_OBJ)
+C_OBJECTS += $(DL_ZEN_SCRIPT_OBJ)
 HARDWARE_SELFTEST ?= 0
 ifeq ($(HARDWARE_SELFTEST),1)
 C_OBJECTS += $(OBJDIR)/tests/hardware_boot_test.o
@@ -365,7 +369,10 @@ LOADER_LDFLAGS := -nostdlib -Wl,--dll -Wl,--entry=efi_main -Wl,--subsystem,10 \
 CPU_TYPE ?= EPYC
 # RDRAND supplies the guest's native entropy service. QEMU's normal (non-seed,
 # non-replay) execution backs this instruction with its cryptographic RNG.
-TCG_CPU_TYPE ?= qemu64,+rdrand
+# Expose TCG's implemented SIMD/CPU-local identification instructions. The
+# minimal qemu64 model disables these and forces Gecko/Skia and the kernel
+# through substantially slower fallback paths even though TCG supports them.
+TCG_CPU_TYPE ?= max,+rdrand
 SMP_CORES ?= 8
 QEMU_SMP_OPTS := -smp $(SMP_CORES),sockets=1,cores=$(SMP_CORES),threads=1
 
@@ -644,6 +651,11 @@ $(DL_SCRIPT_SRC): $(USER_ELF_ARCHIVE) $(JS_DEMO) $(FONT_ARCHIVE) Makefile
 		echo ';'; \
 		echo 'const size_t g_dl_script_content_len = sizeof(g_dl_script_content) - 1;'; \
 	} > $(DL_SCRIPT_SRC)
+
+$(DL_ZEN_SCRIPT_SRC): dl-zen.sh Makefile
+	@mkdir -p $(GENERATED_DIR)
+	@python3 -c 'import json, pathlib; content = pathlib.Path("$<").read_text(); print("#include \"types.h\"\n\nconst char g_dl_zen_script_content[] = " + json.dumps(content) + ";\nconst size_t g_dl_zen_script_content_len = sizeof(g_dl_zen_script_content) - 1;")' > $@.tmp
+	@mv -f $@.tmp $@
 
 $(USER_BIN_DIR)/atk_demo: $(USER_OBJDIR)/atk_demo.elf
 	@mkdir -p $(USER_BIN_DIR)

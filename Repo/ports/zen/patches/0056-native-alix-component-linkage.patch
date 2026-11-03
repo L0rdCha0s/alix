@@ -1,0 +1,218 @@
+--- a/xpcom/reflect/xptcall/md/unix/moz.build
++++ b/xpcom/reflect/xptcall/md/unix/moz.build
+@@ -22,6 +22,7 @@
+         SOURCES += ["xptcinvoke_gcc_x86_unix.cpp", "xptcstubs_gcc_x86_unix.cpp"]
+
+ if CONFIG["OS_ARCH"] in (
++    "Alix",
+     "Linux",
+     "Bitrig",
+     "DragonFly",
+--- a/intl/locale/moz.build
++++ b/intl/locale/moz.build
+@@ -18,6 +18,8 @@
+     DIRS += ["gtk"]
+ elif toolkit == "android":
+     DIRS += ["android"]
++elif toolkit == "alix":
++    DIRS += ["alix"]
+
+ XPIDL_SOURCES += [
+     "mozILocaleService.idl",
+--- a/uriloader/exthandler/moz.build
++++ b/uriloader/exthandler/moz.build
+@@ -87,6 +87,8 @@
+         "unix/nsGNOMERegistry.cpp",
+         "unix/nsMIMEInfoUnix.cpp",
+     ]
++elif CONFIG["MOZ_WIDGET_TOOLKIT"] == "alix":
++    UNIFIED_SOURCES += ["alix/nsMIMEInfoAlix.cpp"]
+ elif CONFIG["MOZ_WIDGET_TOOLKIT"] == "android":
+     UNIFIED_SOURCES += [
+         "android/nsMIMEInfoAndroid.cpp",
+--- a/toolkit/components/processtools/moz.build
++++ b/toolkit/components/processtools/moz.build
+@@ -43,6 +43,8 @@
+         UNIFIED_SOURCES += ["ProcInfo_solaris.cpp"]
+     else:
+         UNIFIED_SOURCES += ["ProcInfo_linux.cpp"]
++elif toolkit == "alix":
++    UNIFIED_SOURCES += ["ProcInfo_alix.cpp"]
+ elif toolkit == "windows":
+     EXPORTS.mozilla += [
+         "CpuInfo.h",
+--- /dev/null
++++ b/widget/alix/AlixPlatformServices.cpp
+@@ -0,0 +1,38 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#include "nsIWidget.h"
++#include "mozilla/RefPtr.h"
++#include "nsIBidiKeyboard.h"
++#include "MediaKeysEventSourceFactory.h"
++
++namespace {
++class AlixBidiKeyboard final : public nsIBidiKeyboard {
++ public:
++  NS_DECL_ISUPPORTS
++  NS_IMETHOD Reset() override { return NS_OK; }
++  NS_IMETHOD IsLangRTL(bool* aResult) override {
++    *aResult = false;
++    return NS_ERROR_FAILURE;
++  }
++  NS_IMETHOD GetHaveBidiKeyboards(bool* aResult) override {
++    // Alix currently exposes one US keyboard map through its window service.
++    *aResult = false;
++    return NS_OK;
++  }
++ private:
++  ~AlixBidiKeyboard() = default;
++};
++NS_IMPL_ISUPPORTS(AlixBidiKeyboard, nsIBidiKeyboard)
++}
++already_AddRefed<nsIBidiKeyboard> nsIWidget::CreateBidiKeyboardInner() {
++  return mozilla::MakeAndAddRef<AlixBidiKeyboard>();
++}
++namespace mozilla::widget {
++mozilla::dom::MediaControlKeySource* CreateMediaControlKeySource() {
++  // There is no separate system media-key service on Alix. Window keyboard
++  // events continue through nsWindow and DOM media-session APIs remain active.
++  return nullptr;
++}
++}
+--- /dev/null
++++ b/intl/locale/alix/moz.build
+@@ -0,0 +1,6 @@
++# This Source Code Form is subject to the terms of the Mozilla Public
++# License, v. 2.0. If a copy of the MPL was not distributed with this
++# file, You can obtain one at http://mozilla.org/MPL/2.0/.
++SOURCES += ["OSPreferences_alix.cpp"]
++FINAL_LIBRARY = "xul"
++LOCAL_INCLUDES += [".."]
+--- /dev/null
++++ b/intl/locale/alix/OSPreferences_alix.cpp
+@@ -0,0 +1,32 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#include <locale.h>
++#include "mozilla/LookAndFeel.h"
++#include "mozilla/intl/Locale.h"
++#include "OSPreferences.h"
++using namespace mozilla;
++using namespace mozilla::intl;
++OSPreferences::OSPreferences() = default;
++bool OSPreferences::ReadSystemLocales(nsTArray<nsCString>& aLocales) {
++  nsAutoCString locale(Locale::GetDefaultLocale());
++  if (!CanonicalizeLanguageTag(locale)) return false;
++  aLocales.AppendElement(locale);
++  return true;
++}
++bool OSPreferences::ReadRegionalPrefsLocales(nsTArray<nsCString>& aLocales) {
++  nsAutoCString locale(setlocale(LC_TIME, nullptr));
++  if (!CanonicalizeLanguageTag(locale)) return false;
++  aLocales.AppendElement(locale);
++  return true;
++}
++bool OSPreferences::ReadDateTimePattern(DateTimeFormatStyle aDate,
++    DateTimeFormatStyle aTime, const nsACString& aLocale, nsACString& aResult) {
++  nsAutoCString skeleton;
++  if (!GetDateTimeSkeletonForStyle(aDate, aTime, aLocale, skeleton)) return false;
++  int cycle = LookAndFeel::GetInt(LookAndFeel::IntID::HourCycle);
++  if (cycle == 12 || cycle == 24) OverrideSkeletonHourCycle(cycle == 24, skeleton);
++  return GetPatternForSkeleton(skeleton, aLocale, aResult);
++}
++void OSPreferences::RemoveObservers() {}
+--- /dev/null
++++ b/uriloader/exthandler/alix/nsMIMEInfoAlix.cpp
+@@ -0,0 +1,22 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#include "../unix/nsMIMEInfoUnix.h"
++#include "mozilla/ResultExtensions.h"
++nsresult nsMIMEInfoUnix::LoadUriInternal(nsIURI* aURI) {
++  nsIFile* application = GetDefaultApplication();
++  if (!application) return NS_ERROR_FILE_NOT_FOUND;
++  nsAutoCString spec;
++  MOZ_TRY(aURI->GetAsciiSpec(spec));
++  return LaunchWithIProcess(application, spec);
++}
++NS_IMETHODIMP nsMIMEInfoUnix::GetDefaultExecutable(nsIFile** aResult) {
++  return nsMIMEInfoImpl::GetDefaultExecutable(aResult);
++}
++NS_IMETHODIMP nsMIMEInfoUnix::GetHasDefaultHandler(bool* aResult) {
++  return nsMIMEInfoImpl::GetHasDefaultHandler(aResult);
++}
++nsresult nsMIMEInfoUnix::LaunchDefaultWithFile(nsIFile* aFile) {
++  return nsMIMEInfoImpl::LaunchDefaultWithFile(aFile);
++}
+--- /dev/null
++++ b/toolkit/components/processtools/ProcInfo_alix.cpp
+@@ -0,0 +1,62 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#include "mozilla/ProcInfo.h"
++#include "mozilla/CheckedInt.h"
++#include <time.h>
++#include <unistd.h>
++#include <usyscall.h>
++namespace mozilla {
++nsresult GetCurrentProcessMemoryUsage(uint64_t* aResult) {
++  if (!aResult) return NS_ERROR_INVALID_ARG;
++  syscall_resource_usage_v2_t usage = {};
++  if (sys_resource_usage(SYSCALL_USAGE_SELF, &usage.usage, sizeof(usage)) < 0 ||
++      usage.usage.version != SYSCALL_USAGE_VERSION_2) return NS_ERROR_FAILURE;
++  // Resident user mappings are measured by Alix; shared mappings are charged
++  // to each process, so this is an upper estimate of private physical usage.
++  CheckedUint64 bytes = CheckedUint64(usage.resident_pages) * 4096;
++  if (!bytes.isValid()) return NS_ERROR_FAILURE;
++  *aResult = bytes.value();
++  return NS_OK;
++}
++nsresult GetCpuTimeSinceProcessStartInMs(uint64_t* aResult) {
++  if (!aResult) return NS_ERROR_INVALID_ARG;
++  timespec time = {};
++  if (clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &time) || time.tv_sec < 0) return NS_ERROR_FAILURE;
++  CheckedUint64 value = CheckedUint64(uint64_t(time.tv_sec)) * 1000 + uint64_t(time.tv_nsec) / 1000000;
++  if (!value.isValid()) return NS_ERROR_FAILURE;
++  *aResult = value.value();
++  return NS_OK;
++}
++nsresult GetGpuTimeSinceProcessStartInMs(uint64_t*) {
++  // The native compositor is software rendered; there is no hardware GPU clock.
++  return NS_ERROR_NOT_AVAILABLE;
++}
++ProcInfoPromise::ResolveOrRejectValue GetProcInfoSync(nsTArray<ProcInfoRequest>&& aRequests) {
++  ProcInfoPromise::ResolveOrRejectValue result;
++  HashMap<base::ProcessId, ProcInfo> processes;
++  if (!processes.reserve(aRequests.Length())) { result.SetReject(NS_ERROR_OUT_OF_MEMORY); return result; }
++  for (const auto& request : aRequests) {
++    // Resource-usage snapshots currently address the calling process only.
++    if (request.pid != getpid()) continue;
++    ProcInfo info;
++    info.pid = request.pid;
++    info.childId = dom::ContentParentId(request.childId);
++    info.type = request.processType;
++    info.origin = request.origin;
++    info.windows = request.windowInfo;
++    info.utilityActors = request.utilityInfo;
++    uint64_t milliseconds;
++    nsresult rv = GetCurrentProcessMemoryUsage(&info.memory);
++    if (NS_SUCCEEDED(rv)) rv = GetCpuTimeSinceProcessStartInMs(&milliseconds);
++    if (NS_FAILED(rv)) { result.SetReject(rv); return result; }
++    CheckedUint64 nanoseconds = CheckedUint64(milliseconds) * 1000000;
++    if (!nanoseconds.isValid()) { result.SetReject(NS_ERROR_FAILURE); return result; }
++    info.cpuTime = nanoseconds.value();
++    if (!processes.put(request.pid, std::move(info))) { result.SetReject(NS_ERROR_OUT_OF_MEMORY); return result; }
++  }
++  result.SetResolve(std::move(processes));
++  return result;
++}
++}

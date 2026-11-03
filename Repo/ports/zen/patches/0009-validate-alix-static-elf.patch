@@ -6,15 +6,15 @@
  import subprocess
 +import struct
  import sys
- 
+
  import buildconfig
-@@ -144,9 +145,302 @@
+@@ -144,9 +145,327 @@
          raise RuntimeError("\n".join(error))
- 
+
  
 +def check_alix_static_elf(binary):
-+    # Alix starts fixed ET_EXEC images itself. Export metadata and main static
-+    # TLS/GLOB_DAT GOT fixups are consumed by its CRT; ET_DYN uses native dlopen.
++    # Alix starts fixed ET_EXEC images itself. Its CRT resolves startup imports
++    # through the native loader; ET_DYN images use the same relocation rules.
 +    with open(binary, "rb") as stream:
 +        length = os.fstat(stream.fileno()).st_size
 +        def read_at(offset, size):
@@ -83,6 +83,7 @@
 +        if len(dynamic_regions) > 1 or (kind == 3 and not dynamic_regions):
 +            raise RuntimeError("Missing or conflicting native dynamic metadata")
 +        dynamic = {}
++        startup_dynamic = False
 +        if dynamic_regions:
 +            address, offset, size = dynamic_regions[0]
 +            if address % 8 or not size or size % 16 or not in_load(address, size, 4):
@@ -100,8 +101,8 @@
 +                    raise RuntimeError("Native ELF text relocations are unsupported")
 +                if tag in (0x6ffffff0, 0x6ffffffc, 0x6ffffffd, 0x6ffffffe, 0x6fffffff) and tag in dynamic:
 +                    raise RuntimeError("Duplicate native version dynamic tag")
-+                if kind == 2 and (tag == 1 or (tag in (2, 17, 18, 23, 35, 36) and value)):
-+                    raise RuntimeError("Executable needs an unsupported startup dynamic linker")
++                if kind == 2 and (tag == 1 or (tag in (2, 23, 35, 36) and value)):
++                    startup_dynamic = True
 +                dynamic[tag] = value
 +            if not terminated or not dynamic.get(5) or not dynamic.get(6) or dynamic.get(11) != 24 or not dynamic.get(10) or not (dynamic.get(4) or dynamic.get(0x6ffffef5)):
 +                raise RuntimeError("Invalid native dynamic symbol metadata")
@@ -158,6 +159,19 @@
 +            if not symbol_count:
 +                raise RuntimeError("Empty native dynamic symbol table")
 +            symbols = read_virtual(dynamic[6], symbol_count * 24)
++            if startup_dynamic:
++                loader = abi = False
++                for offset in range(0, len(symbols), 24):
++                    name, info, visibility, section, value, size = struct.unpack_from("<IBBHQQ", symbols, offset)
++                    if not name or not section or info >> 4 != 1:
++                        continue
++                    symbol_name = version_string(name)
++                    if symbol_name == b"__alix_dynamic_startup":
++                        loader = info & 15 == 2 and in_load(value, size, 1)
++                    if symbol_name == b"__alix_startup_loader_abi":
++                        abi = info & 15 == 1 and size == 4 and read_virtual(value, 4) == b"\x01\x00\x00\x00"
++                if not loader or not abi:
++                    raise RuntimeError("Executable lacks the native startup dependency loader ABI")
 +            versym, verdef, definitions, verneed, requirements = (dynamic.get(tag, 0) for tag in
 +                (0x6ffffff0, 0x6ffffffc, 0x6ffffffd, 0x6ffffffe, 0x6fffffff))
 +            if (bool(verdef) != bool(definitions) or bool(verneed) != bool(requirements) or
@@ -259,16 +273,18 @@
 +                    width = 4 if relocation in (2, 10, 11) else 8
 +                    if not in_load(target, width, 2):
 +                        raise RuntimeError("Native relocation writes outside writable data")
-+                    if kind == 2:
-+                        if relocation not in (6, 18) or target % 8:
-+                            raise RuntimeError("Unsupported native startup relocation")
++                    if symbol_index >= symbol_count:
++                        raise RuntimeError("Native relocation symbol index is outside the symbol table")
++                    if kind == 2 and relocation in (6, 18):
++                        if target % 8:
++                            raise RuntimeError("Unaligned native startup relocation")
 +                        name, binding, visibility, section, value, symbol_size = struct.unpack(
 +                            "<IBBHQQ", read_virtual(dynamic[6] + symbol_index * 24, 24))
 +                        if relocation == 6:
 +                            if addend or binding & 15 not in (0, 1, 2):
 +                                raise RuntimeError("Invalid main GOT symbol or addend")
 +                            if not section:
-+                                if binding >> 4 != 2 or value or symbol_size:
++                                if value or (not startup_dynamic and (binding >> 4 != 2 or symbol_size)):
 +                                    raise RuntimeError("Undefined strong main GOT import")
 +                            elif section != 0xfff1 and not in_load(value, symbol_size):
 +                                raise RuntimeError("Main GOT symbol is outside the image")
@@ -276,16 +292,25 @@
 +                            tls_size = tls_sizes[0] if tls_sizes else 0
 +                            if binding & 15 != 6 or section in (0, 0xfff1) or value > tls_size or symbol_size > tls_size-value or not 0 <= value+addend <= tls_size:
 +                                raise RuntimeError("Invalid main static TLS relocation")
-+                    elif relocation not in (1, 2, 6, 7, 8, 10, 11, 16, 17, 24):
-+                        raise RuntimeError("Unsupported native shared-object relocation")
++                    elif (kind == 2 and not startup_dynamic) or relocation not in (1, 2, 6, 7, 8, 10, 11, 16, 17, 24):
++                        raise RuntimeError("Unsupported native ELF relocation")
 +        for section in sections:
 +            if section[1] == 9 and section[2] & 2:
 +                raise RuntimeError("Native ELF REL relocations are unsupported")
-+            if section[1] == 4 and section[2] & 2 and (section[3], section[5]) not in tables:
-+                raise RuntimeError("Unreferenced native runtime relocation section")
++            if section[1] == 4 and section[2] & 2:
++                begin, end = section[3], section[3] + section[5]
++                cursor = begin
++                for address, size in sorted(tables):
++                    if address >= end or address + size <= begin:
++                        continue
++                    if address != cursor or address + size > end:
++                        raise RuntimeError("Overlapping or partial native relocation table")
++                    cursor = address + size
++                if cursor != end:
++                    raise RuntimeError("Unreferenced native runtime relocation section")
 +        size = dynamic.get(35, 0)
 +        if size:
-+            if kind != 3 or size % 8 or dynamic.get(36, 0) % 8:
++            if (kind != 3 and not startup_dynamic) or size % 8 or dynamic.get(36, 0) % 8:
 +                raise RuntimeError("Invalid native packed relocations")
 +            raw = read_virtual(dynamic[36], size)
 +            cursor = None

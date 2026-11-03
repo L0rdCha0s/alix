@@ -121,6 +121,7 @@ This means the *saved context pointer is effectively a stack pointer*.
 Important characteristics:
 
 - **Per-CPU run queues**: threads are enqueued onto a CPU run queue, possibly migrated if affinity requires.
+- **Default placement**: stable thread IDs spread a process's threads across online CPUs, avoiding the reserved UI CPU. Explicit affinity and UI priority take precedence. PID-based placement previously put all Gecko parent threads on one CPU even when other CPUs were idle; work stealing remains disabled by default.
 - **Priority buckets**: each run queue maintains lists per `thread_priority_t`.
 - **Process policies**: priority, priority overrides, and affinity apply to every existing thread and are retained as defaults for threads created later.
 - **Idle threads**: there is an idle thread per CPU that halts (`hlt`) when no runnable work exists.
@@ -225,3 +226,12 @@ checks and move behind the unexamined suffix, preventing an unsafe prefix from
 starving later safe threads. The production-extracted regression in
 `tests/idle_deferred_reaper_test.py` covers idle-CPU I/O ownership, these hazards,
 bounded progress and concurrent arrivals.
+
+## Scheduler hot paths
+
+CPU identification uses a per-CPU IA32_TSC_AUX index and RDTSCP when supported.
+The legacy-ID fallback uses CPUID, retaining APIC lookup for wider IDs. Ordinary
+context hashing does not require rewriting or invalidating kernel stack page
+permissions; that repair runs only with the optional page-protection diagnostics.
+Global orphan maintenance is coalesced to one sweep per timer tick instead of
+scanning the process list on every CPU's context switch.

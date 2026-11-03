@@ -9,6 +9,15 @@
      DIRS += [toolkit]
 
  if toolkit == "cocoa":
+@@ -328,7 +328,7 @@
+ if CONFIG["MOZ_X11"] or CONFIG["MOZ_WAYLAND"]:
+     DIRS += ["x11"]
+
+-if toolkit in {"gtk", "cocoa", "windows", "android", "uikit"}:
++if toolkit in {"gtk", "cocoa", "windows", "android", "uikit", "alix"}:
+     UNIFIED_SOURCES += [
+         "nsBaseFilePicker.cpp",
+     ]
 @@ -338,7 +338,7 @@
          "nsBaseColorPicker.cpp",
      ]
@@ -426,7 +435,7 @@
 +}
 --- /dev/null
 +++ b/widget/alix/components.conf
-@@ -0,0 +1,61 @@
+@@ -0,0 +1,69 @@
 +# This Source Code Form is subject to the terms of the Mozilla Public
 +# License, v. 2.0. If a copy of the MPL was not distributed with this
 +# file, You can obtain one at http://mozilla.org/MPL/2.0/.
@@ -437,6 +446,14 @@
 +UnloadFunc = 'nsWidgetAlixModuleDtor'
 +
 +Classes = [
++    {
++        'cid': '{6987230e-0098-4e78-bc5f-1493ee7519fa}',
++        'contract_ids': ['@mozilla.org/widget/useridleservice;1'],
++        'singleton': True,
++        'type': 'nsUserIdleService',
++        'headers': ['/widget/alix/nsUserIdleServiceAlix.h'],
++        'constructor': 'nsUserIdleServiceAlix::GetInstance',
++    },
 +    {
 +        'cid': '{49f428e8-baf9-4ba3-b1b0-7d2fd3abbcea}',
 +        'contract_ids': ['@mozilla.org/widget/parent/clipboard;1'],
@@ -490,19 +507,21 @@
 +]
 --- /dev/null
 +++ b/widget/alix/moz.build
-@@ -0,0 +1,9 @@
+@@ -0,0 +1,11 @@
 +# This Source Code Form is subject to the terms of the Mozilla Public
 +# License, v. 2.0. If a copy of the MPL was not distributed with this
 +# file, You can obtain one at http://mozilla.org/MPL/2.0/.
 +EXPORTS.mozilla.widget += ['nsWindow.h']
-+SOURCES += ['AlixTextInput.cpp', 'GfxInfo.cpp', 'nsAppShell.cpp', 'nsLookAndFeel.cpp', 'nsNativeThemeAlix.cpp', 'nsWidgetFactory.cpp', 'nsWindow.cpp']
++SOURCES += ['AlixPlatformServices.cpp', 'AlixTextInput.cpp', 'GfxInfo.cpp', 'nsAppShell.cpp', 'nsLookAndFeel.cpp', 'nsNativeThemeAlix.cpp', 'nsWidgetFactory.cpp', 'nsWindow.cpp']
 +LOCAL_INCLUDES += ['/toolkit/xre', '/widget', '/widget/headless', '/xpcom/components']
 +XPCOM_MANIFESTS += ['components.conf']
 +include("/ipc/chromium/chromium-config.mozbuild")
 +FINAL_LIBRARY = "xul"
++
++SOURCES += ["nsUserIdleServiceAlix.cpp"]
 --- /dev/null
 +++ b/widget/alix/nsAppShell.cpp
-@@ -0,0 +1,61 @@
+@@ -0,0 +1,77 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -534,8 +553,17 @@
 +      return NS_ERROR_NOT_AVAILABLE;
 +    nsTArray<RefPtr<Screen>> screens;
 +    LayoutDeviceIntRect rect(0, 0, mDisplay.width, mDisplay.height);
++    auto area = MakeUnique<user_atk_window_control_t>();
++    area->version = USER_ATK_CONTROL_VERSION;
++    area->size = sizeof(*area);
++    auto available = rect;
++    if (!sys_ui_control(0, USER_ATK_CONTROL_WORK_AREA, area.get()) &&
++        area->width && area->height) {
++      LayoutDeviceIntRect candidate(area->x, area->y, area->width, area->height);
++      if (rect.Contains(candidate)) available = candidate;
++    }
 +    screens.AppendElement(MakeRefPtr<Screen>(
-+        rect, rect, 24, 24, 0, DesktopToLayoutDeviceScale(),
++        rect, available, 24, 24, 0, DesktopToLayoutDeviceScale(),
 +        CSSToLayoutDeviceScale(), 96.0f, Screen::IsPseudoDisplay::No,
 +        Screen::IsHDR::No, 80.0f, 1000.0f));
 +    ScreenManager::Refresh(std::move(screens));
@@ -555,8 +583,15 @@
 +    // Alix's window queue has nonblocking polling. Bound the idle wait so
 +    // native input is observed without retaining a user stack in a kernel UI
 +    // wait.
-+    if (mayWait && !processed && !mWakePending)
-+      lock.Wait(TimeDuration::FromMilliseconds(10));
++    if (mayWait && !processed && !mWakePending) {
++      // Child processes own no native windows. Their IPC/XPCOM notifications
++      // wake this monitor; periodic native polling only creates a scheduler
++      // and futex storm across every otherwise idle content process.
++      if (XRE_IsParentProcess())
++        lock.Wait(TimeDuration::FromMilliseconds(10));
++      else
++        lock.Wait();
++    }
 +    requested = mWakePending;
 +    mWakePending = false;
 +  }
@@ -887,7 +922,7 @@
 +#endif
 --- /dev/null
 +++ b/widget/alix/nsWindow.cpp
-@@ -0,0 +1,593 @@
+@@ -0,0 +1,730 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -895,6 +930,8 @@
 +#include "gfxPlatform.h"
 +#include "mozilla/ClearOnShutdown.h"
 +#include "mozilla/MouseEvents.h"
++#include "mozilla/NativeKeyBindingsType.h"
++#include "mozilla/WritingModes.h"
 +#include "mozilla/TextEventDispatcher.h"
 +#include "mozilla/TextEvents.h"
 +#include "mozilla/UniquePtrExtensions.h"
@@ -1110,9 +1147,21 @@
 +      mRestoreBounds = GetBounds();
 +    if (mode == nsSizeMode_Normal)
 +      SetBounds(mRestoreBounds);
-+    else if (Control(USER_ATK_CONTROL_QUERY))
-+      SetBounds(LayoutDeviceIntRect(0, 0, mControl.screen_width,
-+                                    mControl.screen_height));
++    else if (Control(USER_ATK_CONTROL_QUERY)) {
++      LayoutDeviceIntRect bounds(0, 0, mControl.screen_width, mControl.screen_height);
++      if (mode == nsSizeMode_Maximized) {
++        auto area = MakeUnique<user_atk_window_control_t>();
++        area->version = USER_ATK_CONTROL_VERSION;
++        area->size = sizeof(*area);
++        area->flags = mControl.flags & USER_ATK_STATE_CHROME;
++        if (!sys_ui_control(0, USER_ATK_CONTROL_WORK_AREA, area.get()) &&
++            area->width && area->height) {
++          LayoutDeviceIntRect available(area->x, area->y, area->width, area->height);
++          if (bounds.Contains(available)) bounds = available;
++        }
++      }
++      SetBounds(bounds);
++    }
 +    Show(true);
 +  }
 +  mSizeMode = mode;
@@ -1290,6 +1339,95 @@
 +         USER_ATK_MOUSE_FLAG_RIGHT_PRESS | USER_ATK_MOUSE_FLAG_RIGHT_RELEASE)))
 +    send(eMouseMove, MouseButton::eNotPressed);
 +}
++bool nsWindow::GetEditCommands(NativeKeyBindingsType type,
++                                const WidgetKeyboardEvent &event,
++                                nsTArray<CommandInt> &commands) {
++  if (!nsIWidget::GetEditCommands(type, event, commands)) return false;
++  if (event.IsAlt() || event.IsMeta()) return true;
++  auto key = event.mKeyNameIndex;
++  if (event.NeedsToRemapNavigationKey()) {
++    if (RefPtr<TextEventDispatcher> dispatcher = GetTextEventDispatcher()) {
++      auto mode = dispatcher->MaybeQueryWritingModeAtSelection();
++      if (mode.isSome()) key = event.GetRemappedKeyNameIndex(mode.ref());
++    }
++  }
++  bool control = event.IsControl(), shift = event.IsShift();
++  bool multiline = type != NativeKeyBindingsType::SingleLineEditor;
++  bool rich = type == NativeKeyBindingsType::RichTextEditor;
++  Command command = Command::DoNothing;
++  switch (key) {
++  case KEY_NAME_INDEX_USE_STRING:
++    if (!control) break;
++    switch (event.PseudoCharCode()) {
++    case 'a': case 'A': command = Command::SelectAll; break;
++    case 'c': case 'C': if (!shift) command = Command::Copy; break;
++    case 'x': case 'X': if (!shift) command = Command::Cut; break;
++    case 'v': case 'V':
++      command = shift && rich ? Command::PasteWithoutFormat : Command::Paste;
++      break;
++    case 'z': case 'Z': command = shift ? Command::HistoryRedo : Command::HistoryUndo; break;
++    case 'y': case 'Y': if (!shift) command = Command::HistoryRedo; break;
++    case 'b': case 'B': if (rich && !shift) command = Command::FormatBold; break;
++    case 'i': case 'I': if (rich && !shift) command = Command::FormatItalic; break;
++    case 'u': case 'U':
++      if (!shift) command = rich ? Command::FormatUnderline : Command::DeleteToBeginningOfLine;
++      break;
++    }
++    break;
++  case KEY_NAME_INDEX_Backspace:
++    command = control ? (shift ? Command::DeleteToBeginningOfLine : Command::DeleteWordBackward)
++                      : Command::DeleteCharBackward;
++    break;
++  case KEY_NAME_INDEX_Delete:
++    command = shift && !control ? Command::Cut :
++      control ? (shift ? Command::DeleteToEndOfLine : Command::DeleteWordForward)
++              : Command::DeleteCharForward;
++    break;
++  case KEY_NAME_INDEX_Insert:
++    if (control && !shift) command = Command::Copy;
++    else if (shift && !control) command = Command::Paste;
++    break;
++  case KEY_NAME_INDEX_ArrowLeft:
++    command = control ? (shift ? Command::SelectWordPrevious : Command::WordPrevious)
++                      : (shift ? Command::SelectCharPrevious : Command::CharPrevious);
++    break;
++  case KEY_NAME_INDEX_ArrowRight:
++    command = control ? (shift ? Command::SelectWordNext : Command::WordNext)
++                      : (shift ? Command::SelectCharNext : Command::CharNext);
++    break;
++  case KEY_NAME_INDEX_ArrowUp:
++    if (multiline) command = control ? (shift ? Command::SelectBeginParagraph : Command::BeginParagraph)
++                                    : (shift ? Command::SelectLinePrevious : Command::LinePrevious);
++    break;
++  case KEY_NAME_INDEX_ArrowDown:
++    if (multiline) command = control ? (shift ? Command::SelectEndParagraph : Command::EndParagraph)
++                                    : (shift ? Command::SelectLineNext : Command::LineNext);
++    break;
++  case KEY_NAME_INDEX_Home:
++    command = control && multiline ? (shift ? Command::SelectTop : Command::MoveTop)
++                                   : (shift ? Command::SelectBeginLine : Command::BeginLine);
++    break;
++  case KEY_NAME_INDEX_End:
++    command = control && multiline ? (shift ? Command::SelectBottom : Command::MoveBottom)
++                                   : (shift ? Command::SelectEndLine : Command::EndLine);
++    break;
++  case KEY_NAME_INDEX_PageUp:
++    if (multiline && !control) command = shift ? Command::SelectPageUp : Command::MovePageUp;
++    break;
++  case KEY_NAME_INDEX_PageDown:
++    if (multiline && !control) command = shift ? Command::SelectPageDown : Command::MovePageDown;
++    break;
++  case KEY_NAME_INDEX_Enter:
++    if (multiline && !control) command = shift ? Command::InsertLineBreak : Command::InsertParagraph;
++    break;
++  default:
++    break;
++  }
++  if (command != Command::DoNothing)
++    commands.AppendElement(static_cast<CommandInt>(command));
++  return true;
++}
++
 +void nsWindow::DispatchKey(const user_atk_event_t &native) {
 +  uint32_t code = native.data1 & 0x7f;
 +  bool released = native.flags & USER_ATK_KEY_FLAG_RELEASE;
@@ -1309,6 +1447,38 @@
 +  event.mModifiers = mModifiers;
 +  event.mIsRepeat = native.flags & USER_ATK_KEY_FLAG_REPEAT;
 +  char16_t value = released ? mKeyValues[index] : char16_t(native.data0);
++  // The kernel's terminal character translation suppresses Ctrl+digits and
++  // Ctrl+punctuation. Raw widgets still receive the physical scan code, so
++  // recover the US-layout key for browser shortcuts and DOM key events.
++  char16_t base = 0, shifted = 0;
++  uint32_t physicalKeyCode = 0;
++  if (code >= 0x02 && code <= 0x0b) {
++    base = u"1234567890"[code - 0x02];
++    shifted = u"!@#$%^&*()"[code - 0x02];
++    physicalKeyCode = base;
++  }
++  switch (code) {
++  case 0x0c: base = u'-'; shifted = u'_'; physicalKeyCode = NS_VK_HYPHEN_MINUS; break;
++  case 0x0d: base = u'='; shifted = u'+'; physicalKeyCode = NS_VK_EQUALS; break;
++  case 0x1a: base = u'['; shifted = u'{'; physicalKeyCode = NS_VK_OPEN_BRACKET; break;
++  case 0x1b: base = u']'; shifted = u'}'; physicalKeyCode = NS_VK_CLOSE_BRACKET; break;
++  case 0x27: base = u';'; shifted = u':'; physicalKeyCode = NS_VK_SEMICOLON; break;
++  case 0x28: base = u'\''; shifted = u'"'; physicalKeyCode = NS_VK_QUOTE; break;
++  case 0x29: base = u'`'; shifted = u'~'; physicalKeyCode = NS_VK_BACK_QUOTE; break;
++  case 0x2b: base = u'\\'; shifted = u'|'; physicalKeyCode = NS_VK_BACK_SLASH; break;
++  case 0x33: base = u','; shifted = u'<'; physicalKeyCode = NS_VK_COMMA; break;
++  case 0x34: base = u'.'; shifted = u'>'; physicalKeyCode = NS_VK_PERIOD; break;
++  case 0x35:
++    base = u'/'; shifted = u'?';
++    physicalKeyCode = native.flags & USER_ATK_KEY_FLAG_EXTENDED ? NS_VK_DIVIDE : NS_VK_SLASH;
++    break;
++  case 0x37: base = shifted = u'*'; physicalKeyCode = NS_VK_MULTIPLY; break;
++  case 0x39: base = shifted = u' '; physicalKeyCode = NS_VK_SPACE; break;
++  case 0x4a: base = shifted = u'-'; physicalKeyCode = NS_VK_SUBTRACT; break;
++  case 0x4e: base = shifted = u'+'; physicalKeyCode = NS_VK_ADD; break;
++  }
++  if (!released && !value && (mModifiers & MODIFIER_CONTROL))
++    value = mModifiers & MODIFIER_SHIFT ? shifted : base;
 +  if (!released && (mModifiers & MODIFIER_CONTROL) && value >= 1 && value <= 26)
 +    value += u'a' - 1;
 +  if (!released)
@@ -1323,6 +1493,8 @@
 +    event.mKeyCode = value - u'a' + NS_VK_A;
 +  else if ((value >= u'A' && value <= u'Z') || (value >= u'0' && value <= u'9'))
 +    event.mKeyCode = value;
++  if (physicalKeyCode)
++    event.mKeyCode = physicalKeyCode;
 +  if ((code >= 0x3b && code <= 0x44) || code == 0x57 || code == 0x58) {
 +    unsigned function = code <= 0x44 ? code - 0x3b : code - 0x57 + 10;
 +    event.mKeyNameIndex =
@@ -1483,7 +1655,7 @@
 +}
 --- /dev/null
 +++ b/widget/alix/nsWindow.h
-@@ -0,0 +1,92 @@
+@@ -0,0 +1,95 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -1532,6 +1704,9 @@
 +  InputContext GetInputContext() override { return mInputContext; }
 +  mozilla::widget::TextEventDispatcherListener *
 +  GetNativeTextEventDispatcherListener() override;
++  MOZ_CAN_RUN_SCRIPT bool GetEditCommands(
++      mozilla::NativeKeyBindingsType, const mozilla::WidgetKeyboardEvent &,
++      nsTArray<mozilla::CommandInt> &) override;
 +  bool PreRender(mozilla::widget::WidgetRenderingContext *) override;
 +  void PostRender(mozilla::widget::WidgetRenderingContext *) override;
 +  already_AddRefed<DrawTarget> StartRemoteDrawing() override;
@@ -1576,3 +1751,56 @@
 +  size_t mUploadCapacity = 0;
 +};
 +#endif
+--- /dev/null
++++ b/widget/alix/nsUserIdleServiceAlix.h
+@@ -0,0 +1,19 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++#ifndef widget_alix_nsUserIdleServiceAlix_h
++#define widget_alix_nsUserIdleServiceAlix_h
++
++#include "nsUserIdleService.h"
++
++class nsUserIdleServiceAlix final : public nsUserIdleService {
++ public:
++  NS_INLINE_DECL_REFCOUNTING_INHERITED(nsUserIdleServiceAlix, nsUserIdleService)
++  static already_AddRefed<nsUserIdleServiceAlix> GetInstance();
++  bool PollIdleTime(uint32_t* aIdleTime) override;
++
++ private:
++  nsUserIdleServiceAlix() = default;
++  ~nsUserIdleServiceAlix() = default;
++};
++#endif
+--- /dev/null
++++ b/widget/alix/nsUserIdleServiceAlix.cpp
+@@ -0,0 +1,28 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++#include "nsUserIdleServiceAlix.h"
++#include "mozilla/AppShutdown.h"
++#include "mozilla/UniquePtr.h"
++#include <usyscall.h>
++
++already_AddRefed<nsUserIdleServiceAlix> nsUserIdleServiceAlix::GetInstance() {
++  RefPtr<nsUserIdleServiceAlix> service =
++      nsUserIdleService::GetInstance().downcast<nsUserIdleServiceAlix>();
++  if (!service) {
++    if (mozilla::AppShutdown::IsInOrBeyond(
++            mozilla::ShutdownPhase::AppShutdownConfirmed)) return nullptr;
++    service = new nsUserIdleServiceAlix();
++  }
++  return service.forget();
++}
++
++bool nsUserIdleServiceAlix::PollIdleTime(uint32_t* aIdleTime) {
++  if (!aIdleTime) return false;
++  auto state = mozilla::MakeUnique<user_atk_window_control_t>();
++  state->version = USER_ATK_CONTROL_VERSION;
++  state->size = sizeof(*state);
++  if (sys_ui_control(0, USER_ATK_CONTROL_INPUT_IDLE, state.get())) return false;
++  *aIdleTime = state->idle_milliseconds;
++  return true;
++}

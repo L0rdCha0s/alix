@@ -74,6 +74,15 @@ def main(cxx=False):
             hash_flags = [] if any("hash-style=" in arg for arg in arguments) else ["-Wl,--hash-style=both"]
             arguments += ["-nostdlib", "-Wl,-shared", "-Wl,-z,noexecstack", "-Wl,-z,max-page-size=0x1000", *hash_flags,
                           "-Wl,-z,text", "-Wl,-z,relro", "-Wl,-z,now"]
+            if cxx:
+                pic_runtime = ROOT / "ports/zen/upstream/libcxx-alix-pic-build/lib"
+                libraries = [pic_runtime / name for name in ("libc++.a", "libc++abi.a", "libalix-cxx-support.a")]
+                for library in libraries:
+                    if not library.is_file():
+                        raise RuntimeError(f"build native PIC libc++ with ports/zen/libcxx/build.py --pic: {library}")
+                arguments += ["-Wl,--start-group", *map(str, libraries), "-Wl,--end-group"]
+            libgcc = subprocess.check_output(["x86_64-elf-gcc", "-print-libgcc-file-name"], text=True).strip()
+            arguments += [libgcc]
             os.execv(compiler, [str(compiler)] + flags + arguments)
         manifest = Path(os.environ.get("ALIX_RUNTIME_MANIFEST", str(ROOT / "ports/zen/upstream/alix-toolchain/runtime-objects.json")))
         objects = json.loads(manifest.read_text())
@@ -110,7 +119,10 @@ def main(cxx=False):
         # sysroot or pulling a second early copy of those same definitions.
         arguments = [argument for argument in arguments if argument != "-lm"]
         arguments += ["-nostdlib", "-no-pie", "-Wl,--export-dynamic", "-Wl,--no-dynamic-linker",
+                      "-Wl,--disable-new-dtags,-rpath,$ORIGIN",
                       "-Wl,-u,__stack_chk_guard",
                       "-Wl,-T," + str(ROOT / "user/lib/link.ld"), "-Wl,-z,max-page-size=0x1000",
-                      "-Wl,--start-group", "-x", "none"] + objects + list(map(str, libraries)) + [libgcc, "-Wl,--end-group"]
+                      "-Wl,--start-group", "-x", "none"] + objects + [
+                          "-Wl,--whole-archive", str(libraries[0]), "-Wl,--no-whole-archive"
+                      ] + list(map(str, libraries[1:])) + [libgcc, "-Wl,--end-group"]
     os.execv(compiler, [str(compiler)] + flags + arguments)

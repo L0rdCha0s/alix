@@ -117,12 +117,12 @@
     },
     {
       "file": "0009-validate-alix-static-elf.patch",
-      "sha256": "d90a75623fa1c4d2a003d02e0d22f45c3fedeaec7f5efc821eaa1477feef7cbc",
+      "sha256": "99e2e83e7efe3de1b8c37499b0dfbddafb1a68c3d0148a1498d49a3c7aeedd7d",
       "files": [
         {
           "path": "python/mozbuild/mozbuild/action/check_binary.py",
           "before": "2bcb667c2652afe1e08d681d7a6acd75bb15889dc57ec3fd359e5ca8ef650983",
-          "after": "7f15a562ada0026b805ebbc03b9aca851c17424ac038deffc40dc187308e7239"
+          "after": "0fc3e30503b93d8f6f37d2683b7421e6050ddf0a3b94ce8adcaf8bf262467e63"
         }
       ]
     },
@@ -228,12 +228,12 @@
     },
     {
       "file": "0015-native-alix-widget-backend.patch",
-      "sha256": "c0c06fe31228fb7dad58975b77e3eb4fd2ede284ec28d2bdd56b375bc07fadb6",
+      "sha256": "a96d32404e5e9fc32dfd17273312bcb0204bd5f6c7c0e826141c28447feac3ba",
       "files": [
         {
           "path": "widget/moz.build",
           "before": "b26f93c45a938ba02b165d85a7fa226157ddc593a6081beaddac3678f71b8520",
-          "after": "bdc824330fcf0a48212ff32a6eebca99e92afc73d89bf073cd452f505da7e05d"
+          "after": "e5ff319dcb058f756c21dc71346bfad9a6e71a28e44d9679ff1e2ef7b3786e25"
         },
         {
           "path": "widget/alix/AlixTextInput.cpp",
@@ -263,17 +263,17 @@
         {
           "path": "widget/alix/components.conf",
           "before": null,
-          "after": "a81f3605f0a7d71646f048c2c34edc862666cbef07cd0717d0805cfdf34ad5b3"
+          "after": "1b7bbe577b346cf40d5a32bc964a9c6de15459d45eff134b806edf1a8c3f7769"
         },
         {
           "path": "widget/alix/moz.build",
           "before": null,
-          "after": "9334a8555d5e24e1eb6097da1ee66570ba49881466ebc7739d9458b11264f33d"
+          "after": "c49349f10ff1c918a7c4b09fafb1d0ad2b447cf439182aa52a97f41cbf90e3c9"
         },
         {
           "path": "widget/alix/nsAppShell.cpp",
           "before": null,
-          "after": "9c8e33833422ff01e79bec800b37836fc95a7f2100c1ac36c928a3fc4bf3acbd"
+          "after": "1cc8340c9888b6d19aef9f06264ecf1b47168b6f4c02d968b3c1e45d24a7a16c"
         },
         {
           "path": "widget/alix/nsAppShell.h",
@@ -308,12 +308,22 @@
         {
           "path": "widget/alix/nsWindow.cpp",
           "before": null,
-          "after": "45edc1f3081c64b15b14c7b9a453c661acec9d8c8909f7d30dfd33ed779d49d7"
+          "after": "87696f104827fe1bf1406f4f3ca9a791c4256a739abf0442c47345f41ac9fd74"
         },
         {
           "path": "widget/alix/nsWindow.h",
           "before": null,
-          "after": "8b90b22bc2f8cc1aae57cedefe7fe0c521f5781955d5314082104f315358be03"
+          "after": "ca977f3546a7692eb7858330394b7003dd05b45b1a28b8666f62b2d838f8232c"
+        },
+        {
+          "path": "widget/alix/nsUserIdleServiceAlix.h",
+          "before": null,
+          "after": "99be4354cba106e5c870e807dd66d5e6dfadd35c62b2f4b3513243f72876777b"
+        },
+        {
+          "path": "widget/alix/nsUserIdleServiceAlix.cpp",
+          "before": null,
+          "after": "a77eabea300235cfe9827b2beec6ece2e6e91ef5ba4d848822c0be2446de9302"
         }
       ]
     },
@@ -1008,7 +1018,7 @@
     },
     {
       "file": "0050-native-alix-thebes-platform.patch",
-      "sha256": "ede5b88cb59fdaf32ec78fb3bd51046ad61c2d877c7dbfa563e07f55c1086676",
+      "sha256": "d86f0a1910ed4060cc51804d1a079abafa955ecda118e7305f906759ff5a4a6d",
       "files": [
         {
           "path": "gfx/thebes/gfxAlixPlatform.h",
@@ -1043,7 +1053,7 @@
         {
           "path": "gfx/thebes/gfxFT2FontList.cpp",
           "before": "baf17ccee179096726bbb9641d540c6cd49be6926b91277d7378dd727bc622c2",
-          "after": "361ffb539113f2be401760f5fdf2b34d39eb8296874ac85f05b9c4606f931d2f"
+          "after": "a1436e0185dad61dd5fc950ae3857ab8d929034fee1e352dd76a2caacb4f8b52"
         },
         {
           "path": "gfx/thebes/gfxFT2Fonts.cpp",
@@ -1172,6 +1182,122 @@
           "path": "image/decoders/icon/alix/moz.build",
           "before": null,
           "after": "c36f76b29d2957f3f93c1e4ebb26aa5c298aa325c1f1f21b5ee1c469f94c0d66"
+        }
+      ]
+    },
+    {
+      "file": "0054-native-alix-updater-launch.patch",
+      "sha256": "3968ed28cdb504233ffc68c6bd87c37c5f2800b3dbab3615bad838228e28fea3",
+      "files": [
+        {
+          "path": "toolkit/mozapps/update/updater/updater.cpp",
+          "before": "6f2f7eaa2035ba044b3d23747d6805f57d25683e09d136d875c2059894b5f92c",
+          "after": "2ae32d1e9a1e39a6382ff2079afb881f5c9718cb4b9956b7297eb4169e2f01bd"
+        }
+      ]
+    },
+    {
+      "file": "0055-native-alix-update-driver-launch.patch",
+      "sha256": "07c5cbc08a837570b3898a7844c51cfbb0bb78d9b14756d31be3f0fcab384381",
+      "files": [
+        {
+          "path": "toolkit/xre/nsUpdateDriver.cpp",
+          "before": "01d5a4605e275599e69215874ae2d647cfb93486e4ad7cf127e352a7000a6696",
+          "after": "823a89eabe9c5ec62375134e2cc6bf2a38d6df627df706fe571ab0cf3e81de97"
+        }
+      ]
+    },
+    {
+      "file": "0056-native-alix-component-linkage.patch",
+      "sha256": "e90082fcbfdf3fcdbf656c91e01b598ebc910da31d7097d95735deb64ba2c640",
+      "files": [
+        {
+          "path": "xpcom/reflect/xptcall/md/unix/moz.build",
+          "before": "7bb892b38a3eea70a2010b9aa56e7dc85ffaf4c38702049721d61d837e12a678",
+          "after": "497a61715a4da80720c72ced99ad6d14375a6af336e34735f95ebd8d3374da7a"
+        },
+        {
+          "path": "intl/locale/moz.build",
+          "before": "9c728be61ff5e26cb1c4fa591f34acdc28521d61f168042ea338b45af8ec6d63",
+          "after": "22e5a0eed92086c226bbb297e414fa455b04fb753fc3c8874372d3c3871df469"
+        },
+        {
+          "path": "uriloader/exthandler/moz.build",
+          "before": "6a77c6cd900715426f929a7754967467016976aece7fa0f0dc986e6dc2e7d874",
+          "after": "c642ac8c973be84ecc96400d981fc0641d3a321d3eda2eaded32386f6b63b87a"
+        },
+        {
+          "path": "toolkit/components/processtools/moz.build",
+          "before": "c72e4846274026e4d4503f13825dbe44aa29218b64328d48fc2b4c6bfb19a75e",
+          "after": "3c6fc88b8c8f721aa73139c10260313dc94ad0bd97995b369de530a04683a2e7"
+        },
+        {
+          "path": "widget/alix/AlixPlatformServices.cpp",
+          "before": null,
+          "after": "a70f6b1fcba04f0cd50a19ff9983867c3565da22526bf470950def946be4b4ec"
+        },
+        {
+          "path": "intl/locale/alix/moz.build",
+          "before": null,
+          "after": "3517427c0e2134845b349b2d35641c1ee28597df1485f45bc34e8eab41e30e37"
+        },
+        {
+          "path": "intl/locale/alix/OSPreferences_alix.cpp",
+          "before": null,
+          "after": "c586cd2f85d768e46bb238c1aa8d958fad34a79bc878f8265d88996811eee29a"
+        },
+        {
+          "path": "uriloader/exthandler/alix/nsMIMEInfoAlix.cpp",
+          "before": null,
+          "after": "937fd6d2a8b160683b0b6c43b7e665346cd89317d8356989d41cd17c7c4866fc"
+        },
+        {
+          "path": "toolkit/components/processtools/ProcInfo_alix.cpp",
+          "before": null,
+          "after": "c0be0fa47edbddc0289b6ba93e76a1751177e4494d508ea9fabbe7588451adea"
+        }
+      ]
+    },
+    {
+      "file": "0057-native-alix-final-platform-hooks.patch",
+      "sha256": "5209fd17422fad81e1360a393c47385f12dde195f57bb6f724725190f7dbd5fa",
+      "files": [
+        {
+          "path": "accessible/other/Platform.cpp",
+          "before": "1fc3834144b44a2aeaafccf4c884bc38b6d429871945f85e2af2984e5b74e193",
+          "after": "ec9dced6b0441d968006616fc8a9f2b2b0dfc63d79dba912e6a8ed54b96be160"
+        },
+        {
+          "path": "gfx/angle/moz.build",
+          "before": "03490d33e01351546c733456f135dc466584f2ee670376e9b071f486a40e32ca",
+          "after": "270c1e20edd3360ba01483696d80790a3e20fb613cc64b934dc0a01e9112f76a"
+        },
+        {
+          "path": "third_party/angle/src/common/system_utils_alix.cpp",
+          "before": null,
+          "after": "a0e30a1162d118d0f19699e599b6bc304cb7bfc5430268aed44a99948a50a4e5"
+        }
+      ]
+    },
+    {
+      "file": "0058-native-alix-browser-restart.patch",
+      "sha256": "2ac787317032193fb756fcd0d03ab82dc9257076d312281529c0fdb8be8db1c7",
+      "files": [
+        {
+          "path": "toolkit/xre/nsAppRunner.cpp",
+          "before": "154a3300bc0840a1d6c4db46eeac5562772cdeae16e824d4cd4a46cf78bcf7fe",
+          "after": "fafec0885ac197dc4eafba4da1044710895e2d688c1015e6ca0865be18ca4256"
+        }
+      ]
+    },
+    {
+      "file": "0059-native-alix-filesystem-capacity.patch",
+      "sha256": "0e8d91e91988f542ee9926fba30be235644b295cbe2a1140ad1cd49ef1c9228a",
+      "files": [
+        {
+          "path": "xpcom/io/nsLocalFileUnix.cpp",
+          "before": "fa4e0e1bd5b12c8d927a4d94ebeb9cd2682bdb1f1064d66da2f23de045670965",
+          "after": "18c474c4a4c015d1d2e26bcd6c5b0250bff2629685bbba4d39d671aa98482d90"
         }
       ]
     }

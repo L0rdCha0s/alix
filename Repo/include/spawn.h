@@ -28,6 +28,9 @@ typedef struct
 #ifdef __cplusplus
 extern "C" {
 #endif
+#if defined(__GNUC__)
+#pragma GCC visibility push(default)
+#endif
 int posix_spawn(pid_t *pid, const char *path, const posix_spawn_file_actions_t *actions,
                  const posix_spawnattr_t *attributes, char *const argv[], char *const environment[]);
 int posix_spawnp(pid_t *pid, const char *file, const posix_spawn_file_actions_t *actions,
@@ -48,6 +51,9 @@ int posix_spawnattr_getsigdefault(const posix_spawnattr_t *attributes, sigset_t 
 int posix_spawnattr_setsigdefault(posix_spawnattr_t *attributes, const sigset_t *set);
 int posix_spawnattr_getpgroup(const posix_spawnattr_t *attributes, pid_t *group);
 int posix_spawnattr_setpgroup(posix_spawnattr_t *attributes, pid_t group);
+#if defined(__GNUC__)
+#pragma GCC visibility pop
+#endif
 #ifdef __cplusplus
 }
 #endif

@@ -11,6 +11,7 @@
 #include "stdlib.h"
 #include "time.h"
 #include "sys/time.h"
+#include "sys/statvfs.h"
 #include "fenv.h"
 #include "printf_float.h"
 #include <limits.h>
@@ -35,26 +36,21 @@ int *__errno_location(void)
 #define USER_HEAP_LARGE_THRESHOLD ((size_t)(64u * 1024u * 1024u))
 #define ENABLE_USER_MEM_DEBUG_LOGS 1
 
-static inline void libc_cpu_relax(void)
-{
-#if defined(__x86_64__) || defined(__i386__)
-    __asm__ volatile ("pause");
-#else
-    __asm__ volatile ("" ::: "memory");
-#endif
-}
-
 typedef struct heap_block
 {
     size_t size;
     struct heap_block *next;
     struct heap_block *prev;
     bool free;
+    struct heap_block *free_next, *free_prev;
 } heap_block_t;
 
 static heap_block_t *g_heap_head = NULL;
 static heap_block_t *g_heap_tail = NULL;
-static volatile int g_heap_lock = 0;
+static uintptr_t g_heap_committed_end;
+static alix_mutex_t g_heap_lock;
+static heap_block_t *g_heap_free_bins[64];
+_Static_assert(sizeof(heap_block_t) % ALIGNMENT == 0, "heap payload alignment");
 
 typedef struct
 {
@@ -271,12 +267,12 @@ static bool user_heap_addr_in_bounds(uintptr_t addr)
     }
 
     uintptr_t low = (uintptr_t)g_heap_head;
-    uintptr_t high = user_heap_current_brk();
+    uintptr_t high = g_heap_committed_end;
     if (low == 0 || high == 0)
     {
         return true;
     }
-    return addr >= low && addr < high;
+    return addr >= low && addr <= high - sizeof(heap_block_t);
 }
 
 static void user_heap_log_corruption(const char *where,
@@ -318,6 +314,31 @@ static size_t align_size(size_t size)
     return (size + mask) & ~mask;
 }
 
+static unsigned free_bin_index(size_t size)
+{
+    return size ? 63u - (unsigned)__builtin_clzll((unsigned long long)size) : 0;
+}
+
+static void free_bin_insert(heap_block_t *block)
+{
+    unsigned index = free_bin_index(block->size);
+    block->free_prev = NULL;
+    block->free_next = g_heap_free_bins[index];
+    if (block->free_next) block->free_next->free_prev = block;
+    g_heap_free_bins[index] = block;
+}
+
+static void free_bin_remove(heap_block_t *block)
+{
+    if (block->free_prev) block->free_prev->free_next = block->free_next;
+    else g_heap_free_bins[free_bin_index(block->size)] = block->free_next;
+    if (block->free_next) block->free_next->free_prev = block->free_prev;
+    block->free_next = block->free_prev = NULL;
+}
+
+/* The incoming block is free but has not yet entered a bin. */
+static void coalesce(heap_block_t *block);
+
 static void split_block(heap_block_t *block, size_t size)
 {
     if (!block || block->size <= size + sizeof(heap_block_t) + ALIGNMENT)
@@ -347,6 +368,7 @@ static void split_block(heap_block_t *block, size_t size)
             g_heap_tail = new_block;
             block->next = new_block;
             block->size = size;
+            free_bin_insert(new_block);
             return;
         }
         new_block->next->prev = new_block;
@@ -357,6 +379,7 @@ static void split_block(heap_block_t *block, size_t size)
     }
     block->next = new_block;
     block->size = size;
+    coalesce(new_block);
 }
 
 static void coalesce(heap_block_t *block)
@@ -376,33 +399,43 @@ static void coalesce(heap_block_t *block)
         }
         else
         {
-        block->size += sizeof(heap_block_t) + next->size;
-        block->next = next->next;
-        if (block->next)
-        {
-            block->next->prev = block;
-        }
-        else
-        {
-            g_heap_tail = block;
-        }
+            free_bin_remove(next);
+            block->size += sizeof(heap_block_t) + next->size;
+            block->next = next->next;
+            if (block->next) block->next->prev = block;
+            else g_heap_tail = block;
         }
     }
 
     if (block->prev && block->prev->free)
     {
-        block = block->prev;
-        coalesce(block);
+        heap_block_t *previous = block->prev;
+        uintptr_t expected = (uintptr_t)previous + sizeof(heap_block_t) + previous->size;
+        if ((uintptr_t)block == expected)
+        {
+            free_bin_remove(previous);
+            previous->size += sizeof(heap_block_t) + block->size;
+            previous->next = block->next;
+            if (previous->next) previous->next->prev = previous;
+            else g_heap_tail = previous;
+            block = previous;
+        }
+        else user_heap_log_corruption("coalesce nonadjacent previous", block, 0, previous, previous);
     }
+    free_bin_insert(block);
 }
 
 static heap_block_t *find_free_block(size_t size)
 {
-    for (heap_block_t *block = g_heap_head; block; block = block->next)
+    for (unsigned index = free_bin_index(size); index < 64; ++index)
     {
-        if (block->free && block->size >= size)
+        for (heap_block_t *block = g_heap_free_bins[index]; block; block = block->free_next)
         {
-            return block;
+            if (block->size >= size)
+            {
+                free_bin_remove(block);
+                return block;
+            }
         }
     }
     return NULL;
@@ -418,6 +451,7 @@ static heap_block_t *request_block_unlinked(size_t size)
         return NULL;
     }
     size_t total = sizeof(heap_block_t) + size;
+    if (total < 64u * 1024u) total = 64u * 1024u;
     void *base = sys_sbrk((int64_t)total);
     user_heap_log("sbrk size=", total);
     user_heap_log("sbrk result=", (uintptr_t)base);
@@ -427,11 +461,13 @@ static heap_block_t *request_block_unlinked(size_t size)
         errno = ENOMEM;
         return NULL;
     }
+    g_heap_committed_end = (uintptr_t)base + total;
     heap_block_t *block = (heap_block_t *)base;
-    block->size = size;
+    block->size = total - sizeof(heap_block_t);
     block->next = NULL;
     block->prev = NULL;
     block->free = false;
+    block->free_next = block->free_prev = NULL;
     return block;
 }
 
@@ -446,18 +482,12 @@ static heap_block_t *payload_to_block(void *ptr)
 
 static void user_heap_lock_acquire(void)
 {
-    while (__sync_lock_test_and_set(&g_heap_lock, 1) != 0)
-    {
-        while (g_heap_lock)
-        {
-            libc_cpu_relax();
-        }
-    }
+    alix_mutex_lock(&g_heap_lock);
 }
 
 static void user_heap_lock_release(void)
 {
-    __sync_lock_release(&g_heap_lock);
+    alix_mutex_unlock(&g_heap_lock);
 }
 
 static void *malloc_locked(size_t size)
@@ -499,6 +529,7 @@ static void *malloc_locked(size_t size)
         g_heap_head = new_block;
     }
     g_heap_tail = new_block;
+    split_block(new_block, size);
     return (uint8_t *)new_block + sizeof(heap_block_t);
 }
 
@@ -2688,6 +2719,7 @@ void *aligned_alloc(size_t alignment, size_t size)
         heap_block_t *allocated = (heap_block_t *)(aligned - sizeof(heap_block_t));
         allocated->size = block->size - prefix;
         allocated->free = false;
+        allocated->free_next = allocated->free_prev = NULL;
         allocated->next = block->next;
         allocated->prev = block;
         if (allocated->next) allocated->next->prev = allocated;
@@ -3951,6 +3983,25 @@ ssize_t socket_available(int fd)
 void *sbrk(int64_t increment)
 {
     return sys_sbrk(increment);
+}
+
+_Static_assert(sizeof(struct statvfs) == sizeof(syscall_statvfs_t) &&
+               offsetof(struct statvfs, f_namemax) == offsetof(syscall_statvfs_t, name_max), "native statvfs ABI");
+int statvfs(const char *path, struct statvfs *output)
+{
+    int64_t result = sys_file_io(SYSCALL_FILE_PATH_STATVFS, (uintptr_t)path, (uintptr_t)output, sizeof(*output), 0);
+    if (result < 0) { errno = (int)-result; return -1; }
+    return 0;
+}
+int fstatvfs(int descriptor, struct statvfs *output)
+{
+#ifdef ALIX_OWNED_FDS
+    int64_t result = sys_file_io(SYSCALL_FILE_STATVFS, (uint64_t)(int64_t)descriptor, (uintptr_t)output, sizeof(*output), 0);
+    if (result < 0) { errno = (int)-result; return -1; }
+    return 0;
+#else
+    (void)descriptor; (void)output; errno = ENOTSUP; return -1;
+#endif
 }
 
 int access(const char *path, int mode)

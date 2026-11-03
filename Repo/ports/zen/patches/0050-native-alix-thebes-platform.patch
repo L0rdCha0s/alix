@@ -212,7 +212,7 @@
  #else
 --- a/gfx/thebes/gfxFT2FontList.cpp
 +++ b/gfx/thebes/gfxFT2FontList.cpp
-@@ -2,10 +2,16 @@
+@@ -2,10 +2,18 @@
   * License, v. 2.0. If a copy of the MPL was not distributed with this
   * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
@@ -227,11 +227,13 @@
 +#  include "gfxAndroidPlatform.h"
 +#elif defined(MOZ_WIDGET_ALIX)
 +#  include "AlixFontFiles.h"
++#  include <usyscall.h>
++#  include <errno.h>
 +#endif
  #include "mozilla/Base64.h"
  #include "mozilla/EndianUtils.h"
  #include "mozilla/MemoryReporting.h"
-@@ -15,7 +21,9 @@
+@@ -15,7 +23,9 @@
  #include "mozilla/dom/ContentChild.h"
  #include "nsReadableUtils.h"
  #include "nsXULAppAPI.h"
@@ -242,7 +244,7 @@
 
  #include "ft2build.h"
  #include FT_FREETYPE_H
-@@ -30,7 +38,11 @@
+@@ -30,7 +40,11 @@
  #include "gfxFontUtils.h"
  #include "gfxUserFontSet.h"
  #define StandardFonts
@@ -255,6 +257,19 @@
  #undef StandardFonts
  #include <fcntl.h>
  #include <sys/mman.h>
+@@ -136,10 +150,8 @@
+     } else {
+       // We lost a race! Just discard our new face and use the existing one.
+     }
+-  }
+-
+-  // Create a new reference, and return it.
+-  face = mFTFace;
++    face = mFTFace;
++  }
+   return face.forget();
+ }
+
 @@ -957,12 +969,16 @@
  }
 
@@ -272,7 +287,32 @@
 
    nsCOMPtr<nsIObserverService> obs = services::GetObserverService();
    if (obs) {
-@@ -1258,6 +1274,10 @@
+@@ -1185,7 +1201,7 @@
+     aCache->GetInfoForFile(aFileName, cachedFaceList, &timestamp, &filesize);
+   }
+
+-  struct stat s;
++  struct stat s{};
+   int statRetval = stat(aFileName.get(), &s);
+   if (!cachedFaceList.IsEmpty() && 0 == statRetval &&
+       uint32_t(s.st_mtime) == timestamp && s.st_size == filesize) {
+@@ -1211,6 +1227,15 @@
+   }
+
+   gfxFontUtils::AutoHBBlob fileBlob(hb_blob_create_from_file(aFileName.get()));
++#ifdef MOZ_WIDGET_ALIX
++  auto diagnostic = MakeUnique<char[]>(512);
++  int diagnosticBytes = snprintf(diagnostic.get(), 512,
++      "[gecko-font] file=%s stat=%d size=%lld blob=%u errno=%d\n",
++      aFileName.get(), statRetval, (long long)s.st_size,
++      hb_blob_get_length(fileBlob), errno);
++  if (diagnosticBytes > 0)
++    sys_serial_write(diagnostic.get(), std::min(diagnosticBytes, 511));
++#endif
+   if (hb_blob_get_length(fileBlob) > 0) {
+     LOG(("reading font info via harfbuzz for %s", aFileName.get()));
+     AppendFacesFromBlob(aFileName, aStdFile, fileBlob,
+@@ -1258,6 +1283,10 @@
  using Device = nsIGfxInfo::FontVisibilityDeviceDetermination;
  FontVisibility gfxFT2FontList::GetVisibilityForFamily(
      const nsACString& aName) const {
@@ -283,7 +323,7 @@
    static Device fontVisibilityDevice = Device::Unassigned;
    if (fontVisibilityDevice == Device::Unassigned) {
      nsCOMPtr<nsIGfxInfo> gfxInfo = components::GfxInfo::Service();
-@@ -1311,10 +1331,16 @@
+@@ -1311,10 +1340,16 @@
    }
 
    return FontVisibility::User;
@@ -300,7 +340,7 @@
    static Device fontVisibilityDevice = Device::Unassigned;
    if (fontVisibilityDevice == Device::Unassigned) {
      nsCOMPtr<nsIGfxInfo> gfxInfo = components::GfxInfo::Service();
-@@ -1362,6 +1388,7 @@
+@@ -1362,6 +1397,7 @@
    }
 
    return fontLists;
@@ -308,7 +348,7 @@
  }
 
  static void GetName(hb_face_t* aFace, hb_ot_name_id_t aNameID,
-@@ -1541,6 +1568,10 @@
+@@ -1541,6 +1577,10 @@
    }
    mFontNameCache->Init();
 
@@ -319,7 +359,7 @@
  #if defined(MOZ_WIDGET_ANDROID)
    // Android API 29+ provides system font and font matcher API for native code.
 
-@@ -1584,6 +1615,7 @@
+@@ -1584,6 +1624,7 @@
    {
      FindFontsInDir(androidFontsRoot, mFontNameCache.get());
    }
@@ -327,7 +367,22 @@
 
    // Look for fonts stored in omnijar, unless we're on a low-memory
    // device where we don't want to spend the RAM to decompress them.
-@@ -1653,6 +1685,19 @@
+@@ -1600,7 +1641,13 @@
+       do_GetService(NS_DIRECTORY_SERVICE_CONTRACTID);
+   if (dirSvc) {
+     nsCOMPtr<nsIFile> appDir;
+-    nsresult rv = dirSvc->Get(NS_XPCOM_CURRENT_PROCESS_DIR, NS_GET_IID(nsIFile),
++    nsresult rv = dirSvc->Get(
++#ifdef MOZ_WIDGET_ALIX
++                              NS_GRE_DIR,
++#else
++                              NS_XPCOM_CURRENT_PROCESS_DIR,
++#endif
++                              NS_GET_IID(nsIFile),
+                               getter_AddRefs(appDir));
+     if (NS_SUCCEEDED(rv)) {
+       appDir->AppendNative("fonts"_ns);
+@@ -1653,6 +1700,24 @@
 
  void gfxFT2FontList::FindFontsInDir(const nsCString& aDir,
                                      FontNameCache* aFNC) {
@@ -337,17 +392,22 @@
 +    FontNameCache* cache;
 +  };
 +  auto context = MakeUnique<ScanContext>(ScanContext{this, aFNC});
-+  EnumerateAlixFontFiles(aDir.get(), [](const char* aPath, void* aContext) {
++  size_t candidates = EnumerateAlixFontFiles(aDir.get(), [](const char* aPath, void* aContext) {
 +    auto* context = static_cast<ScanContext*>(aContext);
 +    context->list->mLock.AssertCurrentThreadIn();
 +    context->list->AppendFacesFromFontFile(nsDependentCString(aPath),
 +                                           context->cache, kUnknown);
 +  }, context.get());
++  auto diagnostic = MakeUnique<char[]>(512);
++  int diagnosticBytes = snprintf(diagnostic.get(), 512,
++      "[gecko-font] directory=%s candidates=%zu\n", aDir.get(), candidates);
++  if (diagnosticBytes > 0)
++    sys_serial_write(diagnostic.get(), std::min(diagnosticBytes, 511));
 +#else
    static const char* sStandardFonts[] = {"DroidSans.ttf",
                                           "DroidSans-Bold.ttf",
                                           "DroidSerif-Regular.ttf",
-@@ -1704,6 +1749,7 @@
+@@ -1704,6 +1769,7 @@
    }
 
    closedir(d);
@@ -355,7 +415,7 @@
  }
 
  void gfxFT2FontList::AppendFaceFromFontListEntry(const FontListEntry& aFLE,
-@@ -1906,7 +1952,11 @@
+@@ -1906,7 +1972,11 @@
      FontVisibilityProvider* aFontVisibilityProvider, const gfxFontStyle* aStyle,
      nsAtom* aLanguage) {
    FontFamily ff;

@@ -17,6 +17,7 @@
 #include "build_features.h"
 #include "procfs.h"
 #include "smp.h"
+#include "entropy.h"
 
 extern void storage_request_flush(void);
 
@@ -226,7 +227,7 @@ void vfs_node_release(vfs_node_t *node);
 static bool vfs_device_is_mounted(block_device_t *device);
 size_t vfs_snapshot_mounts(vfs_mount_info_t *out, size_t max);
 bool vfs_force_symlink(vfs_node_t *cwd, const char *target_path, const char *link_path);
-static void vfs_backpressure_wait(vfs_mount_t *mount, size_t pending_bytes);
+static bool vfs_backpressure_wait(vfs_mount_t *mount, size_t pending_bytes);
 static void vfs_account_dirty_bytes(vfs_mount_t *mount, size_t bytes);
 
 static ssize_t vfs_log_read(vfs_node_t *node, size_t offset, void *buffer, size_t count, void *context)
@@ -364,9 +365,7 @@ void vfs_node_retain(vfs_node_t *node)
     {
         return;
     }
-    vfs_lock_node_data(node);
-    node->refcount++;
-    vfs_unlock_node_data(node);
+    __atomic_add_fetch(&node->refcount, 1, __ATOMIC_RELAXED);
 }
 
 /*
@@ -381,15 +380,10 @@ void vfs_node_release(vfs_node_t *node)
     {
         return;
     }
-    bool free_now = false;
-    vfs_lock_node_data(node);
-    if (node->refcount > 0)
-    {
-        node->refcount--;
-        free_now = (node->refcount == 0);
-    }
-    vfs_unlock_node_data(node);
-    if (free_now)
+    size_t references = __atomic_load_n(&node->refcount, __ATOMIC_RELAXED);
+    while (references && !__atomic_compare_exchange_n(&node->refcount, &references,
+            references - 1, false, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {}
+    if (references == 1)
     {
         vfs_free_subtree(node);
     }
@@ -446,11 +440,11 @@ static void vfs_log_backpressure_event(const vfs_mount_t *mount,
                   (unsigned long long)pid);
 }
 
-static void vfs_backpressure_wait(vfs_mount_t *mount, size_t pending_bytes)
+static bool vfs_backpressure_wait(vfs_mount_t *mount, size_t pending_bytes)
 {
     if (!mount || pending_bytes == 0)
     {
-        return;
+        return true;
     }
     bool logged_wait = false;
 #if ENABLE_FLUSHD
@@ -504,7 +498,7 @@ static void vfs_backpressure_wait(vfs_mount_t *mount, size_t pending_bytes)
         uint64_t elapsed_ms = ((timer_ticks() - start_ticks) * 1000ULL) / freq;
         if (elapsed_ms >= 100)
         {
-            vfs_mount_writeback(mount, false);
+            if (!vfs_mount_writeback(mount, false)) return false;
             start_ticks = timer_ticks();
         }
         storage_request_flush();
@@ -515,13 +509,14 @@ static void vfs_backpressure_wait(vfs_mount_t *mount, size_t pending_bytes)
             flushed = true;
             if (!vfs_mount_writeback(mount, false))
             {
-                process_yield();
+                return false;
             }
             continue;
         }
         process_yield();
 #endif
     }
+    return true;
 }
 
 static void vfs_account_dirty_bytes(vfs_mount_t *mount, size_t bytes)
@@ -660,7 +655,7 @@ static vfs_node_t *vfs_alloc_node(vfs_node_type_t type)
         n->allow_mutation = true;
         n->uid = VFS_UID_ROOT;
         n->gid = VFS_GID_ROOT;
-        n->permissions = type == VFS_NODE_FILE ? 0666u : type == VFS_NODE_BLOCK ? 0600u : 0777u;
+        n->permissions = (type == VFS_NODE_FILE || type == VFS_NODE_CHARACTER) ? 0666u : type == VFS_NODE_BLOCK ? 0600u : 0777u;
         n->refcount = 1;
         n->pending_dirty_bytes = 0;
         spinlock_init(&n->data_lock);
@@ -838,13 +833,17 @@ static bool ensure_capacity_locked(vfs_node_t *file, size_t need)
 {
     if (!file || file->type != VFS_NODE_FILE) return false;
 
+    if (need == SIZE_MAX) return false;
     size_t req = need + 1; /* keep a trailing '\0' */
     if (file->capacity >= req) return true;
 
     size_t new_cap = (file->capacity == 0) ? 64 : file->capacity;
     while (new_cap < req)
     {
-        size_t next = new_cap << 1;
+        /* Mounted files have exact-size buffers. A small browser update must
+         * not double a 200 MiB library's resident kernel cache. */
+        size_t growth = new_cap < 16u * 1024u * 1024u ? new_cap : 16u * 1024u * 1024u;
+        size_t next = new_cap + growth;
         if (next <= new_cap) { new_cap = req; break; } /* overflow guard */
         new_cap = next;
         if (new_cap < req) new_cap = req;
@@ -906,6 +905,23 @@ static void vfs_mark_mount_dirty(vfs_mount_t *mount)
     spinlock_unlock(&mount->dirty_lock);
 }
 
+void vfs_queue_dirty_node(vfs_node_t *node)
+{
+    vfs_mount_t *mount = node ? node->mount : NULL;
+    if (!mount) return;
+    spinlock_lock(&mount->dirty_lock);
+    mount->dirty = true;
+    ++mount->dirty_seq;
+    if (!node->writeback_queued)
+    {
+        vfs_node_retain(node);
+        node->writeback_queued = true;
+        node->writeback_next = mount->writeback_head;
+        mount->writeback_head = node;
+    }
+    spinlock_unlock(&mount->dirty_lock);
+}
+
 static void vfs_touch_atime(vfs_node_t *node)
 {
     if (!node)
@@ -918,8 +934,10 @@ static void vfs_touch_atime(vfs_node_t *node)
     vfs_lock_node_data(node);
     if (node->atime != now)
     {
+        bool persist = node->atime <= node->mtime || node->atime <= node->ctime ||
+            now < node->atime || now - node->atime >= 86400;
         node->atime = now;
-        if (node->mount && node->mount->supports_times)
+        if (persist && node->mount && node->mount->supports_times)
         {
             node->dirty = true;
             node->disk_meta_dirty = true;
@@ -931,7 +949,7 @@ static void vfs_touch_atime(vfs_node_t *node)
     vfs_unlock_node_data(node);
     if (mark_dirty && mount)
     {
-        vfs_mark_mount_dirty(mount);
+        vfs_queue_dirty_node(node);
     }
 }
 
@@ -952,7 +970,7 @@ static void vfs_mark_meta_dirty(vfs_node_t *node)
         node->mtime = now;
     }
     vfs_unlock_node_data(node);
-    vfs_mark_mount_dirty(node->mount);
+    vfs_queue_dirty_node(node);
 }
 
 static void vfs_mark_data_dirty(vfs_node_t *node, size_t len)
@@ -981,7 +999,7 @@ static void vfs_mark_data_dirty(vfs_node_t *node, size_t len)
     if (mounted && mount)
     {
         vfs_account_dirty_bytes(mount, len);
-        vfs_mark_mount_dirty(mount);
+        vfs_queue_dirty_node(node);
     }
 }
 
@@ -1152,6 +1170,31 @@ static bool vfs_mount_flush_tree(vfs_mount_t *mount, bool force_all, bool force_
     return ok;
 }
 
+static void vfs_dequeue_clean_node(vfs_node_t *node)
+{
+    vfs_mount_t *mount = node ? node->mount : NULL;
+    if (!mount) return;
+    bool release = false;
+    /* A detached batch owns its own references; only unlink live entries. */
+    spinlock_lock(&node->data_lock);
+    if (!node->disk_meta_dirty && !node->disk_data_dirty && !node->disk_name_dirty)
+    {
+        spinlock_lock(&mount->dirty_lock);
+        vfs_node_t **link = &mount->writeback_head;
+        while (*link && *link != node) link = &(*link)->writeback_next;
+        if (*link)
+        {
+            *link = node->writeback_next;
+            node->writeback_next = NULL;
+            node->writeback_queued = false;
+            release = true;
+        }
+        spinlock_unlock(&mount->dirty_lock);
+    }
+    spinlock_unlock(&node->data_lock);
+    if (release) vfs_node_release(node);
+}
+
 static bool vfs_mount_flush_single(vfs_node_t *node)
 {
     if (!node || !node->mount || !node->mount->backend)
@@ -1212,6 +1255,7 @@ static bool vfs_mount_flush_single(vfs_node_t *node)
     }
     for (size_t i = 0; i < count; ++i)
     {
+        if (ok) vfs_dequeue_clean_node(chain[i]);
         vfs_node_release(chain[i]);
     }
     free(chain);
@@ -1228,7 +1272,6 @@ static bool vfs_mount_flush_single(vfs_node_t *node)
     {
         spinlock_lock(&mount->dirty_lock);
         mount->dirty = true;
-        mount->needs_full_sync = true;
         spinlock_unlock(&mount->dirty_lock);
     }
     return ok;
@@ -1741,8 +1784,9 @@ int vfs_shm_open_owned(const char *name, bool create, bool truncate, bool exclus
         if (!created) result = vfs_node_access_locked(node, uid, gid, access);
         if (!result)
         {
-            if (!node->refcount || node->refcount == (uint32_t)-1) result = -EOVERFLOW;
-            else { ++node->refcount; *out = node; }
+            size_t references = node ? __atomic_load_n(&node->refcount, __ATOMIC_RELAXED) : 0;
+            if (!references || references == (uint32_t)-1) result = -EOVERFLOW;
+            else { vfs_node_retain(node); *out = node; }
         }
         vfs_unlock_node_data(node);
     }
@@ -1927,7 +1971,8 @@ static vfs_node_t *vfs_open_file_internal(vfs_node_t *cwd, const char *path, boo
         free(name);
     }
 
-    if (file->type != VFS_NODE_FILE && !(allow_fifo && file->type == VFS_NODE_FIFO))
+    if (file->type != VFS_NODE_FILE && file->type != VFS_NODE_CHARACTER &&
+        !(allow_fifo && file->type == VFS_NODE_FIFO))
     {
         if (error) *error = file->type == VFS_NODE_DIR ? -EISDIR : -EINVAL;
         if (trace_proc)
@@ -1953,8 +1998,9 @@ static vfs_node_t *vfs_open_file_internal(vfs_node_t *cwd, const char *path, boo
         else if (owned_data && !created) result = vfs_node_access_locked(file, uid, gid, access);
         if (!result)
         {
-            if (!file->refcount || file->refcount == (uint32_t)-1) result = -EOVERFLOW;
-            else ++file->refcount;
+            size_t references = __atomic_load_n(&file->refcount, __ATOMIC_RELAXED);
+            if (!references || references == (uint32_t)-1) result = -EOVERFLOW;
+            else vfs_node_retain(file);
         }
         vfs_unlock_node_data(file);
         if (result)
@@ -2333,7 +2379,7 @@ int vfs_resize_data(vfs_node_t *file, uint64_t length)
     /* AlixFS chunk lengths are 32-bit and include the name/header. Do not
      * accept a mounted extent that its existing on-disk format cannot hold. */
     if (file->mount && length > UINT32_MAX - VFS_PATH_MAX - 65536u) return -EFBIG;
-    if (file->mount) vfs_backpressure_wait(file->mount, (size_t)length);
+    if (file->mount && !vfs_backpressure_wait(file->mount, (size_t)length)) return -EIO;
     vfs_lock_node_data(file);
     if (file->read_cb || file->write_cb)
     {
@@ -2389,7 +2435,7 @@ bool vfs_append(vfs_node_t *file, const char *data, size_t len)
 
     if (file->mount)
     {
-        vfs_backpressure_wait(file->mount, len);
+        if (!vfs_backpressure_wait(file->mount, len)) return false;
     }
     vfs_lock_node_data(file);
     if (!ensure_capacity_locked(file, file->size + len))
@@ -2417,6 +2463,8 @@ bool vfs_append(vfs_node_t *file, const char *data, size_t len)
  */
 static ssize_t vfs_read_at_internal(vfs_node_t *file, size_t offset, void *buffer, size_t count, bool callbacks)
 {
+    if (file && file->type == VFS_NODE_CHARACTER)
+        return vfs_character_read(file, buffer, count, false);
     vfs_log("read file=", (uint64_t)(uintptr_t)file);
     vfs_log("read off=", offset);
     vfs_log("read cnt=", count);
@@ -2483,6 +2531,11 @@ ssize_t vfs_read_data_at(vfs_node_t *file, size_t offset, void *buffer, size_t c
  */
 static ssize_t vfs_write_at_internal(vfs_node_t *file, size_t offset, const void *data, size_t count, bool callbacks, bool append, size_t *position)
 {
+    if (file && file->type == VFS_NODE_CHARACTER)
+    {
+        if ((!data && count) || count > (size_t)INT64_MAX) return -EINVAL;
+        return file->character_kind == VFS_CHARACTER_ENTROPY ? (ssize_t)count : -ENODEV;
+    }
     vfs_log("write file=", (uint64_t)(uintptr_t)file);
     vfs_log("write off=", offset);
     vfs_log("write cnt=", count);
@@ -2512,7 +2565,7 @@ static ssize_t vfs_write_at_internal(vfs_node_t *file, size_t offset, const void
     }
     if (file->mount)
     {
-        vfs_backpressure_wait(file->mount, count);
+        if (!vfs_backpressure_wait(file->mount, count)) return -EIO;
     }
     vfs_lock_node_data(file);
     if (!callbacks && (file->read_cb || file->write_cb))
@@ -2841,12 +2894,8 @@ int vfs_rename_path(vfs_node_t *cwd, const char *old_path, const char *new_path)
     vfs_mark_meta_dirty(old_parent);
     vfs_mark_meta_dirty(new_parent);
     vfs_mark_meta_dirty(node);
-    if (node->mount)
-    {
-        spinlock_lock(&node->mount->dirty_lock);
-        node->mount->needs_full_sync = true;
-        spinlock_unlock(&node->mount->dirty_lock);
-    }
+    /* This node records its new name/parent; both directory records are
+     * already dirty. Unchanged siblings and descendant IDs need no rewrite. */
     error = 0;
 done:
     free(old_name);
@@ -3059,7 +3108,7 @@ int vfs_chown_owned(vfs_node_t *node, uint32_t caller_uid, uint32_t caller_gid,
         node->dirty = true; node->disk_meta_dirty = true; ++node->dirty_seq;
     }
     vfs_unlock_node_data(node);
-    if (!result) vfs_mark_mount_dirty(node->mount);
+    if (!result) vfs_queue_dirty_node(node);
     vfs_tree_lock_release();
     return result;
 }
@@ -3081,7 +3130,7 @@ int vfs_chmod_owned(vfs_node_t *node, uint32_t caller_uid, uint32_t mode)
         node->dirty = true; node->disk_meta_dirty = true; ++node->dirty_seq;
     }
     vfs_unlock_node_data(node);
-    if (!result) vfs_mark_mount_dirty(node->mount);
+    if (!result) vfs_queue_dirty_node(node);
     vfs_tree_lock_release();
     return result;
 }
@@ -3104,7 +3153,7 @@ int vfs_set_times_owned(vfs_node_t *node, uint32_t uid, uint32_t gid, bool expli
         node->dirty = true; node->disk_meta_dirty = true; ++node->dirty_seq;
     }
     vfs_unlock_node_data(node);
-    if (!result) vfs_mark_mount_dirty(node->mount);
+    if (!result) vfs_queue_dirty_node(node);
     vfs_tree_lock_release();
     return result;
 }
@@ -3136,12 +3185,39 @@ size_t vfs_enum_children(vfs_node_t *dir, vfs_enum_cb_t callback, void *context)
     return count;
 }
 
-/*
- * Add a block device node under `dir`.
- *
- * This is used by devfs to expose block devices (e.g. `/dev/ahci0`) as
- * `VFS_NODE_BLOCK` nodes that carry a `block_device_t*`.
- */
+ssize_t vfs_character_read(vfs_node_t *node, void *buffer, size_t count, bool nonblock)
+{
+    if (!node || node->type != VFS_NODE_CHARACTER) return -ENODEV;
+    if (node->character_kind == VFS_CHARACTER_ENTROPY)
+        return entropy_read_kernel(buffer, count, nonblock ? ENTROPY_NONBLOCK : 0);
+    return -ENODEV;
+}
+
+vfs_node_t *vfs_add_character_device(vfs_node_t *dir, const char *name, uint32_t kind)
+{
+    if (!dir || dir->type != VFS_NODE_DIR || !name || !*name || kind != VFS_CHARACTER_ENTROPY)
+        return NULL;
+    vfs_tree_lock_acquire();
+    vfs_node_t *node = vfs_find_child(dir, name);
+    if (node)
+    {
+        bool match = node->type == VFS_NODE_CHARACTER && node->character_kind == kind;
+        vfs_tree_lock_release();
+        return match ? node : NULL;
+    }
+    if (!vfs_node_allows_mutation(dir)) { vfs_tree_lock_release(); return NULL; }
+    node = vfs_alloc_node(VFS_NODE_CHARACTER);
+    if (!node) { vfs_tree_lock_release(); return NULL; }
+    node->name = vfs_strdup(name);
+    if (!node->name) { free(node); vfs_tree_lock_release(); return NULL; }
+    node->character_kind = kind;
+    vfs_attach_child_tail(dir, node);
+    vfs_mark_meta_dirty(dir);
+    vfs_tree_lock_release();
+    return node;
+}
+
+/* Block device nodes retain the device supplied by devfs. */
 vfs_node_t *vfs_add_block_device(vfs_node_t *dir, const char *name, block_device_t *device)
 {
     if (!dir || dir->type != VFS_NODE_DIR || !name || !device)
@@ -3261,12 +3337,104 @@ static bool vfs_device_is_mounted(block_device_t *device)
     return false;
 }
 
+/* Snapshot just files that can receive shared mapped stores. Their mapping
+ * references pin them while dirty_lock is held; our references pin them after
+ * it is released. Never compare file contents under the namespace lock. */
+static bool vfs_mount_collect_mapped(vfs_mount_t *mount)
+{
+    spinlock_lock(&mount->dirty_lock);
+    size_t count = 0;
+    for (vfs_node_t *node = mount->mapped_writer_head; node; node = node->mapped_writer_next) ++count;
+    vfs_node_t **nodes = count ? malloc(count * sizeof(*nodes)) : NULL;
+    if (count && !nodes) { spinlock_unlock(&mount->dirty_lock); return false; }
+    size_t used = 0;
+    for (vfs_node_t *node = mount->mapped_writer_head; node; node = node->mapped_writer_next)
+    {
+        vfs_node_retain(node);
+        nodes[used++] = node;
+    }
+    spinlock_unlock(&mount->dirty_lock);
+    for (size_t i = 0; i < used; ++i)
+    {
+        vfs_lock_node_data(nodes[i]);
+        vfs_unlock_node_data(nodes[i]);
+        vfs_node_release(nodes[i]);
+    }
+    free(nodes);
+    return true;
+}
+
+static bool vfs_mount_flush_queued(vfs_mount_t *mount, bool force)
+{
+    spinlock_lock(&mount->dirty_lock);
+    vfs_node_t *pending = mount->writeback_head;
+    mount->writeback_head = NULL;
+    spinlock_unlock(&mount->dirty_lock);
+    bool ok = true;
+    while (pending)
+    {
+        vfs_node_t *node = pending;
+        spinlock_lock(&mount->dirty_lock);
+        pending = node->writeback_next;
+        node->writeback_next = NULL;
+        node->writeback_queued = false;
+        spinlock_unlock(&mount->dirty_lock);
+        vfs_lock_node_data(node);
+        uint64_t frequency = timer_frequency();
+        if (!frequency) frequency = 1000;
+        uint64_t grace = (VFS_ACTIVE_WRITE_GRACE_MS * frequency + 999) / 1000;
+        uint64_t now = timer_ticks();
+        bool defer = !force && node->disk_data_dirty &&
+            node->pending_dirty_bytes < VFS_ACTIVE_WRITE_FLUSH_THRESHOLD &&
+            node->last_data_write_tick && now >= node->last_data_write_tick &&
+            now - node->last_data_write_tick < grace;
+        vfs_unlock_node_data(node);
+        bool written = !defer;
+        /* New directories must have stable IDs before their children. Build
+         * the short ancestor chain with namespace protection, then do IO with
+         * only retained nodes and the mount's writeback gate. */
+        size_t count = 0, capacity = 16;
+        vfs_node_t **chain = defer ? NULL : malloc(capacity * sizeof(*chain));
+        if (!defer && !chain) written = false;
+        if (chain)
+        {
+            vfs_tree_lock_acquire();
+            for (vfs_node_t *parent = node; parent && parent->mount == mount; parent = parent->parent)
+            {
+                if (count == capacity)
+                {
+                    if (capacity > SIZE_MAX / (2 * sizeof(*chain))) { written = false; break; }
+                    capacity *= 2;
+                    vfs_node_t **grown = realloc(chain, capacity * sizeof(*chain));
+                    if (!grown) { written = false; break; }
+                    chain = grown;
+                }
+                vfs_node_retain(parent);
+                chain[count++] = parent;
+            }
+            vfs_tree_lock_release();
+            /* Queue references may outlive unlink. Do not serialize an orphan
+             * as a second filesystem root; releasing it retires its disk ID. */
+            bool attached = count && chain[count - 1] == mount->mount_point;
+            for (size_t i = count; attached && written && i > 0; --i)
+                written = alixfs_mount_flush_single(mount->backend, chain[i - 1], mount, false);
+            for (size_t i = 0; i < count; ++i) vfs_node_release(chain[i]);
+            free(chain);
+        }
+        if (!written) vfs_queue_dirty_node(node);
+        if (!written && !defer) ok = false;
+        vfs_node_release(node); /* Transfer/release the detached queue reference. */
+    }
+    return ok;
+}
+
 static bool vfs_mount_writeback(vfs_mount_t *mount, bool force)
 {
     if (!mount)
     {
         return true;
     }
+    if (!vfs_mount_collect_mapped(mount)) return false;
     bool do_flush = force;
     bool force_all = false;
     size_t pending_bytes = 0;
@@ -3274,7 +3442,7 @@ static bool vfs_mount_writeback(vfs_mount_t *mount, bool force)
     const char *dev_name = (mount->device && mount->device->name[0]) ? mount->device->name : "(anon)";
 
     spinlock_lock(&mount->dirty_lock);
-    if (mount->dirty || mount->needs_full_sync || mount->mapped_files || force)
+    if (mount->dirty || mount->needs_full_sync || force)
     {
         do_flush = true;
         force_all = mount->needs_full_sync;
@@ -3299,7 +3467,13 @@ static bool vfs_mount_writeback(vfs_mount_t *mount, bool force)
     {
         return false;
     }
-    bool ok = vfs_mount_flush_tree(mount, force_all, force);
+    spinlock_lock(&mount->dirty_lock);
+    bool queued = mount->writeback_head != NULL;
+    spinlock_unlock(&mount->dirty_lock);
+    /* Only an explicit full rebuild walks the tree. A clean fsync or a dirty
+     * backend header is not a reason to inspect every file in the mount. */
+    bool ok = force_all ? vfs_mount_flush_tree(mount, true, force) : true;
+    if (queued && !vfs_mount_flush_queued(mount, force)) ok = false;
     if (ok && mount->backend)
     {
         ok = alixfs_mount_commit(mount->backend);
@@ -3313,9 +3487,9 @@ static bool vfs_mount_writeback(vfs_mount_t *mount, bool force)
     if (!ok)
     {
         vfs_mark_mount_dirty(mount);
-        spinlock_lock(&mount->dirty_lock);
-        mount->needs_full_sync = true;
-        spinlock_unlock(&mount->dirty_lock);
+        /* Failed nodes retain their dirty bits and uncommitted backend
+         * metadata remains dirty. Retry those records, without copying every
+         * clean file in the filesystem after a transient allocation failure. */
         vfs_log_sync_result(dev_name, "fail", start, pending_bytes);
         return false;
     }
@@ -3477,7 +3651,7 @@ bool vfs_sync_dirty(void)
         bool dirty = false;
         bool need_full = false;
         spinlock_lock(&mount->dirty_lock);
-        dirty = mount->dirty || mount->mapped_files;
+        dirty = mount->dirty || mount->mapped_writer_head;
         need_full = mount->needs_full_sync;
         spinlock_unlock(&mount->dirty_lock);
 
@@ -3782,8 +3956,9 @@ bool vfs_node_try_retain(vfs_node_t *node)
 {
     if (!node) return false;
     vfs_lock_node_data(node);
-    bool ok = node->refcount && node->refcount != (uint32_t)-1;
-    if (ok) ++node->refcount;
+    size_t references = __atomic_load_n(&node->refcount, __ATOMIC_RELAXED);
+    bool ok = references && references != (uint32_t)-1;
+    if (ok) vfs_node_retain(node);
     vfs_unlock_node_data(node);
     return ok;
 }
@@ -3845,6 +4020,31 @@ static int vfs_stat_info_locked(vfs_node_t *node, vfs_stat_info_t *output)
     };
     vfs_unlock_node_data(node);
     return 0;
+}
+
+int vfs_node_filesystem_info(vfs_node_t *node, vfs_filesystem_info_t *output)
+{
+    if (!node || !output) return -EINVAL;
+    vfs_tree_lock_acquire();
+    vfs_mount_t *mount = node->mount;
+    uint64_t device = mount ? vfs_directory_object_id_locked(mount->mount_point) : 0;
+    vfs_tree_lock_release();
+    if (!mount || !mount->backend) return -EOPNOTSUPP;
+    if (!device) return -EOVERFLOW;
+    if (!vfs_sync_lock_acquire(mount)) return -EIO;
+    bool success = alixfs_mount_filesystem_info(mount->backend, output);
+    vfs_sync_lock_release(mount);
+    if (success) output->filesystem_id = device + 1;
+    return success ? 0 : -EIO;
+}
+
+int vfs_path_filesystem_info(vfs_node_t *cwd, const char *path, vfs_filesystem_info_t *output)
+{
+    vfs_node_t *node = NULL;
+    int result = vfs_resolve_owned(cwd, path, &node);
+    if (!result) result = vfs_node_filesystem_info(node, output);
+    if (node) vfs_node_release_owned(node);
+    return result;
 }
 
 int vfs_node_stat_info(vfs_node_t *node, vfs_stat_info_t *output)

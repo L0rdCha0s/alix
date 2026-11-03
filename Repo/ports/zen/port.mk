@@ -568,8 +568,9 @@ ZEN_ENGINE_ARCHIVE ?= $(abspath ports/zen/upstream/firefox-159.0.source.tar.xz)
 ZEN_JS_KEEP_GOING ?= 0
 ZEN_GECKO_KEEP_GOING ?= 0
 ZEN_GECKO_JOBS ?= 2
+ZEN_BROWSER_PACKAGE_DIR ?= $(abspath build/ports/zen/zen-browser)
 
-.PHONY: zen-fetch zen-fetch-engine zen-preflight zen-source-test
+.PHONY: zen-fetch zen-fetch-engine zen-preflight zen-source-test zen-import zen-build zen-package
 zen-fetch:
 	python3 ports/zen/prepare.py fetch --source-dir "$(ZEN_SOURCE_DIR)"
 
@@ -578,6 +579,15 @@ zen-fetch-engine:
 
 zen-preflight:
 	python3 ports/zen/prepare.py preflight --source-dir "$(ZEN_SOURCE_DIR)"
+
+zen-import:
+	python3 ports/zen/import_zen.py --engine-dir "$(ZEN_ENGINE_DIR)" --source "$(ZEN_SOURCE_DIR)"
+
+zen-build: zen-import
+	$(MAKE) zen-gecko-build
+
+zen-package:
+	python3 ports/zen/package_browser.py --entry zen --output "$(ZEN_BROWSER_PACKAGE_DIR)"
 
 zen-source-test:
 	python3 tests/zen_source_test.py

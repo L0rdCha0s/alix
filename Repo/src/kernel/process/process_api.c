@@ -1427,6 +1427,30 @@ void process_set_priority_override(process_t *process, thread_priority_t priorit
     scheduler_lock_release(sched_flags);
 }
 
+void process_set_main_thread_priority_override(process_t *process, bool enabled,
+                                                thread_priority_t priority)
+{
+    if (!process_pointer_valid(process)) return;
+    if (priority >= THREAD_PRIORITY_COUNT) priority = THREAD_PRIORITY_NORMAL;
+    uint64_t sched_flags = scheduler_lock_acquire("main_thread_priority_override");
+    spinlock_lock(&process->threads_lock);
+    thread_t *main = process->main_thread;
+    if (thread_pointer_valid(main) && thread_lifetime_active(main))
+    {
+        if (!enabled)
+        {
+            enabled = process->default_priority_override_active;
+            priority = process->default_priority_override;
+        }
+        else if (process->default_priority_override_active &&
+                 process->default_priority_override > priority)
+            priority = process->default_priority_override;
+        thread_set_priority_override_locked(main, enabled, priority);
+    }
+    spinlock_unlock(&process->threads_lock);
+    scheduler_lock_release(sched_flags);
+}
+
 void process_clear_priority_override(process_t *process)
 {
     if (!process_pointer_valid(process))

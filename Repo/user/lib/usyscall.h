@@ -6,6 +6,10 @@
 #include "syscall_defs.h"
 #include "user_atk_defs.h"
 
+#if defined(__GNUC__)
+#pragma GCC visibility push(default)
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -108,6 +112,10 @@ int sys_mkdir(const char *path);
 
 #ifdef __cplusplus
 }
+#endif
+
+#if defined(__GNUC__)
+#pragma GCC visibility pop
 #endif
 
 #endif

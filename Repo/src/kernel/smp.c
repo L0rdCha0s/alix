@@ -44,6 +44,23 @@ static inline uint32_t smp_cpuid_apic_id(void)
 
 #define SMP_BOOT_STACK_SIZE (32 * 1024)
 #define IA32_EFER 0xC0000080u
+#define IA32_TSC_AUX 0xC0000103u
+static bool g_cpu_index_rdtscp;
+static bool g_cpu_index_legacy_apic;
+
+static bool smp_has_rdtscp(void)
+{
+    uint32_t a, b, c, d;
+    __asm__ volatile ("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(0x80000000u), "c"(0));
+    if (a < 0x80000001u) return false;
+    __asm__ volatile ("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(0x80000001u), "c"(0));
+    return (d & (1u << 27)) != 0;
+}
+
+static void smp_set_local_cpu_index(uint32_t index)
+{
+    if (g_cpu_index_rdtscp) wrmsr(IA32_TSC_AUX, index + 1u);
+}
 
 #define MADT_SIGNATURE "APIC"
 #define MADT_LAPIC_ENTRY 0x00
@@ -333,6 +350,11 @@ bool smp_init(void)
     }
 
     ensure_boot_cpu_present();
+    g_cpu_index_legacy_apic = true;
+    for (uint32_t i = 0; i < g_cpu_count; ++i)
+        if (g_cpus[i].apic_id > 255) g_cpu_index_legacy_apic = false;
+    g_cpu_index_rdtscp = smp_has_rdtscp();
+    smp_set_local_cpu_index(g_boot_cpu_index);
     g_smp_initialized = true;
     return true;
 }
@@ -412,7 +434,16 @@ uint32_t smp_current_cpu_index(void)
         return g_boot_cpu_index;
     }
 
-    uint32_t apic = lapic_get_id();
+    /* TSC_AUX is CPU-local and never changed during task switches. Avoid an
+     * APIC MMIO read on every spinlock/current-thread lookup (particularly
+     * costly under TCG). Zero denotes an AP still in bootstrap. */
+    if (g_cpu_index_rdtscp)
+    {
+        uint32_t low, high, index;
+        __asm__ volatile ("rdtscp" : "=a"(low), "=d"(high), "=c"(index) :: "memory");
+        if (index && index <= SMP_MAX_CPUS) return index - 1u;
+    }
+    uint32_t apic = g_cpu_index_legacy_apic ? smp_cpuid_apic_id() : lapic_get_id();
     uint32_t idx = resolve_apic_to_index(apic, true);
     if (idx >= SMP_MAX_CPUS)
     {
@@ -533,6 +564,7 @@ bool smp_start_secondary_cpus(void)
 void smp_secondary_entry(uint32_t apic_id)
 {
     uint32_t cpu_index = resolve_apic_to_index(apic_id, true);
+    smp_set_local_cpu_index(cpu_index);
 
     uint64_t stack_top = (cpu_index < SMP_MAX_CPUS) ? g_bootstrap_stack_tops[cpu_index] : g_bootstrap_data->stack;
 

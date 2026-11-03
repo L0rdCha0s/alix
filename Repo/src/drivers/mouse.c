@@ -1,5 +1,6 @@
 #include "build_features.h"
 #include "mouse.h"
+#include "input_activity.h"
 #include "io.h"
 #include "serial.h"
 #include "interrupts.h"
@@ -156,6 +157,7 @@ static void mouse_queue_push(int dx, int dy, bool left, bool right)
 
     spinlock_unlock(&g_mouse_queue_lock);
     mouse_irq_restore(flags);
+    input_activity_record();
 }
 
 void mouse_inject_event(int dx, int dy, bool left, bool right)

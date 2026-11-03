@@ -27,13 +27,22 @@ class PatchTests(unittest.TestCase):
         self.package = ROOT / "ports/zen/patches"
         self.series = json.loads((self.package / "series.json").read_text())
         original = parent / "firefox-159.0"
+        overlay_path = original / ".alix-zen-overlay.json"
+        overlay = json.loads(overlay_path.read_text()) if overlay_path.exists() else {}
         self.entry = self.series["patches"][0]
         for entry in self.series["patches"]:
             for item in entry["files"]:
                 dest = self.engine / item["path"]
                 dest.parent.mkdir(parents=True, exist_ok=True)
-                if patcher.digest(original / item["path"]) is not None:
-                    shutil.copyfile(original / item["path"], dest)
+                source = original / item["path"]
+                # Exercise the native patch series against its native input,
+                # while preserving the independently composed live Zen tree.
+                override = overlay.get("native_overrides", {}).get(item["path"])
+                if override:
+                    source = Path(overlay["backup"]) / "before" / item["path"]
+                    self.assertEqual(patcher.digest(source), override["native_after"])
+                if patcher.digest(source) is not None:
+                    shutil.copyfile(source, dest)
         version = self.engine / "browser/config/version.txt"
         version.parent.mkdir(parents=True, exist_ok=True)
         version.write_text(self.series["firefox_version"] + "\n")
