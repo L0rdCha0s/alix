@@ -73,6 +73,7 @@ static void io_event_entry(void *context)
         else wait_queue_wait(&service->available, io_event_ready, service);
     }
     __atomic_store_n(&service->worker_alive, false, __ATOMIC_RELEASE);
+    process_io_notify_cleanup_for((uintptr_t)service->queue);
 }
 
 static bool io_event_cleanup_ready(void *context)
@@ -97,7 +98,7 @@ static void io_event_cleanup_entry(void *context)
             !__atomic_load_n(&service->worker_alive, __ATOMIC_ACQUIRE) && !status.live) break;
         /* Request retirement wakes us immediately. The bounded timer also
          * collects records retired by an allocation-free descriptor close. */
-        (void)process_io_wait_cleanup(io_event_cleanup_ready, service, 1);
+        (void)process_io_wait_cleanup_for((uintptr_t)service->queue, io_event_cleanup_ready, service, 1);
     }
 }
 
@@ -157,7 +158,9 @@ int io_event_service_request_create(io_event_service_t *service, size_t bytes,
     *out = NULL;
     if (!service || !spinlock_preempt_disabled()) return -EINVAL;
     if (__atomic_load_n(&service->stopping, __ATOMIC_ACQUIRE)) return -ECANCELED;
-    return io_request_create(service->queue, bytes, uid, gid, out);
+    int result = io_request_create(service->queue, bytes, uid, gid, out);
+    process_t *caller = process_current();
+    return result == -EAGAIN && caller && caller->is_user ? IO_REQUEST_ADMISSION_RETRY : result;
 }
 
 int io_event_service_submit(io_event_service_t *service, io_request_t *request)

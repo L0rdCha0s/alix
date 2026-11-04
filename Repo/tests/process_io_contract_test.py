@@ -80,6 +80,7 @@ static void scheduler_lock_release(uint64_t flags) {
 }
 static thread_t *current_thread_local(void) { CHECK(prep_guard || scheduler_locked); return model_thread; }
 static bool thread_lifetime_active(const thread_t *thread) { return thread && thread->alive; }
+static void process_alarm_cancel_locked(process_t *process) { (void)process; CHECK(scheduler_locked); }
 static bool process_signal_pending_locked(thread_t *thread) { CHECK(scheduler_locked); return thread->caught_pending; }
 static bool thread_in_run_queue_load(const thread_t *thread) { return thread->in_run_queue; }
 static void remove_from_run_queue_locked(thread_t *thread) { CHECK(scheduler_locked); thread->in_run_queue=false; }
@@ -180,11 +181,28 @@ static void completed_and_gap(void) {
         CHECK(process_io_register_current(request)==0);
         CHECK(io_request_submit(request)==0); executor_request=io_queue_take(queue); CHECK(executor_request==request);
         prep_guard=false;
+        thread_t *unrelated=NULL;
+        io_request_t *other=NULL;
+        if (mode==2) {
+            unrelated=calloc(1,sizeof(*unrelated)); CHECK(unrelated);
+            CHECK(io_request_create(queue,0,123,456,&other)==0);
+            unrelated->alive=true; unrelated->state=THREAD_STATE_BLOCKED;
+            unrelated->running_cpu=RUN_QUEUE_CPU_INVALID; unrelated->io_request=other;
+            unrelated->waiting_queue=&g_io_completion_queue;
+            g_io_completion_queue.head=g_io_completion_queue.tail=unrelated;
+        }
         if (mode==0) complete_action();
         if (mode==1) publish_gap=true;
         if (mode==2) schedule_action=complete_action;
         io_request_status_t status;
         CHECK(process_io_wait_current(&status)==0 && status.result==37);
+        if (unrelated) {
+            CHECK(unrelated->state==THREAD_STATE_BLOCKED && !unrelated->in_run_queue && !unrelated->wake_pending);
+            CHECK(g_io_completion_queue.head==unrelated && g_io_completion_queue.tail==unrelated);
+            uint64_t flags=scheduler_lock_acquire("unrelated_waiter");
+            thread_remove_from_wait_queue(unrelated); scheduler_lock_release(flags);
+            CHECK(io_request_waiter_abandon(other)==0); free(unrelated);
+        }
         CHECK(!model_thread->waiting_queue && !g_io_completion_queue.head && !g_io_completion_queue.tail);
         CHECK(schedules==(mode==0 ? 0u : 1u) && !closes && irq_flags==514);
         io_request_t *borrow=NULL;

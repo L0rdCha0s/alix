@@ -114,6 +114,7 @@ typedef struct process_user_layout
 } process_user_layout_t;
 
 void process_system_init(void);
+void process_configure_timer(void);
 void process_start_scheduler(void);
 void process_run_secondary_cpu(uint32_t cpu_index);
 void process_scheduler_set_ready(void);
@@ -333,6 +334,8 @@ void wait_queue_wake_all(wait_queue_t *queue);
 /* Persistent I/O cleanup controllers wait here; notifications must run after
  * releasing scheduler_lock, never inside request ownership primitives. */
 bool process_io_wait_cleanup(bool (*predicate)(void *), void *context, uint64_t timeout_ticks);
+bool process_io_wait_cleanup_for(uintptr_t key, bool (*predicate)(void *), void *context, uint64_t timeout_ticks);
+void process_io_notify_cleanup_for(uintptr_t key);
 void process_io_notify_cleanup(void);
 
 thread_t *process_find_stack_owner(const void *ptr, size_t len);

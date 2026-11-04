@@ -68,6 +68,8 @@ struct process
     unsigned uid, magic, lifetime_state, state;
     uint32_t join_waiters;
     uint64_t pid;
+    uint64_t alarm_deadline;
+    struct process *alarm_next;
     alix_sigaction_t signal_actions[ALIX_SIGNAL_COUNT];
     alix_sigset_t signal_pending;
     alix_siginfo_t signal_info[ALIX_SIGNAL_COUNT];

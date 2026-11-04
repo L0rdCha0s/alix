@@ -121,7 +121,7 @@ This means the *saved context pointer is effectively a stack pointer*.
 Important characteristics:
 
 - **Per-CPU run queues**: threads are enqueued onto a CPU run queue, possibly migrated if affinity requires.
-- **Default placement**: stable thread IDs spread a process's threads across online CPUs, avoiding the reserved UI CPU. Explicit affinity and UI priority take precedence. PID-based placement previously put all Gecko parent threads on one CPU even when other CPUs were idle; work stealing remains disabled by default.
+- **Default placement**: stable thread IDs are distributed across the eligible online CPUs, excluding the reserved UI CPU. Hashing includes only eligible CPUs, so the reserved CPU's share is not redirected onto its neighbour. Explicit affinity and UI priority take precedence. Work stealing remains disabled by default; its optional dequeue path checks the destination CPU against both constraints and can take a single queued task beside a busy CPU.
 - **Priority buckets**: each run queue maintains lists per `thread_priority_t`.
 - **Process policies**: priority, priority overrides, and affinity apply to every existing thread and are retained as defaults for threads created later.
 - **Idle threads**: there is an idle thread per CPU that halts (`hlt`) when no runnable work exists.
@@ -235,3 +235,42 @@ context hashing does not require rewriting or invalidating kernel stack page
 permissions; that repair runs only with the optional page-protection diagnostics.
 Global orphan maintenance is coalesced to one sweep per timer tick instead of
 scanning the process list on every CPU's context switch.
+
+Focused UI threads, compositor and USB input pollers receive at most one timer
+tick per quantum (10 ms at 100 Hz), including when the normal quantum is raised
+at runtime. Initialization selects a 20 ms normal quantum; the two-tick constant
+is the fallback when timer frequency is unavailable. The empty-pending-signal syscall-return path
+uses acquire loads; signal producers publish pending bits with release ordering.
+It avoids the global scheduler lock when no signal is queued while retaining
+the locked selection/delivery path and I/O deferral.
+
+`process_system_init` precedes PIT setup. It uses a boot fallback, and
+`process_configure_timer` runs immediately after `timer_init` to apply the real
+frequency. Previously the conversion used `timer_frequency`'s early 1000 Hz
+estimate. The PIT then started at 100 Hz without recalculating the quantum,
+turning the requested 10 ms into an actual 100 ms. The boot log now records the
+real frequency and resulting tick count.
+
+Kernel joins with an input hook wait on child exit with a one-tick timeout
+between input checks. They no longer keep the parent runnable in a yield loop
+throughout the child's lifetime.
+
+Protected I/O completion scans the scheduler-owned waiter list and wakes only
+the thread whose registered request completed. The EXECUTOR reference pins the
+request during publication and wake; scheduler ownership pins queued threads
+during matching. Workers retain no thread or stack pointer across this boundary.
+The global broadcast remains available for service shutdown. The final owner
+release reports cleanup readiness while holding the request lock, so the caller
+does not read an already released request and does not wake cleanup workers
+while another owner still retains it. Storage cleanup waits for retirement
+notifications with a bounded timer fallback for scheduler-side cancellation.
+Retirement notifications use static buckets keyed by an opaque queue identity,
+so unrelated services usually remain asleep. Keys are never dereferenced after
+request release; bucket collisions only cause an extra predicate check.
+
+A queued task remains temporarily ineligible while another CPU still publishes
+it in `g_switch_out_threads`. The old CPU must finish bookkeeping before that
+task can run or block again elsewhere. This check preserves its queue entry
+instead of treating the temporary handoff as invalid work. A runnable current
+task can continue if all peers are temporarily unavailable and its affinity
+allows the current CPU.

@@ -12,6 +12,7 @@
 #include "sys/mman.h"
 #include "sys/stat.h"
 #include "unistd.h"
+#include "sched.h"
 #include "usyscall.h"
 
 #define DL_PAGE 4096u
@@ -1196,8 +1197,28 @@ static bool dl_read_exact(int fd, void *buffer, size_t bytes, uint64_t offset)
         if (offset > INT64_MAX || done > INT64_MAX - offset)
             return false;
         ssize_t got = pread(fd, (char *)buffer + done, count, (off_t)(offset + done));
+        if (got < 0 && errno == EINTR)
+            continue;
+        /* This private descriptor is blocking. A full protected-I/O admission
+         * queue is transient; allow its cleanup worker to retire requests. */
+        if (got < 0 && errno == EAGAIN)
+        {
+            sched_yield();
+            continue;
+        }
         if (got <= 0 || (size_t)got > count)
+        {
+            int error = errno;
+            if (!dl_pending)
+            {
+                snprintf(dl_message, sizeof(dl_message),
+                         "ELF read failed offset=0x%llx count=%llu result=%lld errno=%d",
+                         (unsigned long long)(offset + done), (unsigned long long)count,
+                         (long long)got, error);
+                dl_pending = true;
+            }
             return false;
+        }
         done += (size_t)got;
     }
     return true;
@@ -1347,7 +1368,7 @@ static bool dl_map_file(dl_module *m)
         dl_phdr *p = &m->segments[i];
         size_t first = (p->vaddr - low) / DL_PAGE, last = (p->vaddr + p->memsz - low + 4095) / DL_PAGE;
         for (size_t page = first; page < last; ++page)
-            permissions[page] |= (unsigned char)(p->flags | DL_R);
+            permissions[page] |= (unsigned char)((p->flags & (DL_R | DL_W | DL_X)) | DL_R);
     }
     /* Read-only load pages need no relocation writes. Retain the native file
      * mapping instead of copying the same engine into every browser process.
@@ -1361,8 +1382,16 @@ static bool dl_map_file(dl_module *m)
         size_t first = (p->vaddr - low) / DL_PAGE;
         size_t last = (p->vaddr + p->filesz - low + DL_PAGE - 1) / DL_PAGE;
         bool compatible = true;
+        size_t memory_last = (p->vaddr + p->memsz - low + DL_PAGE - 1) / DL_PAGE;
+        for (size_t j = 0; j < m->segment_count; ++j)
+        {
+            dl_phdr *other = &m->segments[j];
+            size_t other_first = (other->vaddr - low) / DL_PAGE;
+            size_t other_last = (other->vaddr + other->memsz - low + DL_PAGE - 1) / DL_PAGE;
+            if (j != i && first < other_last && other_first < memory_last) compatible = false;
+        }
         for (size_t page = first; page < last; ++page)
-            if (permissions[page] != (unsigned char)(p->flags | DL_R)) compatible = false;
+            if (permissions[page] != (unsigned char)((p->flags & (DL_R | DL_W | DL_X)) | DL_R)) compatible = false;
         if (!compatible) continue;
         bool shared = !(p->flags & DL_W) && p->filesz == p->memsz;
         void *target = (void *)(start + first * DL_PAGE);
@@ -1464,7 +1493,7 @@ static bool dl_protect(dl_module *m)
         size_t first = (m->bias + p->vaddr - m->low) / DL_PAGE,
                last = (m->bias + p->vaddr + p->memsz - m->low + 4095) / DL_PAGE;
         for (size_t page = first; page < last; ++page)
-            permissions[page] |= (unsigned char)(p->flags | DL_R);
+            permissions[page] |= (unsigned char)((p->flags & (DL_R | DL_W | DL_X)) | DL_R);
     }
     if (m->relro_bytes)
     {

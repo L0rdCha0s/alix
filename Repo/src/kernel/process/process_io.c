@@ -6,7 +6,13 @@
  * global: requests never store a pointer to a thread, process or stack queue. */
 static wait_queue_t g_io_completion_queue;
 static wait_queue_t g_io_cleanup_queue;
+/* Static lifetime avoids retaining a service/thread/stack pointer in a late
+ * completion. Only an opaque queue address is hashed; collisions just wake an
+ * extra cleanup worker, whose own predicate rechecks actual readiness. */
+static wait_queue_t g_io_cleanup_buckets[128];
+uint64_t g_io_completion_requests, g_io_completion_matched, g_io_completion_broadcasts;
 void process_io_notify_cleanup(void);
+void process_io_notify_cleanup_for(uintptr_t key);
 
 static bool process_io_thread_terminal(const thread_t *thread)
 {
@@ -166,6 +172,8 @@ int process_io_finish_current(bool abandon)
     thread_t *thread = current_thread_local();
     uint64_t flags = scheduler_lock_acquire("io_finish");
     int result = -EINVAL;
+    bool cleanup_ready = false;
+    uintptr_t cleanup_key = 0;
     if (thread && thread->io_request)
     {
         io_request_t *request = thread->io_request;
@@ -175,18 +183,36 @@ int process_io_finish_current(bool abandon)
         if (!result && !cancel && status.state != IO_REQUEST_COMPLETED) result = -EAGAIN;
         if (!result)
         {
+            cleanup_key = io_request_queue_key(request);
             thread->io_request = NULL;
-            result = cancel ? io_request_waiter_abandon(request) : io_request_waiter_release(request);
+            result = io_request_waiter_finish(request, cancel, &cleanup_ready);
         }
     }
     scheduler_lock_release(flags);
-    if (!result) process_io_notify_cleanup();
+    if (!result && cleanup_ready) process_io_notify_cleanup_for(cleanup_key);
     return result;
 }
 
 bool process_io_wait_cleanup(bool (*predicate)(void *), void *context, uint64_t timeout_ticks)
 {
     return wait_queue_wait_timeout(&g_io_cleanup_queue, predicate, context, timeout_ticks);
+}
+
+static wait_queue_t *process_io_cleanup_bucket(uintptr_t key)
+{
+    uint64_t mixed = (uint64_t)(key >> 4) ^ (uint64_t)(key >> 27);
+    mixed *= UINT64_C(0x9e3779b97f4a7c15);
+    return &g_io_cleanup_buckets[mixed >> 57];
+}
+
+bool process_io_wait_cleanup_for(uintptr_t key, bool (*predicate)(void *), void *context, uint64_t timeout_ticks)
+{
+    return wait_queue_wait_timeout(process_io_cleanup_bucket(key), predicate, context, timeout_ticks);
+}
+
+void process_io_notify_cleanup_for(uintptr_t key)
+{
+    wait_queue_wake_all(process_io_cleanup_bucket(key));
 }
 
 void process_io_notify_cleanup(void)
@@ -196,18 +222,58 @@ void process_io_notify_cleanup(void)
 
 void process_io_notify_completion(void)
 {
+    __atomic_add_fetch(&g_io_completion_broadcasts, 1, __ATOMIC_RELAXED);
     wait_queue_wake_all(&g_io_completion_queue);
+}
+
+static void process_io_notify_request(io_request_t *request)
+{
+    /* EXECUTOR keeps request alive. Scheduler ownership keeps each queued
+     * thread alive throughout lookup/wake; no worker retains a thread or a
+     * pointer into its stack after releasing the lock. */
+    uint64_t flags = scheduler_lock_acquire("io_complete_request");
+    ++g_io_completion_requests;
+    spinlock_lock(&g_io_completion_queue.lock);
+    thread_t *previous = NULL;
+    for (thread_t *thread = g_io_completion_queue.head; thread; thread = thread->wait_queue_next)
+    {
+        if (thread->io_request != request) { previous = thread; continue; }
+        ++g_io_completion_matched;
+        if (previous) previous->wait_queue_next = thread->wait_queue_next;
+        else g_io_completion_queue.head = thread->wait_queue_next;
+        if (g_io_completion_queue.tail == thread) g_io_completion_queue.tail = previous;
+        thread->wait_queue_next = NULL;
+        thread->waiting_queue = NULL;
+        if (!process_io_thread_terminal(thread) && thread->state == THREAD_STATE_BLOCKED &&
+            !thread_in_run_queue_load(thread))
+        {
+            if (__atomic_load_n(&thread->running_cpu, __ATOMIC_ACQUIRE) != RUN_QUEUE_CPU_INVALID ||
+                thread->in_transition)
+                thread->wake_pending = true;
+            else
+            {
+                thread->wake_pending = false;
+                thread->state = THREAD_STATE_READY;
+                enqueue_thread_on_cpu_locked(thread, scheduler_select_target_cpu(thread));
+            }
+        }
+        break; /* A request has exactly one WAITER owner. */
+    }
+    spinlock_unlock(&g_io_completion_queue.lock);
+    scheduler_lock_release(flags);
 }
 
 int process_io_complete_request(io_request_t *request, int64_t result,
                                 fd_description_t *result_description_owned)
 {
+    uintptr_t cleanup_key = io_request_queue_key(request);
     int status = io_request_publish_complete(request, result, result_description_owned);
     if (status) return status;
     /* EXECUTOR remains owned through the wake even if a cancelled caller was
      * already reaped, or a woken caller immediately consumes its result. */
-    process_io_notify_completion();
-    status = io_request_worker_release(request);
-    if (!status) process_io_notify_cleanup();
+    process_io_notify_request(request);
+    bool cleanup_ready = false;
+    status = io_request_worker_release_ready(request, &cleanup_ready);
+    if (!status && cleanup_ready) process_io_notify_cleanup_for(cleanup_key);
     return status;
 }

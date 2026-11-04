@@ -4,6 +4,12 @@
 #include "process.h"
 #include "libc.h"
 
+#ifndef NET_COPY_DEBUG
+#define NET_COPY_DEBUG 0
+#endif
+
+#if NET_COPY_DEBUG
+
 static bool pointer_on_current_stack(const thread_t *thread, uintptr_t addr, size_t len)
 {
     uintptr_t lower = 0;
@@ -58,14 +64,19 @@ static void net_debug_log_copy(const char *tag,
                   (unsigned long long)dest,
                   (unsigned long long)len);
 }
+#endif
 
 void *net_debug_memcpy(const char *tag, void *dest, const void *src, size_t len)
 {
+#if NET_COPY_DEBUG
     thread_t *thread = thread_current();
     uintptr_t dest_addr = (uintptr_t)dest;
     if (pointer_on_current_stack(thread, dest_addr, len))
     {
         net_debug_log_copy(tag, thread, dest_addr, len);
     }
+#else
+    (void)tag;
+#endif
     return memcpy(dest, src, len);
 }

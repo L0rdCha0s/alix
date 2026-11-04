@@ -169,8 +169,8 @@ static inline void paging_log_lock_event(const char *label, uint32_t cpu)
 
 static inline uint64_t paging_lock(void)
 {
-    uint32_t cpu = smp_current_cpu_index();
     uint64_t flags = spinlock_lock_irqsave(&g_paging_lock);
+    uint32_t cpu = smp_current_cpu_index();
     paging_log_lock_event("acquire", cpu);
     g_paging_lock_owner = cpu;
     if (cpu < SMP_MAX_CPUS)

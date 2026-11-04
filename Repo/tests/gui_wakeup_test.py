@@ -97,8 +97,7 @@ def main() -> int:
                 runner,
                 "video loop on an idle AP",
                 lambda text: (
-                    "[thread_trampoline] start name=start_video" in text[start:]
-                    and "video_run_loop start" in text[start:]
+                    "video_run_loop start" in text[start:]
                 ),
                 15.0,
             )

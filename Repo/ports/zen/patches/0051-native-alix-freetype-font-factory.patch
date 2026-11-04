@@ -20,7 +20,19 @@
        RefPtr<SharedFTFace> aFace, bool aApplySyntheticBold = false);
 --- a/gfx/2d/Factory.cpp
 +++ b/gfx/2d/Factory.cpp
-@@ -29,7 +29,7 @@
+@@ -3,6 +3,11 @@
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+ #include <cstring>
++#ifdef MOZ_WIDGET_ALIX
++#  include <usyscall.h>
++#  include <errno.h>
++#  include <cstdio>
++#endif
+
+ #include "2D.h"
+ #include "Swizzle.h"
+@@ -29,7 +34,7 @@
  #  include "UnscaledFontFreeType.h"
  #endif
 
@@ -29,7 +41,7 @@
  #  include "NativeFontResourceFreeType.h"
  #  include "ScaledFontFreeType.h"
  #  include "UnscaledFontFreeType.h"
-@@ -395,7 +395,7 @@
+@@ -395,7 +400,7 @@
  #elif defined(MOZ_WIDGET_GTK)
      case FontType::FONTCONFIG:
        return NativeFontResourceFontconfig::Create(aData, aSize);
@@ -38,7 +50,7 @@
      case FontType::FREETYPE:
        return NativeFontResourceFreeType::Create(aData, aSize);
  #endif
-@@ -422,7 +422,7 @@
+@@ -422,7 +427,7 @@
      case FontType::FONTCONFIG:
        return UnscaledFontFontconfig::CreateFromFontDescriptor(
            aData, aDataLength, aIndex);
@@ -47,7 +59,7 @@
      case FontType::FREETYPE:
        return UnscaledFontFreeType::CreateFromFontDescriptor(aData, aDataLength,
                                                              aIndex);
-@@ -452,7 +452,7 @@
+@@ -452,7 +457,7 @@
  }
  #endif
 
@@ -56,3 +68,22 @@
  already_AddRefed<ScaledFont> Factory::CreateScaledFontForFreeTypeFont(
      const RefPtr<UnscaledFont>& aUnscaledFont, Float aSize,
      RefPtr<SharedFTFace> aFace, bool aApplySyntheticBold) {
+@@ -513,7 +518,17 @@
+     aFTLibrary = mFTLibrary;
+   }
+   FT_Face face;
+-  if (FT_New_Face(aFTLibrary, aFileName, aFaceIndex, &face) != FT_Err_Ok) {
++  FT_Error error = FT_New_Face(aFTLibrary, aFileName, aFaceIndex, &face);
++  if (error != FT_Err_Ok) {
++#ifdef MOZ_WIDGET_ALIX
++    int savedError = errno;
++    auto diagnostic = MakeUnique<char[]>(512);
++    int length = snprintf(diagnostic.get(), 512,
++        "[gecko-font] FT_New_Face failed file=%s index=%d ft_error=%d errno=%d\n",
++        aFileName, aFaceIndex, int(error), savedError);
++    if (length > 0) sys_serial_write(diagnostic.get(), length < 512 ? length : 511);
++    errno = savedError;
++#endif
+     return nullptr;
+   }
+   return face;

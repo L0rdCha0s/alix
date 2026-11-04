@@ -77,7 +77,7 @@
 #define CONTEXT_GUARD_STRICT             0
 #endif
 #ifndef THREAD_CREATE_DEBUG
-#define THREAD_CREATE_DEBUG              1
+#define THREAD_CREATE_DEBUG              0
 #endif
 #ifndef ENABLE_RUN_QUEUE_DEBUG
 #define ENABLE_RUN_QUEUE_DEBUG 1
@@ -88,7 +88,8 @@
 #define SCHED_SWITCH_WARN_MS 500ULL
 
 #define THREAD_CONTEXT_REDZONE_BYTES (64ULL * 1024ULL)
-#define PROCESS_TIME_SLICE_DEFAULT_TICKS 10U
+#define PROCESS_TIME_SLICE_DEFAULT_MS    20U
+#define PROCESS_TIME_SLICE_DEFAULT_TICKS 2U
 #define THREAD_MAGIC 0x54485244u /* 'THRD' */
 #define PROCESS_MAGIC 0x50524353u /* 'PRCS' */
 #define STACK_OWNER_BUCKET_SHIFT 15
@@ -573,6 +574,15 @@ static inline uint32_t scheduler_time_slice_ticks(void)
         ticks = PROCESS_TIME_SLICE_DEFAULT_TICKS;
     }
     return ticks;
+}
+
+static inline uint32_t scheduler_thread_time_slice_ticks(const thread_t *thread)
+{
+    uint32_t ticks = scheduler_time_slice_ticks();
+    /* Input pollers, the compositor, and focused UI share the reserved UI CPU.
+     * A 100 ms normal quantum lets one UI peer hide entire short key/mouse
+     * presses from another. Bound interactive peers to one 10 ms timer tick. */
+    return thread && thread->priority == THREAD_PRIORITY_UI && ticks > 1 ? 1 : ticks;
 }
 
 static inline uint64_t cpu_save_flags(void)

@@ -3584,6 +3584,21 @@ bool vfs_mount_device(block_device_t *device, vfs_node_t *mount_point)
     if (!vfs_load_mount(device, mount))
     {
         vfs_clear_directory(mount_point);
+        /* Clearing a partially loaded tree can queue metadata. This mount
+         * was never published: retire those queue references before freeing
+         * the backend, rather than leaving an intrusive queued flag behind. */
+        spinlock_lock(&mount->dirty_lock);
+        vfs_node_t *pending = mount->writeback_head;
+        mount->writeback_head = NULL;
+        spinlock_unlock(&mount->dirty_lock);
+        while (pending)
+        {
+            vfs_node_t *next = pending->writeback_next;
+            pending->writeback_next = NULL;
+            pending->writeback_queued = false;
+            vfs_node_release(pending);
+            pending = next;
+        }
         mount_point->mount = NULL;
         alixfs_mount_destroy(mount->backend);
         free(mount);

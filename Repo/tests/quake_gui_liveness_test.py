@@ -528,8 +528,7 @@ def main() -> int:
                 runner,
                 "video loop",
                 lambda text: (
-                    "[thread_trampoline] start name=start_video" in text[video_start:]
-                    and "video_run_loop start" in text[video_start:]
+                    "video_run_loop start" in text[video_start:]
                 ),
                 15.0,
             )
@@ -541,7 +540,7 @@ def main() -> int:
             wait_until(
                 runner,
                 "desktop Terminal process",
-                lambda text: "[thread_trampoline] start name=atk_shell" in text[terminal_start:],
+                lambda text: re.search(r"\[process\] finalize [^\r\n]*name=atk_shell ", text[terminal_start:]),
                 10.0,
             )
             time.sleep(1.0)

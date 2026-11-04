@@ -419,14 +419,14 @@ void serial_start_async_worker(void)
 
 static void serial_log_lock(void)
 {
+    uint64_t flags = serial_cpu_save_flags();
+    serial_cpu_cli();
     uint32_t cpu = smp_current_cpu_index();
     if (g_serial_output_owner == cpu)
     {
         g_serial_output_depth++;
         return;
     }
-    uint64_t flags = serial_cpu_save_flags();
-    serial_cpu_cli();
     spinlock_lock(&g_serial_output_lock);
     g_serial_output_owner = cpu;
     g_serial_output_depth = 1;

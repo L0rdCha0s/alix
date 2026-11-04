@@ -66,7 +66,8 @@ void timer_init(uint32_t frequency_hz)
     g_ticks = 0;
     timer_tasks_reset();
     uint16_t divisor = (uint16_t)(PIT_INPUT_HZ / frequency_hz);
-    outb(PIT_COMMAND, 0x36);
+    /* Rate-generator mode supplies one short IRQ pulse per reload period. */
+    outb(PIT_COMMAND, 0x34);
     outb(PIT_CHANNEL0, (uint8_t)(divisor & 0xFF));
     outb(PIT_CHANNEL0, (uint8_t)((divisor >> 8) & 0xFF));
     interrupts_enable_irq(0);

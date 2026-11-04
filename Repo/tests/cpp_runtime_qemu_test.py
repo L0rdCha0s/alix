@@ -457,7 +457,7 @@ def run_native_elf(binary_name, markers, log_path, label, timeout_seconds=40,
                 time.sleep(0.2)
                 qmp.human("mouse_button 0")
                 time.sleep(0.2)
-                harness.wait_for(runner, "desktop terminal", lambda log: "start name=atk_shell" in log[offset:], 15)
+                harness.wait_for(runner, "desktop terminal", lambda log: re.search(r"\[process\] finalize [^\r\n]*name=atk_shell ", log[offset:]), 15)
                 time.sleep(0.3)
                 offset = len(harness.read_log())
             if user_breakpoint is not None:

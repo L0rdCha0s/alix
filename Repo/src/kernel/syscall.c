@@ -26,6 +26,11 @@
 #include "pmm.h"
 #include "spinlock.h"
 
+/* Error-only counters for runtime diagnosis. Inspect after a measurement with
+ * the CPUs stopped; successful file calls pay no atomic accounting cost. */
+uint64_t g_file_io_errors[128][128];
+uint64_t g_io_admission_restarts;
+
 /*
  * src/kernel/syscall.c
  *
@@ -1198,6 +1203,8 @@ uint64_t syscall_dispatch(syscall_frame_t *frame, uint64_t vector)
             break;
         case SYSCALL_FILE_IO:
             result = io_user_file_dispatch((uint32_t)frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
+            if (result < 0 && result > -128 && frame->rdi < 128)
+                __atomic_add_fetch(&g_file_io_errors[frame->rdi][-result], 1, __ATOMIC_RELAXED);
             break;
         case SYSCALL_NET_ROUTE:
             result = syscall_do_net_route(frame->rdi, (void *)frame->rsi, (size_t)frame->rdx);
@@ -1677,6 +1684,22 @@ uint64_t syscall_dispatch(syscall_frame_t *frame, uint64_t vector)
             break;
     }
 
+    if (result == IO_REQUEST_ADMISSION_RETRY)
+    {
+        /* Preparation has released every borrowed/pinned resource before
+         * returning this internal result. Wait without retaining any request
+         * or caller buffers, then retry the original two-byte int 0x80. A
+         * signal delivered below saves that restart point in its user frame.
+         * Actual nonblocking I/O EAGAIN results keep their ordinary meaning. */
+        if ((frame->cs & 3u) == 3u && frame->rip >= 2)
+        {
+            __atomic_add_fetch(&g_io_admission_restarts, 1, __ATOMIC_RELAXED);
+            process_sleep_ms(1);
+            frame->rip -= 2;
+            result = (int64_t)syscall_id;
+        }
+        else result = -EAGAIN;
+    }
     frame->rax = (uint64_t)result;
     process_signal_syscall_return(frame, signal_preempt_resume);
     return frame->rax;

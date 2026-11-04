@@ -62,6 +62,16 @@ static void io_storage_entry(void *context)
         worker->request = NULL; /* The request may already be freed by cleanup. */
     }
     __atomic_sub_fetch(&service->active_workers, 1u, __ATOMIC_ACQ_REL);
+    process_io_notify_cleanup_for((uintptr_t)service->queue);
+}
+
+static bool io_storage_cleanup_ready(void *context)
+{
+    io_service_t *service = context;
+    io_queue_status_t status;
+    if (io_queue_snapshot(service->queue, &status)) fatal("I/O cleanup lost its queue");
+    return status.cleanup || (__atomic_load_n(&service->stopping, __ATOMIC_ACQUIRE) &&
+        __atomic_load_n(&service->active_workers, __ATOMIC_ACQUIRE) == 0 && !status.live);
 }
 
 static void io_cleanup_entry(void *context)
@@ -79,7 +89,14 @@ static void io_cleanup_entry(void *context)
         if (__atomic_load_n(&service->stopping, __ATOMIC_ACQUIRE) &&
             __atomic_load_n(&service->active_workers, __ATOMIC_ACQUIRE) == 0 && status.live == 0)
             break;
-        process_sleep_ms(1);
+        /* Retired requests still consume admission slots. Do not throttle a
+         * backlog to 64 frees per timer tick while short reads are arriving. */
+        if (status.cleanup) continue;
+        /* Completion and waiter retirement already notify this global queue.
+         * Wake promptly instead of leaving freeable admission slots asleep
+         * until the next 10 ms timer tick. Keep the timeout for abandoned
+         * records published by scheduler-side cancellation. */
+        (void)process_io_wait_cleanup_for((uintptr_t)service->queue, io_storage_cleanup_ready, service, 1);
     }
 }
 
@@ -153,7 +170,9 @@ int io_service_request_create(io_service_t *service, size_t bytes, uint32_t uid,
     *out = NULL;
     if (!service || !spinlock_preempt_disabled()) return -EINVAL;
     if (__atomic_load_n(&service->stopping, __ATOMIC_ACQUIRE)) return -ECANCELED;
-    return io_request_create(service->queue, bytes, uid, gid, out);
+    int result = io_request_create(service->queue, bytes, uid, gid, out);
+    process_t *caller = process_current();
+    return result == -EAGAIN && caller && caller->is_user ? IO_REQUEST_ADMISSION_RETRY : result;
 }
 
 int io_service_submit(io_service_t *service, io_request_t *request)
@@ -177,6 +196,7 @@ int io_service_shutdown(io_service_t *service)
     __atomic_store_n(&service->stopping, true, __ATOMIC_RELEASE);
     io_queue_shutdown(service->queue);
     process_io_notify_completion();
+    process_io_notify_cleanup_for((uintptr_t)service->queue);
     wait_queue_wake_all(&service->available);
 
     for (uint32_t index = 0; index < service->workers_created; ++index)

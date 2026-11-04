@@ -63,7 +63,7 @@ typedef bool (*wait_queue_predicate_t)(void *);
 typedef void (*thread_entry_t)(void *);
 typedef struct process {
     pthread_t thread; thread_entry_t entry; void *argument;
-    bool kernel_service, cleanup_role, exited; unsigned owner_refs; uint32_t uid,gid;
+    bool kernel_service, cleanup_role, exited, is_user; unsigned owner_refs; uint32_t uid,gid;
 } process_t;
 static _Thread_local process_t *current_process;
 static _Thread_local unsigned held_locks;
@@ -165,8 +165,29 @@ static void __attribute__((noreturn)) fatal(const char *message) { fprintf(stder
     code += without_includes(staged["src/kernel/io/request.c"]) + "\n"
     code += "static wait_queue_t g_io_completion_queue={.initialized=true};\n"
     code += "static wait_queue_t g_io_cleanup_queue={.initialized=true};\n"
+    code += r'''
+static bool process_io_wait_cleanup(wait_queue_predicate_t predicate,void *context,uint64_t ticks) {
+    CHECK(!held_locks&&!prep_guard&&heap_contains(context,1));
+    struct timespec deadline; CHECK(!clock_gettime(CLOCK_REALTIME,&deadline));
+    deadline.tv_nsec+=(long)ticks*10000000; deadline.tv_sec+=deadline.tv_nsec/1000000000; deadline.tv_nsec%=1000000000;
+    CHECK(!pthread_mutex_lock(&wait_lock)); ++held_locks;
+    bool ready;
+    while(!(ready=predicate(context))) {
+        --held_locks; int result=pthread_cond_timedwait(&wait_changed,&wait_lock,&deadline); ++held_locks;
+        CHECK(!result||result==ETIMEDOUT); if(result==ETIMEDOUT)break;
+    }
+    --held_locks; CHECK(!pthread_mutex_unlock(&wait_lock)); return ready;
+}
+static bool process_io_wait_cleanup_for(uintptr_t key,wait_queue_predicate_t predicate,void *context,uint64_t ticks) {
+    (void)key; return process_io_wait_cleanup(predicate,context,ticks);
+}
+'''
+    code += "static uint64_t g_io_completion_broadcasts;\n"
     glue = (ROOT / "src/kernel/process/process_io.c").read_text()
     for signature in ("void process_io_notify_completion(", "void process_io_notify_cleanup(", "int process_io_complete_request("):
+        if signature == "int process_io_complete_request(":
+            code += "static void process_io_notify_request(io_request_t *request) { (void)request; process_io_notify_completion(); }\n"
+            code += "static void process_io_notify_cleanup_for(uintptr_t key) { (void)key; process_io_notify_cleanup(); }\n"
         code += function_definition(glue, signature) + "\n"
     code += without_includes(staged["src/kernel/io/service.c"]) + r'''
 
@@ -316,6 +337,9 @@ static void blocked_continuations_and_independent_cleanup(void) {
     io_request_t *queued=make_request(control,0,true);
     CHECK(io_service_submit(control->service,queued)==0);
     io_request_t *extra=NULL; CHECK(io_service_request_create(control->service,0,1,2,&extra)==-EAGAIN && !extra);
+    process_t *user=calloc(1,sizeof(*user)); CHECK(user); user->is_user=true; current_process=user;
+    CHECK(io_service_request_create(control->service,0,1,2,&extra)==IO_REQUEST_ADMISSION_RETRY && !extra);
+    current_process=NULL; free(user);
     CHECK(io_request_waiter_abandon(queued)==0); prep_guard=false;
     await_count(&control->input_closed,1); /* Both storage workers are still blocked. */
     CHECK(control->handled==2 && control->blocked==2);

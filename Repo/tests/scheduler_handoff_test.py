@@ -55,6 +55,7 @@ static bool thread_assert_stack_current(thread_t *t, const char *where) { (void)
 static void process_exit(int code) { (void)code; abort(); }
 static void fatal(const char *message) { fprintf(stderr, "%s\n", message); abort(); }
 static uint32_t scheduler_time_slice_ticks(void) { return 10; }
+static uint32_t scheduler_thread_time_slice_ticks(const thread_t *thread) { return thread->priority == THREAD_PRIORITY_UI ? 1 : scheduler_time_slice_ticks(); }
 static void scheduler_log_if_stalled(const char *where, uint64_t start) { (void)where; (void)start; }
 static void scheduler_log_running_cpu_change(thread_t *t, uint32_t cpu, const char *why) { (void)t; (void)cpu; (void)why; }
 static void spinlock_lock(spinlock_t *lock) { CHECK(!lock->locked, "nested context lock"); lock->locked = true; }
@@ -84,8 +85,11 @@ static void run_queue_lock_release(run_queue_t *queue, uint64_t flags) { (void)q
 static void enqueue_current_thread_local(thread_t *t)
 {
     CHECK(scheduler_locked && !(irq_flags & 512), "unprotected current enqueue");
+    t->state = THREAD_STATE_READY; t->in_transition = true;
     t->in_run_queue = true; enqueues++; enqueued_cpu = expected_enqueue_cpu;
 }
+static void remove_from_run_queue_locked(thread_t *t)
+{ CHECK(scheduler_locked && t->in_run_queue, "unprotected current dequeue"); t->in_run_queue = false; }
 static thread_t *dequeue_thread_for_cpu(uint32_t cpu, thread_t *skip)
 {
     (void)skip; CHECK(scheduler_locked && !(irq_flags & 512), "unprotected dequeue");
@@ -148,6 +152,11 @@ int main(void)
     reset(true, false); current.state = THREAD_STATE_RUNNING;
     scheduler_schedule(true);
     CHECK(selections == 0 && switches == 0 && !scheduler_locked && (irq_flags & 512), "run-current fast path changed");
+    reset(true, false); current.state=THREAD_STATE_RUNNING; run_queue.total=1; empty_local=true;
+    scheduler_schedule(true);
+    CHECK(enqueues==1 && !current.in_run_queue && !current.in_transition && current.state==THREAD_STATE_RUNNING,
+          "temporarily unavailable peer left current READY or queued while running");
+    CHECK(!switches && !scheduler_locked && (irq_flags & 512), "empty-eligible fallback changed ownership");
 
     /* A sleeper releases the scheduler lock before asking to park. An early
      * wake plus nested timer handoff can resume it RUNNING and consume its

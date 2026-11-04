@@ -704,30 +704,21 @@ uint32_t scheduler_select_target_cpu(thread_t *thread)
         return ui_cpu;
     }
 
-    /* Spread threads by stable TID, otherwise random. Avoid the UI CPU for
-       non-UI work when we have more than one CPU online. */
-    uint32_t start = 0;
-    if (thread)
+    /* Hash across eligible CPUs, rather than across all CPUs and redirecting
+     * the reserved CPU's share to its neighbour. That doubled the neighbour's
+     * default load and left runnable browser work waiting beside idle CPUs. */
+    uint32_t eligible = 0;
+    for (uint32_t idx = 0; idx < limit; ++idx)
+        if (scheduler_cpu_online(idx) && !(ui_cpu_online && limit > 1 && idx == ui_cpu))
+            ++eligible;
+    if (eligible)
     {
-        start = (uint32_t)(thread->tid % (uint64_t)limit);
-    }
-    else
-    {
-        start = scheduler_rand32() % limit;
-    }
-
-    for (uint32_t attempt = 0; attempt < limit; ++attempt)
-    {
-        uint32_t idx = (start + attempt) % limit;
-        if (!scheduler_cpu_online(idx))
+        uint32_t ordinal = thread ? (uint32_t)(thread->tid % eligible) : scheduler_rand32() % eligible;
+        for (uint32_t idx = 0; idx < limit; ++idx)
         {
-            continue;
+            if (!scheduler_cpu_online(idx) || (ui_cpu_online && limit > 1 && idx == ui_cpu)) continue;
+            if (ordinal-- == 0) return idx;
         }
-        if (ui_cpu_online && limit > 1 && idx == ui_cpu)
-        {
-            continue;
-        }
-        return idx;
     }
 
     /* Fall back to UI CPU if nothing else is online. */
@@ -738,7 +729,7 @@ uint32_t scheduler_select_target_cpu(thread_t *thread)
 
     for (uint32_t attempt = 0; attempt < limit; ++attempt)
     {
-        uint32_t idx = (start + attempt) % limit;
+        uint32_t idx = attempt;
         if (scheduler_cpu_online(idx))
         {
             return idx;
@@ -868,7 +859,20 @@ static bool run_queue_detach_locked(run_queue_t *queue, thread_t *thread)
     return true;
 }
 
-static thread_t *run_queue_pop_locked(run_queue_t *queue, thread_t *skip)
+/* The assembly handoff moves off the old stack and clears running_cpu before
+ * finish_switch completes its outgoing-thread bookkeeping. Keep queued tasks
+ * temporarily unavailable until that CPU drops its published hazard. Otherwise
+ * a thief can run/block the task again while the old CPU still changes it. */
+static bool scheduler_handoff_pending(const thread_t *thread)
+{
+    if (thread->in_transition) return true;
+    uint32_t limit = scheduler_cpu_limit();
+    for (uint32_t cpu = 0; cpu < limit; ++cpu)
+        if (__atomic_load_n(&g_switch_out_threads[cpu], __ATOMIC_ACQUIRE) == thread) return true;
+    return false;
+}
+
+static thread_t *run_queue_pop_locked(run_queue_t *queue, thread_t *skip, uint32_t destination_cpu)
 {
     if (!queue)
     {
@@ -900,7 +904,7 @@ static thread_t *run_queue_pop_locked(run_queue_t *queue, thread_t *skip)
         for (thread_t *thread = queue->heads[priority]; thread; )
         {
             thread_t *next = thread->queue_next;
-            if (skip && thread == skip)
+            if ((skip && thread == skip) || scheduler_handoff_pending(thread))
             {
                 thread = next;
                 continue;
@@ -912,9 +916,8 @@ static thread_t *run_queue_pop_locked(run_queue_t *queue, thread_t *skip)
                 thread = next;
                 continue;
             }
-            if (thread->affinity_enabled &&
-                thread->affinity_cpu != RUN_QUEUE_CPU_INVALID &&
-                thread->affinity_cpu != queue->cpu_index)
+            if (scheduler_required_cpu(thread) != RUN_QUEUE_CPU_INVALID &&
+                scheduler_required_cpu(thread) != destination_cpu)
             {
                 thread = next;
                 continue;
@@ -946,7 +949,7 @@ static thread_t *run_queue_pop_locked(run_queue_t *queue, thread_t *skip)
         for (thread_t *thread = queue->heads[priority]; thread; )
         {
             thread_t *next = thread->queue_next;
-            if (skip && thread == skip)
+            if ((skip && thread == skip) || scheduler_handoff_pending(thread))
             {
                 thread = next;
                 continue;
@@ -957,9 +960,8 @@ static thread_t *run_queue_pop_locked(run_queue_t *queue, thread_t *skip)
                 thread = next;
                 continue;
             }
-            if (thread->affinity_enabled &&
-                thread->affinity_cpu != RUN_QUEUE_CPU_INVALID &&
-                thread->affinity_cpu != queue->cpu_index)
+            if (scheduler_required_cpu(thread) != RUN_QUEUE_CPU_INVALID &&
+                scheduler_required_cpu(thread) != destination_cpu)
             {
                 thread = next;
                 continue;
@@ -978,7 +980,7 @@ static thread_t *run_queue_pop_locked(run_queue_t *queue, thread_t *skip)
             uint32_t expected = RUN_QUEUE_CPU_INVALID;
             if (!__atomic_compare_exchange_n(&thread->running_cpu,
                                              &expected,
-                                             queue->cpu_index,
+                                             destination_cpu,
                                              false,
                                              __ATOMIC_ACQ_REL,
                                              __ATOMIC_ACQUIRE))
@@ -991,9 +993,8 @@ static thread_t *run_queue_pop_locked(run_queue_t *queue, thread_t *skip)
                 thread = next;
                 continue;
             }
-            if (thread->affinity_enabled &&
-                thread->affinity_cpu != RUN_QUEUE_CPU_INVALID &&
-                thread->affinity_cpu != queue->cpu_index)
+            if (scheduler_required_cpu(thread) != RUN_QUEUE_CPU_INVALID &&
+                scheduler_required_cpu(thread) != destination_cpu)
             {
                 __atomic_store_n(&thread->running_cpu, RUN_QUEUE_CPU_INVALID, __ATOMIC_RELEASE);
                 thread = next;
@@ -1014,9 +1015,9 @@ static thread_t *run_queue_pop_locked(run_queue_t *queue, thread_t *skip)
                 continue;
             }
             thread->in_transition = true;
-            thread->run_queue_cpu = queue->cpu_index;
+            thread->run_queue_cpu = destination_cpu;
             thread->wake_pending = false;
-            scheduler_log_running_cpu_change(thread, queue->cpu_index, "claim_dequeue");
+            scheduler_log_running_cpu_change(thread, destination_cpu, "claim_dequeue");
             SCHED_DBG("[sched dbg] dequeue_pick cpu=%u thread=%s pid=0x%016llX total=%u\r\n",
                       queue->cpu_index,
                       scheduler_thread_name(thread),
@@ -1033,7 +1034,7 @@ static thread_t *run_queue_pop_locked(run_queue_t *queue, thread_t *skip)
         for (thread_t *thread = queue->heads[priority]; thread; )
         {
             thread_t *next = thread->queue_next;
-            if (skip && thread == skip)
+            if ((skip && thread == skip) || scheduler_handoff_pending(thread))
             {
                 thread = next;
                 continue;
@@ -1041,7 +1042,7 @@ static thread_t *run_queue_pop_locked(run_queue_t *queue, thread_t *skip)
             uint32_t expected = RUN_QUEUE_CPU_INVALID;
             if (!__atomic_compare_exchange_n(&thread->running_cpu,
                                              &expected,
-                                             queue->cpu_index,
+                                             destination_cpu,
                                              false,
                                              __ATOMIC_ACQ_REL,
                                              __ATOMIC_ACQUIRE))
@@ -1054,9 +1055,8 @@ static thread_t *run_queue_pop_locked(run_queue_t *queue, thread_t *skip)
                 thread = next;
                 continue;
             }
-            if (thread->affinity_enabled &&
-                thread->affinity_cpu != RUN_QUEUE_CPU_INVALID &&
-                thread->affinity_cpu != queue->cpu_index)
+            if (scheduler_required_cpu(thread) != RUN_QUEUE_CPU_INVALID &&
+                scheduler_required_cpu(thread) != destination_cpu)
             {
                 __atomic_store_n(&thread->running_cpu, RUN_QUEUE_CPU_INVALID, __ATOMIC_RELEASE);
                 thread = next;
@@ -1076,9 +1076,9 @@ static thread_t *run_queue_pop_locked(run_queue_t *queue, thread_t *skip)
                 continue;
             }
             thread->in_transition = true;
-            thread->run_queue_cpu = queue->cpu_index;
+            thread->run_queue_cpu = destination_cpu;
             thread->wake_pending = false;
-            scheduler_log_running_cpu_change(thread, queue->cpu_index, "claim_dequeue_fallback");
+            scheduler_log_running_cpu_change(thread, destination_cpu, "claim_dequeue_fallback");
             SCHED_DBG("[sched dbg] dequeue_pick_fallback cpu=%u thread=%s pid=0x%016llX total=%u\r\n",
                       queue->cpu_index,
                       scheduler_thread_name(thread),
@@ -1142,14 +1142,21 @@ static thread_t *run_queue_steal_for_cpu(uint32_t cpu_index, thread_t *skip)
             continue;
         }
 
+        /* Enqueue already nudges an idle destination. Moving that task again
+         * adds contention and loses locality without exposing parallel work.
+         * Steal only a peer waiting behind a CPU that is actually occupied. */
+        thread_t *victim_current = __atomic_load_n(&g_current_threads[idx], __ATOMIC_ACQUIRE);
+        if (!victim_current || victim_current->is_idle || victim_current->state != THREAD_STATE_RUNNING)
+            continue;
+
         uint64_t flags = run_queue_lock_acquire(queue, "steal");
-        if (queue->total <= 1)
+        if (queue->total == 0)
         {
             run_queue_lock_release(queue, flags);
             continue;
         }
 
-        thread_t *thread = run_queue_pop_locked(queue, skip);
+        thread_t *thread = run_queue_pop_locked(queue, skip, cpu_index);
         scheduler_verify_run_queue_locked(queue, "steal_dequeue");
         run_queue_lock_release(queue, flags);
         if (thread)
@@ -1157,7 +1164,7 @@ static thread_t *run_queue_steal_for_cpu(uint32_t cpu_index, thread_t *skip)
             thread->run_queue_cpu = cpu_index;
             scheduler_log_running_cpu_change(thread, cpu_index, "claim_steal");
             __atomic_store_n(&thread->running_cpu, cpu_index, __ATOMIC_RELEASE);
-            SCHED_LOG("[sched] steal_success target_cpu=%u from_cpu=%u thread=%s pid=0x%016llX\r\n",
+            SCHED_DBG("[sched] steal_success target_cpu=%u from_cpu=%u thread=%s pid=0x%016llX\r\n",
                       cpu_index,
                       idx,
                       scheduler_thread_name(thread),
@@ -1181,7 +1188,7 @@ static thread_t *dequeue_thread_for_cpu(uint32_t cpu_index, thread_t *skip)
     if (local)
     {
         uint64_t flags = run_queue_lock_acquire(local, "dequeue");
-        thread_t *thread = run_queue_pop_locked(local, skip);
+        thread_t *thread = run_queue_pop_locked(local, skip, cpu_index);
         scheduler_verify_run_queue_locked(local, "dequeue_thread_for_cpu");
         run_queue_lock_release(local, flags);
         if (thread)
@@ -2321,6 +2328,9 @@ static void scheduler_finish_switch(void)
      * one scheduler-locked transaction. No CPU can observe quiescence and free
      * outgoing between those operations. */
     __atomic_store_n(&g_switch_out_threads[cpu], NULL, __ATOMIC_RELEASE);
+    if (outgoing && outgoing->state == THREAD_STATE_READY && thread_in_run_queue_load(outgoing) &&
+        outgoing->run_queue_cpu != cpu && outgoing->run_queue_cpu < scheduler_cpu_limit())
+        scheduler_nudge_cpu(outgoing->run_queue_cpu);
     if (outgoing_process && outgoing_process->state == PROCESS_STATE_ZOMBIE)
     {
         /* Joins re-check full quiescence after every completed switch. */
@@ -2485,7 +2495,7 @@ static bool switch_to_thread(thread_t *next, uint64_t sched_lock_enter)
     next->state = THREAD_STATE_RUNNING;
     next->preempt_pending = false;
     next->wake_pending = false;
-    next->time_slice_remaining = scheduler_time_slice_ticks();
+    next->time_slice_remaining = scheduler_thread_time_slice_ticks(next);
     __atomic_store_n(&next->last_scheduled_tick, timer_ticks(), __ATOMIC_RELAXED);
     next->in_transition = true;
     scheduler_log_running_cpu_change(next, cpu_idx, "claim");
@@ -2671,7 +2681,7 @@ __attribute__((visibility("default"))) void scheduler_schedule(bool requeue_curr
                 {
                     current->preempt_pending = false;
                     current->wake_pending = false;
-                    current->time_slice_remaining = scheduler_time_slice_ticks();
+                    current->time_slice_remaining = scheduler_thread_time_slice_ticks(current);
                     current->state = THREAD_STATE_RUNNING;
                     current->in_transition = false;
                     __atomic_store_n(&current->running_cpu, cpu_index, __ATOMIC_RELEASE);
@@ -2697,7 +2707,7 @@ __attribute__((visibility("default"))) void scheduler_schedule(bool requeue_curr
                       reason);
             current->wake_pending = false;
             current->state = THREAD_STATE_READY;
-            current->time_slice_remaining = scheduler_time_slice_ticks();
+            current->time_slice_remaining = scheduler_thread_time_slice_ticks(current);
             current->preempt_pending = false;
             current->in_transition = true;
             enqueue_current_thread_local(current);
@@ -2713,10 +2723,21 @@ __attribute__((visibility("default"))) void scheduler_schedule(bool requeue_curr
             /* If nothing else is runnable, allow the just-enqueued thread. */
             next = dequeue_thread_for_cpu(cpu_index, NULL);
         }
-        if (!next && have_current)
+        uint32_t current_required_cpu = current ? scheduler_required_cpu(current) : RUN_QUEUE_CPU_INVALID;
+        bool can_continue_current = have_current || (just_requeued_current &&
+            (current_required_cpu == RUN_QUEUE_CPU_INVALID || current_required_cpu == cpu_index));
+        if (!next && can_continue_current)
         {
+            /* All peers may be temporarily unavailable during a handoff.
+             * Undo our speculative enqueue before continuing on this stack;
+             * there is no need to bounce through idle just to let the same
+             * runnable task resume on its next tick. Affinity still wins. */
+            if (thread_in_run_queue_load(current)) remove_from_run_queue_locked(current);
+            current->state = THREAD_STATE_RUNNING;
+            current->in_transition = false;
+            current->wake_pending = false;
             current->preempt_pending = false;
-            current->time_slice_remaining = scheduler_time_slice_ticks();
+            current->time_slice_remaining = scheduler_thread_time_slice_ticks(current);
             __atomic_store_n(&current->last_scheduled_tick, timer_ticks(), __ATOMIC_RELAXED);
             scheduler_lock_release(sched_flags);
             scheduler_log_if_stalled("scheduler_schedule(run_current)", sched_watch);
@@ -2738,7 +2759,7 @@ __attribute__((visibility("default"))) void scheduler_schedule(bool requeue_curr
             current->state = THREAD_STATE_RUNNING;
             current->preempt_pending = false;
             current->wake_pending = false;
-            current->time_slice_remaining = scheduler_time_slice_ticks();
+            current->time_slice_remaining = scheduler_thread_time_slice_ticks(current);
             current->in_transition = false;
         scheduler_log_running_cpu_change(current, cpu_index, "run_current_fast");
         __atomic_store_n(&current->running_cpu, cpu_index, __ATOMIC_RELEASE);
@@ -2904,6 +2925,7 @@ void thread_trampoline(void)
 {
     scheduler_finish_switch();
     thread_t *self = current_thread_local();
+#if THREAD_CREATE_DEBUG
     if (self)
     {
         serial_printf("[thread_trampoline] start name=%s arg=0x%016llX entry=0x%016llX\r\n",
@@ -2911,6 +2933,7 @@ void thread_trampoline(void)
                       (unsigned long long)((uintptr_t)self->arg),
                       (unsigned long long)((uintptr_t)self->entry));
     }
+#endif
     if (self && self->entry)
     {
         self->entry(self->arg);

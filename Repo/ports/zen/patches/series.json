@@ -1089,7 +1089,7 @@
     },
     {
       "file": "0051-native-alix-freetype-font-factory.patch",
-      "sha256": "8c92fc1e41bab9e1f6526e81bcc620ed17c728e30862f557a73ce182e98983c0",
+      "sha256": "769aec21e31843b802ebc3f2776ac7427362f54e90afcb05351c51dbb4884019",
       "files": [
         {
           "path": "gfx/2d/2D.h",
@@ -1099,7 +1099,7 @@
         {
           "path": "gfx/2d/Factory.cpp",
           "before": "0113247d23c81d17e0765e1c2768e0246370d7d791f16f98b382945739de49a2",
-          "after": "f08bea166aa1aee9ef582d087f16a04cafa41610b6eeb621478b7ebc4f06a82a"
+          "after": "cd34d5d9d29b7faf12f5e9f3b272eab8facba0657c4f829970833692624b737b"
         }
       ]
     },

@@ -122,12 +122,12 @@ static int signal_select_locked(thread_t *thread, alix_sigaction_t *action, alix
         if (thread->signal_pending & bit)
         {
             *info = thread->signal_info[number];
-            thread->signal_pending &= ~bit;
+            __atomic_fetch_and(&thread->signal_pending, ~bit, __ATOMIC_RELAXED);
         }
         else
         {
             *info = thread->process->signal_info[number];
-            thread->process->signal_pending &= ~bit;
+            __atomic_fetch_and(&thread->process->signal_pending, ~bit, __ATOMIC_RELAXED);
         }
         if (!signal_ignored(action, number))
         {
@@ -353,6 +353,13 @@ void process_signal_syscall_return(syscall_frame_t *frame, uint64_t preempt_resu
     thread_t *thread = current_thread_local();
     if (!signal_user_thread(thread) || thread->io_request)
         return;
+    /* Signal queues publish their bit after the payload with release ordering.
+     * The usual syscall return has no pending signal at all: it needs neither
+     * IRQ masking nor the global scheduler lock. A concurrent new signal stays
+     * queued for this return's slow check or the next syscall/preemption. */
+    if (!(__atomic_load_n(&thread->signal_pending, __ATOMIC_ACQUIRE) |
+          __atomic_load_n(&thread->process->signal_pending, __ATOMIC_ACQUIRE)))
+        return;
     if (preempt_resume && frame->rip != USER_PREEMPT_STUB_BASE + ALIX_PREEMPT_RETURN_OFFSET)
         preempt_resume = 0;
     uint64_t flags = cpu_save_flags();
@@ -500,10 +507,10 @@ int process_signal_sigaction(int number, uintptr_t input, uintptr_t output, size
             process->signal_actions[number] = *action;
             if (signal_ignored(action, number))
             {
-                process->signal_pending &= ~signal_bit(number);
+                __atomic_fetch_and(&process->signal_pending, ~signal_bit(number), __ATOMIC_RELAXED);
                 spinlock_lock(&process->threads_lock);
                 for (thread_t *target = process->threads; target; target = target->process_next)
-                    target->signal_pending &= ~signal_bit(number);
+                    __atomic_fetch_and(&target->signal_pending, ~signal_bit(number), __ATOMIC_RELAXED);
                 spinlock_unlock(&process->threads_lock);
             }
         }
@@ -602,7 +609,7 @@ static void signal_queue_thread_locked(thread_t *target, int number, const alix_
     uint64_t bit = signal_bit(number);
     if (!(target->signal_pending & bit))
         target->signal_info[number] = *info;
-    target->signal_pending |= bit;
+    __atomic_fetch_or(&target->signal_pending, bit, __ATOMIC_RELEASE);
     if (target->sigwait_active && (target->sigwait_mask & bit))
     {
         wait_queue_wake_all_locked(&target->sigwait_queue);
@@ -684,7 +691,7 @@ void process_alarm_tick(uint64_t now)
         else
         {
             if (!(process->signal_pending & bit)) process->signal_info[ALIX_SIGALRM] = info;
-            process->signal_pending |= bit;
+            __atomic_fetch_or(&process->signal_pending, bit, __ATOMIC_RELEASE);
         }
         spinlock_unlock(&process->threads_lock);
     }
@@ -792,7 +799,7 @@ int process_signal_kill(int32_t pid, int number)
                     if (process->signal_pending & bit)
                     {
                         info = process->signal_info[number];
-                        process->signal_pending &= ~bit;
+                        __atomic_fetch_and(&process->signal_pending, ~bit, __ATOMIC_RELAXED);
                     }
                     signal_queue_thread_locked(target, number, &info);
                 }
@@ -801,7 +808,7 @@ int process_signal_kill(int32_t pid, int number)
             {
                 if (!(process->signal_pending & bit))
                     process->signal_info[number] = info;
-                process->signal_pending |= bit;
+                __atomic_fetch_or(&process->signal_pending, bit, __ATOMIC_RELEASE);
             }
             spinlock_unlock(&process->threads_lock);
         }
@@ -856,8 +863,8 @@ int process_signal_wait(uintptr_t input, uintptr_t output, size_t size, uint64_t
             /* Existing signal-mask copies use this scheduler -> memory lock
              * order. Copy first: EFAULT must not consume the selected signal. */
             if (!user_copy_to_user((void *)output, &number, sizeof(number))) result = -EFAULT;
-            else if (thread->signal_pending & bit) thread->signal_pending &= ~bit;
-            else thread->process->signal_pending &= ~bit;
+            else if (thread->signal_pending & bit) __atomic_fetch_and(&thread->signal_pending, ~bit, __ATOMIC_RELAXED);
+            else __atomic_fetch_and(&thread->process->signal_pending, ~bit, __ATOMIC_RELAXED);
             break;
         }
         if (process_signal_pending_locked(thread)) { result = -EINTR; break; }

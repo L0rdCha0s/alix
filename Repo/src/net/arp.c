@@ -14,6 +14,9 @@
     process_debug_log_stack_write(label, __builtin_return_address(0), (dest), (len))
 
 #define ARP_CACHE_SIZE 8
+#ifndef ARP_DEBUG_LOG
+#define ARP_DEBUG_LOG 0
+#endif
 
 // replace your struct with this (adds last_tick)
 typedef struct
@@ -100,7 +103,7 @@ bool net_arp_lookup_fresh(uint32_t ip, uint8_t mac_out[6], uint64_t max_age_tick
                 return false;
             }
             net_debug_memcpy("arp_lookup_hit", mac_out, g_cache[i].mac, 6);
-            arp_log_entry("cache hit", ip, g_cache[i].mac);
+            if (ARP_DEBUG_LOG) arp_log_entry("cache hit", ip, g_cache[i].mac);
             return true;
         }
     }
@@ -119,7 +122,7 @@ bool net_arp_lookup(uint32_t ip, uint8_t mac_out[6])
         if (g_cache[i].valid && g_cache[i].ip == ip)
         {
             net_debug_memcpy("arp_lookup_stale", mac_out, g_cache[i].mac, 6);
-            arp_log_entry("cache hit", ip, g_cache[i].mac);
+            if (ARP_DEBUG_LOG) arp_log_entry("cache hit", ip, g_cache[i].mac);
             return true;
         }
     }

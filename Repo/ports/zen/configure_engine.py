@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Configure/build upstream SpiderMonkey or Gecko with Alix's native runtime."""
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -15,6 +16,43 @@ from configure_cache import refresh_compiler_cache, rust_port_revision
 from toolchain.target_driver import native_bindgen_flags
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def refresh_native_link_inputs(object_dir, objects):
+    """Relink native executables when the driver-injected runtime changes."""
+    inputs = [str((ROOT / obj).resolve()) for obj in objects]
+    inputs += [str(ROOT / name) for name in (
+        "user/lib/link.ld", "ports/zen/toolchain/target_driver.py",
+        "ports/zen/upstream/libcxx-alix-build/lib/libc++.a",
+        "ports/zen/upstream/libcxx-alix-build/lib/libc++abi.a",
+        "ports/zen/upstream/libcxx-alix-build/lib/libalix-cxx-support.a",
+        "ports/zen/upstream/libm-alix-build/lib/libalix-math.a",
+        "build/user/lib/libalix-ssp.a")]
+    hashes = {}
+    for name in inputs:
+        path = Path(name)
+        if path.is_file():
+            with path.open("rb") as stream:
+                hashes[name] = hashlib.file_digest(stream, "sha256").hexdigest()
+    fingerprint = hashlib.sha256(json.dumps(hashes, sort_keys=True).encode()).hexdigest()
+    stamp = object_dir / ".alix-native-link-inputs.json"
+    previous = json.loads(stamp.read_text()) if stamp.exists() else {}
+    if previous.get("fingerprint") == fingerprint:
+        return
+    touched = []
+    if object_dir.exists():
+        for backend in object_dir.rglob("backend.mk"):
+            for program in re.findall(r"^PROGRAM = .*?/([^/\n]+)$", backend.read_text(), re.M):
+                listing = backend.parent / (program + ".list")
+                if listing.is_file():
+                    os.utime(listing, None)
+                    touched.append(str(listing))
+    object_dir.mkdir(parents=True, exist_ok=True)
+    pending = stamp.with_name(stamp.name + ".tmp")
+    pending.write_text(json.dumps({"fingerprint": fingerprint, "inputs": hashes,
+                                  "relink_lists": touched}, indent=2) + "\n")
+    pending.replace(stamp)
+    print(f"Native runtime changed: refreshed {len(touched)} executable link dependencies")
 
 
 def main():
@@ -47,6 +85,7 @@ def main():
     temporary_manifest = manifest.with_name(f".{manifest.name}.{os.getpid()}.tmp")
     temporary_manifest.write_text(json.dumps([str((ROOT / obj).resolve()) for obj in objects], indent=2) + "\n")
     temporary_manifest.replace(manifest)
+    refresh_native_link_inputs(object_dir, objects)
     config = state / ("mozconfig-js-alix" if args.project == "js" else "mozconfig-gecko-alix")
     config.write_text("\n".join([
         "# Native Alix target; no host-browser or Linux ABI fallback.",

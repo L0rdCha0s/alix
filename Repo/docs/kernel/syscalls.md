@@ -2,6 +2,14 @@
 
 This kernel exposes a small syscall surface for user programs. Syscalls are dispatched via vector 0x80.
 
+Protected I/O queue exhaustion during initial admission uses an internal restart
+result, distinct from an operation's `EAGAIN`. Preparation releases its captured
+resources before returning it. The dispatcher sleeps for one tick and restarts
+the original two-byte `int 0x80`, preserving arguments and allowing normal signal
+delivery at the restart point. No operation has begun in this case. Actual
+nonblocking read/write/socket `EAGAIN` results still return normally. Queue
+limits continue to bound live and cleanup-pending request storage.
+
 Syscall 74 (`MEMORY_PAGES`) takes a selector in RDI: zero returns boot E820
 usable RAM before kernel reservations; one returns the current locked PMM free
 count. Both results are in 4096-byte pages. Other selectors return -EINVAL;

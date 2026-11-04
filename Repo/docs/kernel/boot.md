@@ -136,3 +136,13 @@ If you change virtual/physical layout assumptions, update both the linker script
 
 See [physical hardware support](hardware.md) for disk safety, xHCI/BOT storage,
 GOP graphics, interrupt/timer assumptions and the isolated acceptance runners.
+
+### Periodic timer rate
+
+The PIT uses rate-generator mode (channel 0 command 0x34). The previous
+square-wave setup produced about 200 kernel ticks per host second in q35 QEMU
+while advertising 100 Hz. The rate-generator setup measures about 100; this
+restores real durations for input repeat, sleeps, animation and periodic work.
+The observed host comparison includes short debugger-attachment overhead and
+is recorded in `build/ports/zen/performance-20261104/clock-rate.json`. Physical
+machine timing is not established by this QEMU measurement.

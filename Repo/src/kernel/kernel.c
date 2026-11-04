@@ -1139,6 +1139,9 @@ void kernel_main(void)
 #endif
     interrupts_enable_irq(1);
     timer_init(100);
+    /* process_system_init precedes PIT setup. Apply the real frequency now
+     * instead of leaving its boot-time fallback active for the entire run. */
+    process_configure_timer();
 #if ENABLE_INIT_KEYBOARD
     timekeeping_init();
     keyboard_init();

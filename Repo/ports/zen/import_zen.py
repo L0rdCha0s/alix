@@ -45,6 +45,56 @@ def verify_active_overlay(engine):
     return state
 
 
+def alix_icon_manifest(text):
+    # Zen groups its standard icon set under XP_LINUX. Alix uses that same
+    # theme without claiming to be Linux in the rest of the application.
+    marker = "#if defined(XP_LINUX) || defined(MOZ_WIDGET_ALIX)\n"
+    if marker not in text:
+        if text.count("#ifdef XP_LINUX\n") != 1:
+            raise RuntimeError("unrecognized Zen platform icon manifest")
+        text = text.replace("#ifdef XP_LINUX\n", marker, 1)
+    # Existing Zen styles still request this legacy name; the pinned icon set
+    # supplies the same small chevron as arrow-right.svg.
+    if "skin/classic/browser/zen-icons/arrow-right-small.svg" not in text:
+        text = text.replace(marker, marker +
+            "*  skin/classic/browser/zen-icons/arrow-right-small.svg (../shared/zen-icons/nucleo/arrow-right.svg)\n", 1)
+    return text
+
+
+def refresh_alix_resources(engine, state):
+    name = "browser/themes/shared/zen-icons/jar.inc.mn"
+    target = engine / name
+    original = target.read_text()
+    updated = alix_icon_manifest(original)
+    if updated == original:
+        return state
+    if digest(target) != state["files"][name]["after"]:
+        raise RuntimeError("concurrent edit in Zen icon manifest")
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    backup = OUTPUT / ("zen-alix-resources-" + stamp)
+    backup.mkdir()
+    shutil.copy2(target, backup / "jar.inc.mn")
+    shutil.copy2(engine / STATE, backup / STATE)
+    state["files"][name]["after"] = hashlib.sha256(updated.encode()).hexdigest()
+    state["alix_resource_revision"] = 1
+    pending = target.with_name(target.name + ".alix-pending")
+    pending_state = engine / (STATE + ".alix-pending")
+    try:
+        pending.write_text(updated)
+        pending_state.write_text(json.dumps(state, indent=2) + "\n")
+        pending.replace(target)
+        pending_state.replace(engine / STATE)
+    except BaseException:
+        shutil.copy2(backup / "jar.inc.mn", target)
+        shutil.copy2(backup / STATE, engine / STATE)
+        raise
+    finally:
+        pending.unlink(missing_ok=True)
+        pending_state.unlink(missing_ok=True)
+    print("Enabled native Alix Zen icon resources; previous manifest preserved at " + str(backup))
+    return state
+
+
 def restore_overlay(engine):
     state = verify_active_overlay(engine)
     backup = Path(state["backup"])
@@ -80,7 +130,7 @@ def restore_overlay(engine):
 
 def import_overlay(engine, source, generated):
     if (engine / STATE).exists():
-        return verify_active_overlay(engine)
+        return refresh_alix_resources(engine, verify_active_overlay(engine))
     from patch_engine import apply_patches
     from prepare import load_manifest, verify_source
 
@@ -178,6 +228,8 @@ def import_overlay(engine, source, generated):
         for patch in series["patches"]:
             subprocess.run(["git", "apply", "--reverse", "--check",
                             str(ROOT / "ports/zen/patches" / patch["file"])], cwd=stage, check=True)
+        icon_manifest = stage / "browser/themes/shared/zen-icons/jar.inc.mn"
+        icon_manifest.write_text(alix_icon_manifest(icon_manifest.read_text()))
         changed = {name: {"before": before[name], "after": digest(stage / name)}
                    for name in sorted(paths) if before[name] != digest(stage / name)}
         overrides = {}

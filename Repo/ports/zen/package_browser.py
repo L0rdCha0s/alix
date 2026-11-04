@@ -88,6 +88,15 @@ def main():
         shutil.copytree(source, stage, symlinks=False,
                         ignore=shutil.ignore_patterns("gmp-fake", "gmp-fakeopenh264",
                                                      "alix-browser-manifest.json"))
+        chrome_resources = []
+        if args.entry == "zen":
+            chrome_resources = ["chrome/browser/skin/classic/browser/zen-icons/" + name + ".svg"
+                                for name in ("plus", "expand-sidebar", "back", "forward", "reload",
+                                             "menu", "arrow-right-small", "sidebar", "permissions", "close")]
+            with zipfile.ZipFile(stage / "browser/omni.ja") as resources:
+                missing = sorted(set(chrome_resources) - set(resources.namelist()))
+            if missing:
+                raise RuntimeError("missing native Zen chrome resources: " + ", ".join(missing))
         native = []
         files = []
         for path in sorted(stage.rglob("*")):
@@ -101,7 +110,11 @@ def main():
                     raise RuntimeError(f"packaging changed browser load/TLS bytes: {relative}")
                 before = original_path.stat().st_size
                 stripped = path.with_name(path.name + ".stripped")
-                subprocess.run(["x86_64-elf-strip", "--strip-debug", "-o", str(stripped), str(path)], check=True)
+                # The native loader uses dynamic symbols in PT_LOAD. Full
+                # local symbol/string tables are development data, and AlixFS
+                # keeps installed file bytes resident even when ELF does not
+                # map those sections. Preserve every load/TLS byte below.
+                subprocess.run(["x86_64-elf-strip", "--strip-all", "-o", str(stripped), str(path)], check=True)
                 if load_image(stripped) != image:
                     raise RuntimeError(f"stripping changed browser load/TLS bytes: {relative}")
                 stripped.chmod(path.stat().st_mode & 0o777)
@@ -112,7 +125,8 @@ def main():
             files.append({"path": relative, "bytes": path.stat().st_size, "sha256": digest})
         manifest = {"source": str(original), "format": "staged" if args.source else "omni",
                     "entry": args.entry, "native_images": native,
-                    "files": files, "updater_present": (stage / "updater").is_file()}
+                    "files": files, "updater_present": (stage / "updater").is_file(),
+                    "verified_chrome_resources": chrome_resources}
         (stage / "alix-browser-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
         shutil.move(stage, args.output)
     with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as package:

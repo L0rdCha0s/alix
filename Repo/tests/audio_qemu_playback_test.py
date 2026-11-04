@@ -284,7 +284,7 @@ def main():
             qmp = gui.QmpClient(qmp_path)
             gui.move_mouse_to_terminal(qmp)
             gui.click_left(qmp)
-            gui.wait_until(runner, "desktop terminal", lambda t: "start name=atk_shell" in t[offset:], 15)
+            gui.wait_until(runner, "desktop terminal", lambda t: re.search(r"\[process\] finalize [^\r\n]*name=atk_shell ", t[offset:]), 15)
             time.sleep(1)
             type_text(qmp, "/tmp/atk_mp3.elf\n")
             gui.wait_until(runner, "MP3 first present", lambda t: "[atk_mp3] first present" in t[offset:], 35)

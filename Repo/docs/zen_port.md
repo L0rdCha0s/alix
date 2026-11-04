@@ -34,7 +34,37 @@ filesystem after each atomic rename. Native console tab expansion no longer
 recursively acquires its own lock or loops across a line wrap. The updated
 unzip installer accepts directory symlinks such as `/usr` and can explicitly
 discard a guest ZIP after reading it, reducing installation memory pressure.
-Normal `make` passes; no new tests or test harnesses were added.
+Normal `make` passes. Existing checks validate the runtime changes; the
+performance harness below was added at the user's request.
+
+The performance checkpoint on 2026-11-04 rebuilt and packaged the actual Zen
+application after kernel/runtime changes. A cold-profile, eight-CPU, 6 GiB TCG
+comparison reduced command-to-first-native-window time from **185.76 s to
+23.647 s** (7.86 times faster). This measures first window creation, not content
+ready time, and is one run per configuration with other host workloads running.
+The final guest rendered the existing calculator, accepted 45 ms key taps with
+single digits, produced 4 + 7 = 11, navigated to the same page over HTTP and
+rendered Result: 3. The browser parent and children then returned status 0.
+A separate clean shutdown/remount preserved the installed browser files.
+Evidence and the previous published bundle are retained in
+`build/ports/zen/performance-20261104/`; `result.json` records exact timings and
+receipts. The rebuilt ZIP is published at `build/ports/zen/zen-browser.zip`.
+
+The changes remove repeated private copies of read-only library pages, linear
+shared-page lookup, filesystem-wide background dirty scans, repeated TLS loader
+locking, unnecessary stack-PTE walks, APIC reads on CPU-local lookups, repeated
+orphan scans and empty-signal scheduler locking on syscall return. Read-only
+library cache pages now populate on demand; writable segments remain private.
+Child Gecko event loops wait for notifications instead of polling native input
+that they do not own. Back-surface copying runs outside the global desktop lock.
+UI quanta are capped at 10 ms. The standard TCG CPU model exposes implemented
+SIMD and RDTSCP features through `max,+rdrand`.
+
+The previous PIT square-wave configuration counted about 200 ticks per host
+second while reporting 100 Hz. Rate-generator mode restores approximately
+100 Hz, correcting key repeat, sleeps, animations and periodic work. These are
+QEMU measurements, rather than physical-device timing or a complete browser
+performance certification. Existing port limitations below remain separate.
 
 There are still rendering defects. A clean explicit profile in `zen-launch-4`
 renders the calculator text and produces 11; see
@@ -127,6 +157,67 @@ The host ZIP is retained. Start Zen with the desktop Browser tile or
 its canonical executable path for library and resource discovery. Existing
 legacy browser sources remain available as separate applications. The OS does
 not download the browser automatically during a normal `make` or boot.
+
+### Runtime performance measurements
+
+`ports/zen/benchmark_browser.py` boots through `run-via-agent.sh`, cloning an
+already installed disk into a disposable image. It snapshots the kernel and
+loader, creates a unique profile under `/root` on the cloned AlixFS volume,
+starts the real desktop compositor and launches Zen through its terminal.
+The source image and its profiles are never written. Run `make` first.
+
+```sh
+python3 ports/zen/benchmark_browser.py \
+  --data-image build/ports/zen/performance-20261104/f-data.img \
+  --bundle build/ports/zen/zen-browser.zip \
+  --output build/ports/zen/my-browser-benchmark \
+  --url local --url https://www.smh.com.au/ --repeat 2 --timeout 120
+```
+
+`--bundle` installs the specified ZIP before timing starts; omit it to use the
+installed copy in the cloned image. `local` serves the existing calculator.
+Repeated URLs reuse the same browser/profile, allowing cold and warm document
+loads to be distinguished. Each invocation creates a fresh profile. Output
+directories must not already exist. The private instrumentation uses autoconfig
+and trusted resource actors only inside the cloned installation; it is not part
+of the shipped bundle.
+
+`result.json` records command-to-native-window and delayed-browser-startup host
+times, Gecko first contentful paint, DOM/load events, final URL/title, timeouts
+and faults. Navigation/paint durations are guest Performance API measurements.
+Host report-arrival intervals include IPC/reporting delay and are not equivalent
+to `loadEventEnd`. Error pages are identified separately. QMP PPM screenshots
+corroborate native pixels; `events.jsonl`, `serial.log`, `network.pcap` and the
+post-timing `kernel-profile.log` provide the underlying evidence. Debugger
+snapshots run after timing. `--kernel`, `--quantum` (ticks) and `--steal` support
+controlled kernel experiments. The standard guest timer is 100 Hz.
+
+The follow-up results are in `build/ports/zen/kernel-performance-20261104.json`.
+In the matched calculator comparison, browser startup fell from 34.24 to
+23.38 host seconds and first contentful paint from 8.30 to 4.42 guest seconds.
+The old-kernel SMH run reproduced an IPC shared-memory validation crash and
+failed all three subsequent measurements. With the same rebuilt bundle and the
+final kernel, both SMH visits and the calculator completed without a page fault.
+SMH painted at 22.84 seconds cold and 10.32 seconds on the repeat visit; its
+complete load events took 79.46 and 51.05 seconds. Third-party network resources
+make full news-page load times variable. These are eight-CPU, 4 GiB TCG results,
+with one boot per configuration, rather than physical-hardware certification.
+
+The kernel changes include matching I/O wakeups to the completed request,
+queue-scoped cleanup notifications, bounded admission retry without leaking
+internal `EAGAIN` into ordinary file operations, blocking shell joins, uniform
+placement across eligible CPUs and safe outgoing-thread handoffs. Heap/serial
+CPU ownership is sampled after masking interrupts. Scheduler configuration now
+runs after PIT setup: the previous early 1000 Hz estimate had turned a requested
+10 ms quantum into 100 ms when the PIT started at 100 Hz. The normal quantum is
+now 20 ms, with UI threads capped at 10 ms. Work stealing remains off by default;
+the experimental path respects destination affinity and pending handoffs.
+
+The package strips local development symbols while verifying all load/TLS bytes
+against the actual linked images. All ten reported icon URLs and all 258 Zen
+icon resources are present. The updated bundle is published at the normal
+download path. Boot the rebuilt kernel, close Zen and rerun `/usr/bin/dl-zen.sh`
+to replace an existing installed browser; profiles need no reset.
 
 ### Earlier bring-up checkpoints
 
@@ -974,3 +1065,25 @@ and recovered the shell; the original debugger evidence is retained under
 - [Pinned source/base configuration](https://github.com/zen-browser/desktop/blob/f75390aa2b797ddc3524ff9ed52ceb32a839f9fa/surfer.json)
 - [Zen build guide](https://docs.zen-browser.app/contribute/desktop/building)
 - [Mozilla SpiderMonkey build and test guide](https://firefox-source-docs.mozilla.org/js/build.html)
+
+### Installing the performance runtime and icon resources
+
+A normal OS `make` does not replace an already installed Zen bundle. The
+2026-11-04 follow-up confirmed that the main volume still contained the old
+launcher and libxul hashes. The replacement archive refreshes every native
+executable consumer, including `zen-bin` and process helpers. Runtime-input
+fingerprints now refresh executable link dependencies during normal Zen builds.
+The loader retries EINTR and protected-I/O admission EAGAIN on its private
+blocking descriptor; hard read failures include offset, count, result and errno.
+Storage cleanup drains an existing retirement backlog before sleeping, avoiding
+an artificial 64-requests-per-tick admission bottleneck.
+
+Zen's icon manifest selected XP_WIN, XP_MACOSX or XP_LINUX and omitted Alix.
+The tracked import adapter now enables the standard icon set for MOZ_WIDGET_ALIX
+and provides the existing arrow-right asset under the legacy arrow-right-small
+name. Packaging requires all ten icon URLs reported by the browser, and the
+resulting omnijar contains 258 Zen icon resources. A private 4 GiB reproduction
+with the main volume's file-cache footprint rendered the toolbar icons and the
+existing calculator over HTTP; saved user tabs and cookies were not opened.
+The application update is delivered by `/usr/bin/dl-zen.sh` with Zen closed.
+Profiles remain outside the application bundle and are preserved.

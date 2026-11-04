@@ -29,9 +29,15 @@ struct io_queue
 {
     spinlock_t lock;
     size_t capacity, live, queued, cleanup, drainers;
+    /* Updated under lock; available to low-overhead debugger snapshots. */
+    uint64_t admission_count, admission_full;
+    size_t max_live;
     bool closed;
     io_request_t *all, *head, *tail, *cleanup_head, *cleanup_tail;
 };
+
+uintptr_t io_request_queue_key(const io_request_t *request)
+{ return request ? (uintptr_t)request->queue : 0; }
 
 
 static void io_enqueue_cleanup_locked(io_request_t *request)
@@ -127,7 +133,13 @@ int io_request_create(io_queue_t *queue, size_t buffer_size, uint32_t uid,
     if (!queue || buffer_size > IO_REQUEST_BUFFER_MAX) return -EINVAL;
     spinlock_lock(&queue->lock);
     int result = queue->closed ? -ECANCELED : queue->live == queue->capacity ? -EAGAIN : 0;
-    if (!result) ++queue->live; /* Reservation protects queue lifetime across allocation. */
+    if (!result)
+    {
+        ++queue->admission_count;
+        ++queue->live; /* Reservation protects queue lifetime across allocation. */
+        if (queue->live > queue->max_live) queue->max_live = queue->live;
+    }
+    else if (result == -EAGAIN) ++queue->admission_full;
     spinlock_unlock(&queue->lock);
     if (result) return result;
     io_request_t *request = calloc(1, sizeof(*request));
@@ -329,8 +341,9 @@ int io_request_take_result(io_request_t *request, fd_description_t **out)
     return result;
 }
 
-int io_request_worker_release(io_request_t *request)
+int io_request_worker_release_ready(io_request_t *request, bool *cleanup_ready)
 {
+    if (cleanup_ready) *cleanup_ready = false;
     if (!request) return -EINVAL;
     io_queue_t *queue = request->queue;
     spinlock_lock(&queue->lock);
@@ -339,14 +352,19 @@ int io_request_worker_release(io_request_t *request)
     else
     {
         request->owners &= ~IO_OWNER_EXECUTOR;
+        if (cleanup_ready) *cleanup_ready = request->owners == 0;
         io_enqueue_cleanup_locked(request);
     }
     spinlock_unlock(&queue->lock);
     return result;
 }
 
-static int io_release_waiter(io_request_t *request, bool abandon)
+int io_request_worker_release(io_request_t *request)
+{ return io_request_worker_release_ready(request, NULL); }
+
+int io_request_waiter_finish(io_request_t *request, bool abandon, bool *cleanup_ready)
 {
+    if (cleanup_ready) *cleanup_ready = false;
     if (!request) return -EINVAL;
     io_queue_t *queue = request->queue;
     spinlock_lock(&queue->lock);
@@ -356,14 +374,15 @@ static int io_release_waiter(io_request_t *request, bool abandon)
     {
         if (abandon) io_cancel_locked(request);
         request->owners &= ~IO_OWNER_WAITER;
+        if (cleanup_ready) *cleanup_ready = request->owners == 0;
         io_enqueue_cleanup_locked(request);
     }
     spinlock_unlock(&queue->lock);
     return result;
 }
 
-int io_request_waiter_release(io_request_t *request) { return io_release_waiter(request, false); }
-int io_request_waiter_abandon(io_request_t *request) { return io_release_waiter(request, true); }
+int io_request_waiter_release(io_request_t *request) { return io_request_waiter_finish(request, false, NULL); }
+int io_request_waiter_abandon(io_request_t *request) { return io_request_waiter_finish(request, true, NULL); }
 
 size_t io_queue_drain(io_queue_t *queue, size_t budget)
 {

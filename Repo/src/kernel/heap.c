@@ -299,6 +299,9 @@ static inline uint64_t heap_lock_acquire(void)
 {
     uint64_t flags;
     __asm__ volatile ("pushfq; pop %0" : "=r"(flags));
+    /* Pin this CPU before testing CPU-owned recursion. A timer migration
+     * between CPU lookup and CLI could mistake another CPU's lock for ours. */
+    __asm__ volatile ("cli" ::: "memory");
     uint32_t cpu = smp_current_cpu_index();
     /* Invariants while holding g_heap_lock:
      * - Interrupts remain disabled (no sti/cli/popfq that changes IF).
@@ -316,7 +319,6 @@ static inline uint64_t heap_lock_acquire(void)
         return flags;
     }
 
-    __asm__ volatile ("cli" ::: "memory");
     while (__sync_lock_test_and_set(&g_heap_lock.value, 1) != 0)
     {
         while (g_heap_lock.value)

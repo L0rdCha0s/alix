@@ -816,7 +816,11 @@ int process_join_with_hook(process_t *process,
                 break;
             }
             hook(context);
-            process_yield();
+            /* Poll input at most once per tick while retaining the ordinary
+             * child-exit wakeup. Yielding here leaves the parent runnable and
+             * spins an otherwise idle CPU for the entire child's lifetime. */
+            (void)wait_queue_wait_timeout(&process->wait_queue,
+                                         process_join_ready, process, 1);
         }
     }
     else
@@ -2509,7 +2513,7 @@ void process_on_timer_tick(interrupt_frame_t *frame)
     }
 
     thread->preempt_pending = true;
-    thread->time_slice_remaining = scheduler_time_slice_ticks();
+    thread->time_slice_remaining = scheduler_thread_time_slice_ticks(thread);
 
     __atomic_store_n(&thread->tls.preempt_resume_rip, frame->rip, __ATOMIC_RELEASE);
     if (user_mode)

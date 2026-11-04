@@ -5,6 +5,9 @@
 
 #define IO_QUEUE_MAX_REQUESTS 1024u
 #define IO_REQUEST_BUFFER_MAX (64u * 1024u)
+/* Internal syscall restart, never a userspace errno. No operation or request
+ * ownership has begun when admission returns this value. */
+#define IO_REQUEST_ADMISSION_RETRY (-4096)
 
 typedef struct io_queue io_queue_t;
 typedef struct io_request io_request_t;
@@ -62,6 +65,9 @@ int io_request_bind_cwd_owner(io_request_t *request, fd_description_t *descripti
 bool io_request_uses_queue(const io_request_t *request, const io_queue_t *queue);
 void *io_request_buffer(io_request_t *request);
 size_t io_request_buffer_size(const io_request_t *request);
+/* Opaque value for static cleanup-wakeup bucketing. Capture while owning the
+ * request; the value may later be hashed, but must never be dereferenced. */
+uintptr_t io_request_queue_key(const io_request_t *request);
 fd_description_t *io_request_description(const io_request_t *request);
 void *io_request_cwd(const io_request_t *request);
 uint32_t io_request_uid(const io_request_t *request);
@@ -91,10 +97,14 @@ int io_request_publish_complete(io_request_t *request, int64_t result,
  * the returned ref into another registered owner before allowing preemption. */
 int io_request_take_result(io_request_t *request, fd_description_t **out);
 int io_request_worker_release(io_request_t *request);
+int io_request_worker_release_ready(io_request_t *request, bool *cleanup_ready);
 int io_request_waiter_release(io_request_t *request);
 /* Call only after the waiter is no longer executing/using its request (or from
  * its own bounded preparation rollback). Combines cancellation and release. */
 int io_request_waiter_abandon(io_request_t *request);
+/* Report last-owner retirement without reading request after release. The
+ * optional output is written synchronously under the request lock. */
+int io_request_waiter_finish(io_request_t *request, bool abandon, bool *cleanup_ready);
 
 /* Last release only enqueues the request itself, without allocation or any
  * resource destructor. Only a persistent cleanup worker calls drain, with no

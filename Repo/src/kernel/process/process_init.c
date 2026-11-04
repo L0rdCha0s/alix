@@ -12,6 +12,19 @@
  * See docs/kernel/process.md for the full scheduling/preemption model.
  */
 
+/* Apply the requested quantum after PIT initialization, before scheduling. */
+void process_configure_timer(void)
+{
+    uint32_t frequency = timer_frequency();
+    uint64_t ticks = frequency ? ((uint64_t)frequency * PROCESS_TIME_SLICE_DEFAULT_MS + 999ULL) / 1000ULL :
+                                PROCESS_TIME_SLICE_DEFAULT_TICKS;
+    if (!ticks) ticks = 1;
+    if (ticks > UINT32_MAX) ticks = UINT32_MAX;
+    __atomic_store_n(&g_time_slice_ticks, (uint32_t)ticks, __ATOMIC_RELEASE);
+    serial_printf("[sched] timer_ready hz=%u normal_ms=%u ticks=%u ui_ticks=1",
+                  frequency, PROCESS_TIME_SLICE_DEFAULT_MS, (uint32_t)ticks);
+}
+
 /*
  * Initialise the process subsystem.
  *
@@ -19,8 +32,9 @@
  * scheduling. Sets up:
  * - run queues and global registries
  * - the idle process and per-CPU idle threads
- * - time slice configuration derived from the timer frequency
+ * - boot-time quantum fallback, finalized after timer initialization
  */
+
 void process_system_init(void)
 {
     fpu_prepare_initial_state();
@@ -90,25 +104,10 @@ void process_system_init(void)
     g_next_pid = 1;
     g_next_tid = 1;
 
-    uint32_t freq = timer_frequency();
-    if (freq)
-    {
-        const uint32_t desired_slice_ms = 10;
-        uint64_t ticks = ((uint64_t)freq * desired_slice_ms + 999ULL) / 1000ULL;
-        if (ticks == 0)
-        {
-            ticks = 1;
-        }
-        if (ticks > UINT32_MAX)
-        {
-            ticks = UINT32_MAX;
-        }
-        g_time_slice_ticks = (uint32_t)ticks;
-    }
-    else
-    {
-        g_time_slice_ticks = PROCESS_TIME_SLICE_DEFAULT_TICKS;
-    }
+    /* timer_frequency has an early 1000 Hz estimate, while the PIT is later
+     * configured at 100 Hz. Use only the boot fallback here; kernel_main calls
+     * process_configure_timer once the actual timer frequency is installed. */
+    __atomic_store_n(&g_time_slice_ticks, PROCESS_TIME_SLICE_DEFAULT_TICKS, __ATOMIC_RELEASE);
 
     process_t *idle_process = allocate_process("idle", false);
     if (!idle_process)
