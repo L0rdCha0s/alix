@@ -91,7 +91,25 @@ int pthread_attr_getstack(const pthread_attr_t *attribute, void **address, size_
     return 0;
 }
 
-pthread_t pthread_self(void) { return sys_thread_self(); }
+static _Thread_local pthread_t self_tid_cache;
+
+pthread_t pthread_self(void)
+{
+    pthread_t tid = __atomic_load_n(&self_tid_cache, __ATOMIC_RELAXED);
+    if (!tid)
+    {
+        tid = sys_thread_self();
+        __atomic_store_n(&self_tid_cache, tid, __ATOMIC_RELAXED);
+    }
+    return tid;
+}
+
+/* Fork copies the caller's TLS but assigns a new native TID. Clear before
+ * application child callbacks can query identity or use pthread ownership. */
+void __alix_pthread_fork_child(void)
+{
+    __atomic_store_n(&self_tid_cache, 0, __ATOMIC_RELAXED);
+}
 int pthread_equal(pthread_t left, pthread_t right) { return left == right; }
 
 int pthread_mutexattr_init(pthread_mutexattr_t *attribute)

@@ -7,6 +7,8 @@ This folder documents how the kernel boots, schedules work, manages memory, expo
 - Boot + early init: `docs/kernel/boot.md`
 - Physical hardware, USB and framebuffer support: `docs/kernel/hardware.md`
 - Native C11 libc, math and threads: `docs/kernel/libc.md`
+- Native performance workloads and UI latency: `docs/performance.md`
+- Measured kernel performance fixes: `docs/performance-pass-2026-11-05.md`
 - Processes/threads + scheduler: `docs/kernel/process.md`
 - Native user child launch and waiting: `docs/kernel/child_processes.md`
 - Signal delivery, masks and synchronous waiting: `docs/kernel/signals.md`

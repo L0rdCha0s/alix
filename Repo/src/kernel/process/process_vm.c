@@ -83,6 +83,7 @@ static bool vm_wake_waiters(wait_queue_t *queue)
 
 void process_vm_poll_tlb_completion(void)
 {
+    if (!__atomic_load_n(&g_vm_tlb_notify_pending, __ATOMIC_ACQUIRE)) return;
     /* A TLB IPI may interrupt a subsidiary-lock owner. Do not invert the
      * scheduler -> subsidiary lock order; timer/schedule-IPIs retry safely. */
     if (spinlock_preempt_disabled()) return;
@@ -1272,12 +1273,32 @@ bool process_vm_pager_start(void)
     return true;
 }
 
+static bool vm_syscall_pager_ready(void *context)
+{
+    process_t *process = context;
+    return !__atomic_load_n(&process->vm_pager_busy, __ATOMIC_ACQUIRE);
+}
+
 int process_vm_syscall_enter(void)
 {
     thread_t *thread = current_thread_local();
     if (!thread || !thread->is_user) return 0;
     process_t *process = thread->process;
-    uint64_t flags = vm_lock_ready(process);
+    uint64_t flags;
+    for (;;)
+    {
+        flags = process_memory_lock(process);
+        if (!process->vm_pager_busy) break;
+        process_memory_unlock(process, flags);
+        __atomic_fetch_add(&g_vm_serial_waits, 1u, __ATOMIC_RELAXED);
+        wait_queue_wait(&g_vm_serial_queue, vm_syscall_pager_ready, process);
+    }
+    /* Entry pins against eviction, not against unrelated VM transactions.
+     * Publication is atomic under memory_lock, and each user copy validates
+     * the published mapping while holding that same lock. Its old backing
+     * stays journal-owned until TLB completion. VM mutation/fault operations
+     * still use vm_lock_ready; ordinary clocks/UI calls need not park behind
+     * a stream of another thread's discard/protection transactions. */
     thread->vm_syscall_active = true;
     __atomic_add_fetch(&process->vm_syscall_users, 1u, __ATOMIC_ACQ_REL);
     process_memory_unlock(process, flags);

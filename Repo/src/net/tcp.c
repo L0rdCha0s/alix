@@ -77,6 +77,7 @@ static inline void tcp_irq_restore(uint64_t flags)
 #define NET_TCP_MAX_PAYLOAD           1460
 #define NET_TCP_DEFAULT_MSS           NET_TCP_MAX_PAYLOAD
 #define NET_TCP_RX_MAX_CAPACITY       (5U * 1024U * 1024U)
+#define NET_TCP_RX_INITIAL_CAPACITY   (64U * 1024U)
 #define NET_TCP_RX_WAKE_THRESHOLD     (NET_TCP_MAX_PAYLOAD * 4U)
 #define NET_TCP_RX_RESUME_THRESHOLD   (NET_TCP_MAX_PAYLOAD * 16U)
 #define NET_TCP_WINDOW_UPDATE_THRESHOLD (NET_TCP_MAX_PAYLOAD * 16U)
@@ -435,20 +436,24 @@ static bool tcp_init_rx_buffer(net_tcp_socket_t *socket)
     {
         return false;
     }
-    if (socket->rx_buffer && socket->rx_capacity >= NET_TCP_RX_MAX_CAPACITY)
+    /* An unopened socket has no peer or receive traffic. Reserve a small
+     * buffer there; connect expands it before advertising the normal window.
+     * Do not consume 5 MiB of the fixed kernel heap for every idle descriptor. */
+    size_t capacity = socket->state == TCP_STATE_UNUSED ?
+                      NET_TCP_RX_INITIAL_CAPACITY : NET_TCP_RX_MAX_CAPACITY;
+    if (socket->rx_buffer && socket->rx_capacity >= capacity)
     {
-        socket->rx_capacity = NET_TCP_RX_MAX_CAPACITY;
         return true;
     }
 
-    uint8_t *buffer = (uint8_t *)malloc(NET_TCP_RX_MAX_CAPACITY);
+    uint8_t *buffer = (uint8_t *)malloc(capacity);
     if (!buffer)
     {
         return false;
     }
     free(socket->rx_buffer);
     socket->rx_buffer = buffer;
-    socket->rx_capacity = NET_TCP_RX_MAX_CAPACITY;
+    socket->rx_capacity = capacity;
     socket->rx_head = 0;
     socket->rx_size = 0;
     socket->rx_backpressure = false;
@@ -1253,7 +1258,8 @@ bool net_tcp_socket_connect(net_tcp_socket_t *socket, uint32_t remote_ip, uint16
         return false;
     }
 
-    if (!socket->rx_buffer && !tcp_init_rx_buffer(socket))
+    if ((!socket->rx_buffer || socket->rx_capacity < NET_TCP_RX_MAX_CAPACITY) &&
+        !tcp_init_rx_buffer(socket))
     {
         tcp_mark_error(socket, ENOMEM, "rx alloc failed");
         goto done;

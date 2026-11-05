@@ -48,3 +48,9 @@ hangup, signal interruption and cancellation of a killed waiter. The native
 atomic small-write admission. Select and general signal-interrupted data I/O remain unfinished. A pipe
 transfers bytes; native child spawn/wait and exec inheritance acceptance remain
 separate work.
+
+Ready pipe reads/writes now try the existing bounded ring step in the calling
+syscall, retaining registered request ownership, checked copies and SIGPIPE
+handling. A step which needs readiness is submitted to the existing executor.
+This removes scheduling trips for already available data/space without changing
+blocking, EOF, atomic-write or cancellation policy.

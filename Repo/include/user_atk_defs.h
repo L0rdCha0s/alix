@@ -48,6 +48,14 @@ typedef struct
 } user_atk_window_desc_t;
 
 #define USER_ATK_POLL_FLAG_BLOCK (1u << 0)
+/* Optional nonblocking reply. The original 24-byte event ABI is unchanged. */
+#define USER_ATK_POLL_FLAG_TIMED (1u << 1)
+typedef struct
+{
+    user_atk_event_t event;
+    uint64_t queued_milliseconds; /* Oldest event retained by coalescing. */
+    uint64_t dropped_events;      /* Cumulative queue overflows for this window. */
+} user_atk_timed_event_t;
 #define USER_ATK_WINDOW_FLAG_RESIZABLE (1u << 0)
 #define USER_ATK_WINDOW_FLAG_HIDDEN (1u << 1)
 #define USER_ATK_WINDOW_FLAG_BORDERLESS (1u << 2)

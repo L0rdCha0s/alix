@@ -14,5 +14,7 @@ int io_select_create(fd_retirement_queue_t *retirement, size_t count, int64_t ti
 syscall_pollfd_t *io_poll_entries(fd_description_t *description);
 int io_poll_pin(fd_description_t *description, fd_table_t *table);
 bool io_poll_description_valid(const fd_description_t *description);
+/* Bounded scan of an already captured/pinned set; no executor request needed. */
+bool io_poll_snapshot(fd_description_t *description, io_service_result_t *result);
 bool io_poll_execute(io_request_t *request, io_service_result_t *result);
 #endif

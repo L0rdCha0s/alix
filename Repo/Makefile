@@ -277,6 +277,7 @@ USER_QUAKE_APP_SOURCES := $(wildcard $(USER_DIR)/apps/quake/*.c)
 USER_QUAKE_APP_OBJECTS := $(patsubst $(USER_DIR)/%.c,$(USER_OBJDIR)/%.o,$(USER_QUAKE_APP_SOURCES))
 USER_QUAKE_OBJECTS := $(USER_QUAKE_REF_OBJECTS) $(USER_QUAKE_APP_OBJECTS)
 USER_ELFS := $(USER_OBJDIR)/atk_demo.elf \
+             $(USER_OBJDIR)/perf.elf \
              $(USER_OBJDIR)/time.elf \
              $(USER_OBJDIR)/ttf_demo.elf \
              $(USER_OBJDIR)/wolf3d.elf \
@@ -304,6 +305,7 @@ USER_RUNTIME_DIR := $(USER_OBJDIR)/runtime
 USER_RUNTIME_ELFS := $(patsubst $(USER_OBJDIR)/%.elf,$(USER_RUNTIME_DIR)/%.elf,$(USER_ELFS))
 USER_BIN_DIR := build/bin
 USER_BINS := $(USER_BIN_DIR)/atk_demo \
+             $(USER_BIN_DIR)/perf \
              $(USER_BIN_DIR)/time \
              $(USER_BIN_DIR)/ttf_demo \
              $(USER_BIN_DIR)/wolf3d \
@@ -1503,6 +1505,7 @@ test:
 .PHONY: all run run-hdd run-hdd-gdb clean test test-dhcp ttf-test sha256-test quake-liveness-test elf-validation-test process-smoke-test process-lock-contract-test atk-background-lock-contract-test audio-stream-contract-test network-download-contract-test process-lock-stress-test keyboard-boot-input-test gui-wakeup-test quake-gui-liveness-test web-test css-test browser-event-test browser-resource-test png-test tls-test js-test html-js-test html-view-test web-render-harness web-render-stackoverflow test262-test
 
 include ports/zen/port.mk
+include user/apps/perf/perf.mk
 
 USER_DEPFILES := $(shell find $(USER_OBJDIR) -type f -name '*.d' 2>/dev/null)
 

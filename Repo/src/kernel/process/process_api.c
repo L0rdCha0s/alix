@@ -2415,6 +2415,27 @@ static void scheduler_log_process_age_snapshot(uint64_t now_ticks)
  * - user mode → `USER_PREEMPT_STUB_BASE` (mapped per-process)
  * - kernel mode → `process_preempt_trampoline` (arch/x86/process_preempt.S)
  */
+static bool g_deferred_wakes;
+uint64_t g_deferred_wake_ticks, g_deferred_wake_runs;
+
+void process_poll_deferred_work(void)
+{
+    process_vm_poll_tlb_completion();
+    /* Ordinary value-only syscalls should pay only pending-flag checks when
+     * no work was deferred, rather than repeated CPU/guard queries. */
+    if (!__atomic_load_n(&g_deferred_wakes, __ATOMIC_ACQUIRE)) return;
+    if (spinlock_preempt_disabled() || !(cpu_save_flags() & RFLAGS_IF_BIT)) return;
+    if (smp_current_cpu_index() != 0 ||
+        !__atomic_exchange_n(&g_deferred_wakes, false, __ATOMIC_ACQ_REL)) return;
+    /* A syscall-heavy BSP can be inside a preparation guard on almost every
+     * timer interrupt. Time still advances, but sleeping UI/service threads
+     * must not wait for a future IRQ to happen to land outside that guard. */
+    uint64_t now = timer_ticks();
+    sleep_queue_wake_due(now);
+    process_alarm_tick(now);
+    __atomic_add_fetch(&g_deferred_wake_runs, 1u, __ATOMIC_RELAXED);
+}
+
 void process_on_timer_tick(interrupt_frame_t *frame)
 {
     if (!frame)
@@ -2432,6 +2453,11 @@ void process_on_timer_tick(interrupt_frame_t *frame)
      * another CPU.  A later timer/IPI will perform the deferred work. */
     if (spinlock_preempt_disabled())
     {
+        if (smp_current_cpu_index() == 0)
+        {
+            __atomic_store_n(&g_deferred_wakes, true, __ATOMIC_RELEASE);
+            __atomic_add_fetch(&g_deferred_wake_ticks, 1u, __ATOMIC_RELAXED);
+        }
         return;
     }
 
@@ -2458,6 +2484,7 @@ void process_on_timer_tick(interrupt_frame_t *frame)
 
         sleep_queue_wake_due(now_ticks);
         process_alarm_tick(now_ticks);
+        __atomic_store_n(&g_deferred_wakes, false, __ATOMIC_RELEASE);
         stack_watch_check_timeouts();
     }
 

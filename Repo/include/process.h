@@ -166,6 +166,8 @@ process_t *process_create_user_dummy_with_parent(const char *name,
 void process_yield(void);
 void process_sleep_ticks(uint64_t ticks);
 void process_sleep_ms(uint32_t ms);
+/* Safe syscall-return boundary; no caller locks and interrupts enabled. */
+void process_poll_deferred_work(void);
 void scheduler_schedule(bool requeue_current);
 void process_exit(int status) __attribute__((noreturn));
 

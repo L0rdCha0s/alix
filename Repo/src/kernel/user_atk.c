@@ -42,6 +42,8 @@ typedef struct user_atk_window
     spinlock_t presentation_lock;
     uint64_t surface_generation;
     user_atk_event_t events[USER_ATK_EVENT_QUEUE_MAX];
+    uint64_t event_milliseconds[USER_ATK_EVENT_QUEUE_MAX];
+    uint64_t dropped_events;
     size_t event_head;
     size_t event_tail;
     size_t event_count;
@@ -61,6 +63,8 @@ static process_t *g_capture_priority_owner = NULL;
 static uint32_t g_next_handle = 1;
 
 _Static_assert(sizeof(user_atk_window_control_t) == 104, "window control ABI size");
+_Static_assert(sizeof(user_atk_event_t) == 24, "legacy event ABI size");
+_Static_assert(sizeof(user_atk_timed_event_t) == 40, "timed event ABI size");
 
 #define USER_ATK_PRESENT_SAMPLE_WORDS 8u
 
@@ -119,6 +123,8 @@ static void user_atk_remove(user_atk_window_t *win, bool closing_kernel);
 static void user_atk_window_on_destroy(void *context);
 static void user_atk_queue_event(user_atk_window_t *win, const user_atk_event_t *event);
 static bool user_atk_pop_event(user_atk_window_t *win, user_atk_event_t *out_event);
+static bool user_atk_pop_event_timed(user_atk_window_t *win, user_atk_event_t *out_event,
+                                    uint64_t *milliseconds, uint64_t *dropped);
 static void user_atk_send_close_event(user_atk_window_t *win);
 static void user_atk_apply_priorities(void);
 static bool user_atk_event_ready(void *context);
@@ -1306,11 +1312,13 @@ static void user_atk_queue_event(user_atk_window_t *win, const user_atk_event_t 
     }
 
     win->events[win->event_tail] = *event;
+    win->event_milliseconds[win->event_tail] = timer_monotonic_millis();
     win->event_tail = (win->event_tail + 1) % USER_ATK_EVENT_QUEUE_MAX;
     if (win->event_count == USER_ATK_EVENT_QUEUE_MAX)
     {
         win->event_head = (win->event_head + 1) % USER_ATK_EVENT_QUEUE_MAX;
         win->event_count--;
+        if (win->dropped_events != UINT64_MAX) win->dropped_events++;
     }
     win->event_count++;
     spinlock_unlock(&win->event_lock);
@@ -1319,12 +1327,19 @@ static void user_atk_queue_event(user_atk_window_t *win, const user_atk_event_t 
 
 static bool user_atk_pop_event(user_atk_window_t *win, user_atk_event_t *out_event)
 {
+    return user_atk_pop_event_timed(win, out_event, NULL, NULL);
+}
+
+static bool user_atk_pop_event_timed(user_atk_window_t *win, user_atk_event_t *out_event,
+                                    uint64_t *milliseconds, uint64_t *dropped)
+{
     if (!win)
     {
         return false;
     }
 
     spinlock_lock(&win->event_lock);
+    if (dropped) *dropped = win->dropped_events;
     if (win->event_count == 0)
     {
         spinlock_unlock(&win->event_lock);
@@ -1334,6 +1349,7 @@ static bool user_atk_pop_event(user_atk_window_t *win, user_atk_event_t *out_eve
     {
         *out_event = win->events[win->event_head];
     }
+    if (milliseconds) *milliseconds = win->event_milliseconds[win->event_head];
 #if USER_ATK_DEBUG
     if (out_event)
     {
@@ -1739,6 +1755,31 @@ int64_t user_atk_sys_control(uint32_t handle, uint32_t operation,
 
 int64_t user_atk_sys_poll_event(uint32_t handle, user_atk_event_t *event_out, uint32_t flags)
 {
+    if (flags & USER_ATK_POLL_FLAG_TIMED)
+    {
+        if (flags != USER_ATK_POLL_FLAG_TIMED) return -EINVAL;
+        /* A heap reply and retained window stay call-owned under the existing
+         * nonblocking abandonment guard. Never extend the legacy stack reply. */
+        spinlock_preempt_disable();
+        int64_t result = -EFAULT;
+        if (event_out && user_ptr_range_valid(event_out, sizeof(user_atk_timed_event_t)))
+        {
+            user_atk_timed_event_t *reply = calloc(1, sizeof(*reply));
+            user_atk_window_t *win = user_atk_find(handle, process_current());
+            if (!reply) result = -ENOMEM;
+            else if (!win) result = -EBADF;
+            else
+            {
+                bool found = user_atk_pop_event_timed(win, &reply->event,
+                    &reply->queued_milliseconds, &reply->dropped_events);
+                result = user_copy_to_user(event_out, reply, sizeof(*reply)) ? (found ? 1 : 0) : -EFAULT;
+            }
+            user_atk_window_release(win);
+            free(reply);
+        }
+        spinlock_preempt_enable();
+        return result;
+    }
     if (flags & USER_ATK_POLL_FLAG_BLOCK)
         return user_atk_poll_event_impl(handle, event_out, flags);
     spinlock_preempt_disable();

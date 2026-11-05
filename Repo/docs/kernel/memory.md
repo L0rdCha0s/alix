@@ -325,3 +325,15 @@ reservation, partial protections, fixed replacement, generated code, and four
 CPUs reading during protection/replacement changes. Its `fault-write`,
 `fault-none` and `fault-exec` modes deliberately trigger user page faults to
 check hardware permissions; those cases require a fault-aware guest harness.
+
+### Syscall entry and concurrent VM retirement
+
+The syscall-entry anti-eviction pin waits for an active pager operation and is
+registered under `memory_lock`. It does not wait for an unrelated VM journal.
+Mapping publication and each safe-copy span remain protected by `memory_lock`,
+and removed backing remains journal-owned through remote TLB acknowledgement.
+VM mutations, faults and swapped-page restoration keep their existing VM gates;
+COW copies retain their return barrier. This permits ordinary UI and clock
+syscalls to progress during another thread's protection/discard transactions.
+See [the performance investigation](../performance-pass-2026-11-05.md) for the
+measured UI effect and native copy/mapping/protection checks.

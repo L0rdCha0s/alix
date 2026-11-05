@@ -102,3 +102,12 @@ hangup wait expires normally. Evidence and the packet capture are retained as
 passes fd_set/timeval layout and select calls against Alix. Production host
 poll/select contracts pass ASan/UBSan and TSan, including deadlines beyond
 32-bit milliseconds and 20,000 concurrent snapshots.
+
+## Immediate scans
+
+A zero-timeout poll now scans its captured, heap-owned and pinned set directly
+inside the bounded preparation guard. It needs no registered executor request,
+waiter/result transitions or request retirement. Checked output copies, duplicate
+counts, descriptor pin ownership and pending-signal EINTR behavior remain.
+The `io_poll_snapshot` routine supplies the same readiness logic to the existing
+registered request path for operations that may actually wait.

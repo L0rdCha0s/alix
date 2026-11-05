@@ -50,8 +50,9 @@ def type_command(qmp, text):
 
 def command_complete(log, offset):
     # Interactive line redraws also contain the prompt. Require a fresh line
-    # after command output, so input cannot satisfy its own completion check.
-    return re.search(r"(?:^|\n)root@alix\$ ", log[offset:]) is not None
+    # after command output, with no command text after the prompt. A kernel log
+    # can insert a newline during input redraw; that is not command completion.
+    return re.search(r"(?:^|\n)root@alix\$ (?=\r?\n|$|\[\d+(?:\.\d+)?\])", log[offset:]) is not None
 
 
 def native_elf_symbol(binary, name):

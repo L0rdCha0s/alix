@@ -239,6 +239,7 @@ static uint64_t g_rx_batch_max = 0;
 static uint64_t g_rx_tail_write_count = 0;
 static bool g_rx_pending = false;
 static uint64_t g_deferred_poll_count = 0;
+static uint64_t g_syscall_poll_count = 0;
 static uint64_t g_watchdog_poll_count = 0;
 static uint64_t g_watchdog_interval_ticks = 1;
 static uint64_t g_watchdog_next_tick = 0;
@@ -524,6 +525,22 @@ void igb_poll(void)
     uint64_t flags = spinlock_lock_irqsave(&g_tx_lock);
     igb_reclaim_tx();
     spinlock_unlock_irqrestore(&g_tx_lock, flags);
+}
+
+void igb_poll_deferred(void)
+{
+    if (!g_igb_present || !__atomic_load_n(&g_rx_pending, __ATOMIC_ACQUIRE) ||
+        spinlock_preempt_disabled()) return;
+    uint64_t flags;
+    __asm__ volatile ("pushfq; pop %0" : "=r"(flags) :: "memory");
+    if (!(flags & (1u << 9))) return;
+    /* An IRQ acknowledged while a syscall owns a generic lock cannot enter
+     * TCP/scheduler code there. The unlocked return boundary can drain it now,
+     * rather than adding an entire timer tick to each short exchange. RX's
+     * existing lock/budget also serialize concurrent IRQ and timer drains. */
+    if (!__atomic_exchange_n(&g_rx_pending, false, __ATOMIC_ACQ_REL)) return;
+    __atomic_add_fetch(&g_syscall_poll_count, 1ULL, __ATOMIC_RELAXED);
+    igb_poll();
 }
 
 bool igb_is_present(void)
@@ -826,6 +843,7 @@ static ssize_t igb_stats_read(vfs_node_t *node, size_t offset, void *buffer,
     igb_stats_counter(&format, "max_rx_batch", &g_rx_batch_max);
     igb_stats_counter(&format, "rx_tail_writes", &g_rx_tail_write_count);
     igb_stats_counter(&format, "deferred_polls", &g_deferred_poll_count);
+    igb_stats_counter(&format, "syscall_return_polls", &g_syscall_poll_count);
     igb_stats_counter(&format, "watchdog_polls", &g_watchdog_poll_count);
     return (ssize_t)out.copied;
 }

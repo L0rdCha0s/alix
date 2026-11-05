@@ -116,11 +116,11 @@ static test_pthread_cond_t *expected_condition;
 static native_t *native_find(uint64_t tid) { for(unsigned i=0;i<native_count;i++)if(native[i].tid==tid)return &native[i];return NULL; }
 static void run_child(native_t *n) {
     CHECK(n && !n->finished && !in_child);
-    uint64_t saved_tid=current_tid;test_pthread_control_t *saved_control=self_control;
+    uint64_t saved_tid=current_tid,saved_cache=self_tid_cache;test_pthread_control_t *saved_control=self_control;
     bool saved_exiting=exiting,saved_released=control_released;void *saved_result=exit_result;
-    current_tid=n->tid;self_control=NULL;exiting=control_released=false;exit_result=NULL;in_child=true;
+    current_tid=n->tid;self_tid_cache=0;self_control=NULL;exiting=control_released=false;exit_result=NULL;in_child=true;
     if(setjmp(child_exit)==0){n->entry(n->argument);CHECK(false);}
-    n->finished=true;current_tid=saved_tid;self_control=saved_control;
+    n->finished=true;current_tid=saved_tid;self_tid_cache=saved_cache;self_control=saved_control;
     exiting=saved_exiting;control_released=saved_released;exit_result=saved_result;in_child=false;
 }
 static int64_t sys_thread_create(uintptr_t entry,uintptr_t argument,size_t stack,const char *name) {
@@ -250,7 +250,7 @@ int main(void) {
     prepared_winner=1;current_tid=1;exiting=false;control_released=false;self_control=NULL;
     if(setjmp(initial_exit)==0)test_pthread_exit(&cookie->value);
     CHECK(process_exits==1 && initial_thread_control.completed && initial_thread_control.result==&cookie->value && initial_thread_control.references==1);
-    current_tid=2;CHECK(test_pthread_join(1,&result)==0 && result==&cookie->value && !registry && live_count==0);
+    current_tid=2;self_tid_cache=0;CHECK(test_pthread_join(1,&result)==0 && result==&cookie->value && !registry && live_count==0);
     CHECK(tls_destructors>=6 && native_exits>=5 && wake_calls>=6);
     free(cookie);puts("pthread publication/refcount/detach/retval/main-exit/deadline/ownership contracts passed");
     return 0;

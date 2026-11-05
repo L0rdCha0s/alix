@@ -256,3 +256,17 @@ and 32 writes.
 - NTP  (`src/net/ntp.c`) — queries time servers and feeds `timekeeping`.
 - ICMP (`src/net/icmp.c`) — ping/echo handling.
 - TLS  (`src/net/tls.c`, `src/net/tls_asn1.c`) — TLS client pieces layered on TCP sockets.
+
+### Deferred receive completion at syscall return
+
+An IGB interrupt acknowledged during a generic preparation guard marks receive
+work pending. The unlocked, interrupt-enabled syscall-return boundary now calls
+`igb_poll_deferred` to drain the existing bounded RX path promptly. The ordinary
+IRQ path and the timer/watchdog remain available. `syscall_return_polls` in
+`/proc/sys/net/igb_stats` identifies these drains. This avoids adding a full
+100 Hz tick to short exchanges while preserving scheduler lock ordering.
+
+Unopened TCP sockets reserve 64 KiB of receive heap space. Connect expands that
+buffer to 5 MiB before sending the SYN. SO_RCVBUF reports the actual current
+allocation; normal connected receive/window policy retains its full capacity.
+See [the measured performance pass](../performance-pass-2026-11-05.md).

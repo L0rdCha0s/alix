@@ -301,3 +301,14 @@ task can run or block again elsewhere. This check preserves its queue entry
 instead of treating the temporary handoff as invalid work. A runnable current
 task can continue if all peers are temporarily unavailable and its affinity
 allows the current CPU.
+
+## Deferred timer work during syscall-heavy loads
+
+The BSP records deferred sleep/alarm wake work when IRQ0 interrupts a generic
+preparation guard. `process_poll_deferred_work` handles it at the unlocked,
+interrupt-enabled syscall-return boundary and checks deferred TLB completion.
+Thus an expired sleep does not wait for a future timer interrupt to happen to
+land outside the guard. IRQ accounting remains in the timer hook; the return
+boundary does not fabricate ticks or charge CPU time again. Global wake work
+still runs only on the BSP, and all queue/signal updates use existing locks.
+Pending-flag checks keep an inactive return hook inexpensive.

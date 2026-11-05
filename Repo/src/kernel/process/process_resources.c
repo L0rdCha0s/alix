@@ -26,8 +26,14 @@ static void process_resource_cleanup_entry(void *unused)
     (void)unused;
     for (;;)
     {
-        (void)fd_retirement_queue_drain(g_process_retirement, 64);
-        process_sleep_ms(1);
+        /* A full batch may leave more closed objects queued (including TCP
+         * receive buffers). Do not cap reclamation at 64 objects per 10 ms
+         * timer tick while producers keep running. Yield between bounded
+         * batches so other threads still run; sleep only after catching up. */
+        if (fd_retirement_queue_drain(g_process_retirement, 64) == 64)
+            process_yield();
+        else
+            process_sleep_ms(1);
     }
 }
 

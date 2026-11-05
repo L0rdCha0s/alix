@@ -202,6 +202,11 @@ int sys_ui_poll_event(uint32_t handle, user_atk_event_t *event, uint32_t flags)
     return (int)syscall3(SYSCALL_UI_POLL_EVENT, (long)handle, (long)event, (long)flags);
 }
 
+int sys_ui_poll_timed_event(uint32_t handle, user_atk_timed_event_t *event)
+{
+    return (int)syscall3(SYSCALL_UI_POLL_EVENT, (long)handle, (long)event, USER_ATK_POLL_FLAG_TIMED);
+}
+
 int sys_ui_poll_event_timeout(uint32_t handle, user_atk_event_t *event, uint32_t timeout_ms)
 {
     return (int)syscall3(SYSCALL_UI_POLL_EVENT_TIMEOUT, (long)handle, (long)event, (long)timeout_ms);

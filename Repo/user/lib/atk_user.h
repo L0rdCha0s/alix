@@ -86,6 +86,8 @@ bool atk_user_wait_event_timeout(atk_user_window_t *win, user_atk_event_t *event
  * the queue is empty (or on error).
  */
 bool atk_user_poll_event(atk_user_window_t *win, user_atk_event_t *event);
+/* Returns 1/event, 0/empty or negative errno; handles resize like legacy poll. */
+int atk_user_poll_timed_event(atk_user_window_t *win, user_atk_timed_event_t *event);
 
 /*
  * Close a remote window and release its backing buffer.

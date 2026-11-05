@@ -5195,6 +5195,10 @@ void __alix_fork_child(void)
 {
     alix_mutex_init(&g_heap_lock);
     alix_mutex_init(&g_env_mutex);
+    /* Libc-only links need no pthread cache. When pthread is present, its
+     * copied identity must be invalidated before user atfork child handlers. */
+    extern void __alix_pthread_fork_child(void) __attribute__((weak));
+    if (__alix_pthread_fork_child) __alix_pthread_fork_child();
 }
 
 int __alix_owned_process_runtime(void)

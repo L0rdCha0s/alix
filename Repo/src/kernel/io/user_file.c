@@ -39,6 +39,7 @@ static io_service_t *g_user_dns_service;
 static uint32_t g_user_file_start;
 /* Monotonic diagnostic counters, readable by the browser harness through GDB. */
 static uint64_t g_user_file_inline_socket, g_user_file_inline_poll;
+static uint64_t g_user_file_inline_pipe;
 static uint64_t g_user_message_prepare_saved_bytes, g_user_message_empty_control_skips;
 static uint64_t g_user_storage_operations[64];
 static uint64_t g_user_file_inline_storage[64];
@@ -212,6 +213,26 @@ static int user_file_submit(user_file_service_t kind, io_request_t *request)
             if (result) user_file_abort(request);
             else __atomic_add_fetch(&g_user_file_inline_poll, 1, __ATOMIC_RELAXED);
             return result;
+        }
+    }
+    if (kind == USER_PIPE && io_pipe_description_valid(description) &&
+        io_request_buffer_size(request) >= sizeof(io_pipe_operation_t))
+    {
+        io_pipe_operation_t *operation = io_request_buffer(request);
+        if (operation->opcode == IO_PIPE_READ || operation->opcode == IO_PIPE_WRITE)
+        {
+            /* An available read/write is already a bounded ring operation.
+             * Keep the registered ownership/copy path, but use the executor
+             * only when this step actually needs to wait for readiness. */
+            io_service_result_t completed = {.result = -EIO, .description_owned = NULL};
+            if (io_pipe_execute(request, &completed))
+            {
+                if (completed.description_owned) fatal("inline pipe returned an owner");
+                int result = io_request_complete_inline(request, completed.result);
+                if (result) user_file_abort(request);
+                else __atomic_add_fetch(&g_user_file_inline_pipe, 1, __ATOMIC_RELAXED);
+                return result;
+            }
         }
     }
     if (kind == USER_TCP && (io_local_description_valid(description) ||
@@ -1769,6 +1790,30 @@ static int64_t user_file_poll(void *entries, uint64_t count, int64_t timeout)
                                           &description) : -ESRCH;
     if (!result && bytes && !user_copy_from_user(io_poll_entries(description), entries, bytes)) result = -EFAULT;
     if (!result) result = io_poll_pin(description, table);
+    if (!result && timeout == 0)
+    {
+        /* This call cannot park. Keep its heap-owned pins inside this bounded
+         * guard instead of registering/completing/reaping an async request and
+         * taking the global scheduler lock for each of those transitions. */
+        io_service_result_t completed = {.result = -EIO, .description_owned = NULL};
+        if (!io_poll_snapshot(description, &completed) || completed.description_owned)
+            fatal("zero-timeout poll retained executor work");
+        int64_t value = completed.result;
+        thread_t *thread = current_thread_local();
+        if (thread && (__atomic_load_n(&thread->signal_pending, __ATOMIC_ACQUIRE) |
+                       __atomic_load_n(&thread->process->signal_pending, __ATOMIC_ACQUIRE)))
+        {
+            uint64_t flags = scheduler_lock_acquire("poll_nowait_signal");
+            if (process_signal_pending_locked(thread)) value = -EINTR;
+            scheduler_lock_release(flags);
+        }
+        if (value >= 0 && bytes &&
+            !user_copy_to_user(entries, io_poll_entries(description), bytes)) value = -EFAULT;
+        fd_description_put(description);
+        if (value >= 0) __atomic_add_fetch(&g_user_file_inline_poll, 1, __ATOMIC_RELAXED);
+        spinlock_preempt_enable();
+        return value;
+    }
     io_request_t *request = NULL;
     if (!result) result = user_file_create(USER_POLL, 0, description, NULL, &request);
     else fd_description_put(description);

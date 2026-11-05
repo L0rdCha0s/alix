@@ -25,6 +25,7 @@
 #include "errno.h"
 #include "pmm.h"
 #include "spinlock.h"
+#include "igb.h"
 
 /* Error-only counters for runtime diagnosis. Inspect after a measurement with
  * the CPUs stopped; successful file calls pay no atomic accounting cost. */
@@ -1730,5 +1731,7 @@ uint64_t syscall_dispatch(syscall_frame_t *frame, uint64_t vector)
     }
     else result = syscall_dispatch_inner(frame, vector, resume);
     process_vm_syscall_leave();
+    process_poll_deferred_work();
+    igb_poll_deferred();
     return result;
 }

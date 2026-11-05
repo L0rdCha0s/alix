@@ -163,6 +163,15 @@ bool atk_user_poll_event(atk_user_window_t *win, user_atk_event_t *event)
     return ok;
 }
 
+int atk_user_poll_timed_event(atk_user_window_t *win, user_atk_timed_event_t *event)
+{
+    if (!win || !event) return -1;
+    int result = sys_ui_poll_timed_event(win->handle, event);
+    if (result == 1 && event->event.type == USER_ATK_EVENT_RESIZE)
+        atk_user_handle_resize_event(win, &event->event);
+    return result;
+}
+
 void atk_user_close(atk_user_window_t *win)
 {
     if (!win)

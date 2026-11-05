@@ -97,3 +97,21 @@ The query does not retain a user buffer or depend on a particular window.
 Alix's Gecko idle-service provider uses this query for the standard
 `@mozilla.org/widget/useridleservice;1` contract needed by session saving.
 Fresh-profile execution of the new provider is the next runtime checkpoint.
+
+### Optional event timing
+
+`USER_ATK_POLL_FLAG_TIMED` on the existing nonblocking poll syscall selects the
+40-byte `user_atk_timed_event_t` reply. Its first 24 bytes are the unchanged
+legacy event; appended fields contain the monotonic enqueue time in milliseconds
+and cumulative window-queue overflow count. TIMED cannot be combined with BLOCK.
+`sys_ui_poll_timed_event` returns 1/event, 0/empty or negative errno.
+`atk_user_poll_timed_event` additionally applies the normal surface resize path.
+Empty replies still return the overflow count and otherwise contain zeroes.
+
+Timestamps and overflow snapshots are read under the existing event lock.
+Coalesced mouse motion and resize updates retain the oldest pending timestamp;
+no per-event allocation or logging is added. The optional syscall reply is
+heap-owned under the existing nonblocking preemption guard and checked user
+copy. As with legacy poll, failed output copying may consume the dequeued event.
+This measures queue residence after input routing, not hardware arrival or
+display scanout. The native [performance app](../performance.md) exercises it.

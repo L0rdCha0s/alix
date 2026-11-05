@@ -91,11 +91,10 @@ int io_poll_pin(fd_description_t *description, fd_table_t *table)
     return 0;
 }
 
-bool io_poll_execute(io_request_t *request, io_service_result_t *result)
+bool io_poll_snapshot(fd_description_t *description, io_service_result_t *result)
 {
     if (!result) return true;
     result->result = -EINVAL; result->description_owned = NULL;
-    fd_description_t *description = request ? io_request_description(request) : NULL;
     if (!io_poll_description_valid(description)) return true;
     io_poll_set_t *set = fd_description_context(description);
     if (!set->pinned) return true;
@@ -125,4 +124,9 @@ bool io_poll_execute(io_request_t *request, io_service_result_t *result)
     if (!ready && (set->infinite || timer_monotonic_millis() < set->deadline)) return false;
     result->result = ready;
     return true;
+}
+
+bool io_poll_execute(io_request_t *request, io_service_result_t *result)
+{
+    return io_poll_snapshot(request ? io_request_description(request) : NULL, result);
 }
