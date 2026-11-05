@@ -22,8 +22,9 @@ static int io_tcp_file_close(void *context)
     return result;
 }
 
-/* All data operations go through the multiplexed executor. Blocking fd_ops
- * callbacks would occupy a storage worker and are deliberately absent. */
+/* Data operations use a bounded step, either inline for nonblocking calls or
+ * through the multiplexed executor. Blocking fd_ops callbacks would occupy a
+ * storage worker and are deliberately absent. */
 static uint32_t io_tcp_poll(void *context)
 {
     io_tcp_file_t *file = context;
@@ -281,8 +282,9 @@ bool io_tcp_execute(io_request_t *request, io_service_result_t *result,
             if (status.flags & NET_TCP_OWNED_EOF) { result->result = -EPIPE; return true; }
             if (!(status.flags & NET_TCP_OWNED_CONNECTED)) { result->result = -ENOTCONN; return true; }
             if (!status.mss) { result->result = -EIO; return true; }
-            size_t bytes = operation->count < status.mss ? (size_t)operation->count : status.mss;
-            if (net_tcp_socket_send(file->socket, operation->data, bytes))
+            size_t bytes = operation->count < status.write_capacity ?
+                           (size_t)operation->count : (size_t)status.write_capacity;
+            if (bytes && net_tcp_socket_send(file->socket, operation->data, bytes))
             { result->result = (int64_t)bytes; return true; }
             if (nonblocking) { result->result = -EAGAIN; return true; }
             return false; /* Backpressure or a state transition: recheck next step. */

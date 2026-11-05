@@ -8,7 +8,7 @@ sys.path.insert(0, str(ROOT / 'tests'))
 from audio_stream_contract_test import function_definition
 source = (ROOT / 'user/lib/libc.c').read_text()
 test = (ROOT / 'tests/thread_libc_support_test.c').read_text()
-names = ['static size_t align_size(', 'static void split_block(', 'static void coalesce(', 'static heap_block_t *find_free_block(', 'static heap_block_t *request_block_unlinked(', 'static heap_block_t *payload_to_block(', 'static void user_heap_lock_acquire(', 'static void user_heap_lock_release(', 'static void *malloc_locked(', 'static void free_locked(', 'static void *realloc_locked(', 'void *malloc(', 'void free(', 'void *aligned_alloc(', 'int posix_memalign(', 'void *realloc(', 'void *calloc(', 'static unsigned libc_integer_digit(', 'static uint64_t libc_parse_integer(', 'unsigned long long strtoull(', 'long long strtoll(', 'long strtol(', 'unsigned long strtoul(', 'void *bsearch(', 'static void libc_sort_swap(', 'static void libc_sort_sift(', 'void qsort(']
+names = ['static size_t align_size(', 'static unsigned free_bin_index(', 'static void free_bin_insert(', 'static void free_bin_remove(', 'static void split_block(', 'static void coalesce(', 'static heap_block_t *find_free_block(', 'static heap_block_t *request_block_unlinked(', 'static heap_block_t *payload_to_block(', 'static void user_heap_lock_acquire(', 'static void user_heap_lock_release(', 'static void *malloc_locked(', 'static void free_locked(', 'static void *realloc_locked(', 'void *malloc(', 'void free(', 'void *aligned_alloc(', 'int posix_memalign(', 'void *realloc(', 'void *calloc(', 'static unsigned libc_integer_digit(', 'static uint64_t libc_parse_integer(', 'unsigned long long strtoull(', 'long long strtoll(', 'long strtol(', 'unsigned long strtoul(', 'void *bsearch(', 'static void libc_sort_swap(', 'static void libc_sort_sift(', 'void qsort(']
 code = r'''
 #include <stdint.h>
 #include <stdbool.h>
@@ -29,10 +29,15 @@ code = r'''
 #define user_heap_log_enabled() false
 #define user_heap_log_corruption(...) abort()
 #define serial_printf(...) ((void)0)
-static inline void libc_cpu_relax(void) {}
-typedef struct heap_block { size_t size; struct heap_block *next, *prev; bool free; } heap_block_t;
+/* ALIX_HEAP_BLOCK_TYPE */
 static heap_block_t *g_heap_head, *g_heap_tail;
-static volatile int g_heap_lock;
+static heap_block_t *g_heap_free_bins[64];
+static uintptr_t g_heap_committed_end;
+typedef struct { bool held; } alix_mutex_t;
+static alix_mutex_t g_heap_lock;
+static void alix_mutex_lock(alix_mutex_t *lock) { assert(!lock->held); lock->held = true; }
+static void alix_mutex_unlock(alix_mutex_t *lock) { assert(lock->held); lock->held = false; }
+static void coalesce(heap_block_t *block);
 static unsigned char arena[16*1024*1024] __attribute__((aligned(4096)));
 static size_t arena_used;
 static unsigned char dso_a;
@@ -59,6 +64,9 @@ static bool user_heap_addr_in_bounds(uintptr_t address) {
 #define strtol alix_strtol
 #define strtoul alix_strtoul
 '''
+type_start = source.index('typedef struct heap_block\n')
+type_end = source.index('} heap_block_t;', type_start) + len('} heap_block_t;')
+code = code.replace('/* ALIX_HEAP_BLOCK_TYPE */', source[type_start:type_end])
 code += '\n\n'.join(function_definition(source, name) for name in names)
 code += '\n' + function_definition(test, 'static bool bytes_equal(')
 code += '\n' + function_definition(test, 'static bool allocation_tests(')

@@ -97,6 +97,7 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attribute,
 int pthread_join(pthread_t thread, void **result);
 int pthread_detach(pthread_t thread);
 pthread_t pthread_self(void);
+int pthread_atfork(void (*prepare)(void), void (*parent)(void), void (*child)(void));
 int pthread_sigmask(int how, const sigset_t *set, sigset_t *old);
 int pthread_kill(pthread_t thread, int number);
 int pthread_equal(pthread_t left, pthread_t right);

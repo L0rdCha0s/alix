@@ -6,7 +6,7 @@ environment. It returns the actual child PID. `waitpid` supports a positive PID
 or `-1` for any child, optional `WNOHANG`, and a nullable status destination.
 `wait` is the any-child wrapper. Group selectors and stopped/continued-job flags
 return `ENOTSUP`. Caught-signal interruption follows the current registered-I/O
-delivery policy; `fork` and in-place `exec` remain separate capabilities.
+delivery policy; `fork` and in-place `exec` now have native implementations, described below.
 
 Arguments have at most 256 entries and share the bounded 64 KiB request buffer
 with their offsets and copied executable path. User pointers are fetched through
@@ -149,3 +149,47 @@ checks. An ASan/UBSan host fixture faults every allocation and descriptor
 preparation step, including aliased sources. The complete upstream process
 source compiles. These are helper/component results; full NSPR initialization,
 its wait daemon and the Zen application have not been verified.
+
+## Native fork and in-place exec
+
+The process-owned-descriptor runtime now provides `fork`, `execve`, `execv`,
+`execvp`, `execl`, `execle`, `execlp`, and `pthread_atfork`. The legacy global-FD
+runtime returns `ENOTSUP` rather than sharing a global descriptor namespace
+under POSIX process semantics. New callers link `ZEN_USER_RUNTIME_OBJECTS`.
+
+Fork creates a fresh address space and only the calling thread. It copies ELF
+segments, committed heap/stack/TLS backing, anonymous mappings and dirty private
+file pages. Shared file pages retain their shared mapping ownership. Cwd,
+credentials, creation mask and descriptor slots are copied; open descriptions
+and offsets are shared, and the child starts with an empty child registry and
+no pending signals or alarm. The child resumes the saved user registers with
+return value zero; the parent receives its PID and uses the existing wait/reaper
+protocol. Kernel stacks are independently allocated. User signal-frame records
+and checkpoint ownership are copied, and FP state, masks, alternate stacks and
+calling-thread scheduling policy are inherited. Anonymous fork copying is eager;
+it is not an anonymous-memory COW implementation.
+
+`pthread_atfork` invokes prepare callbacks in reverse registration order and
+parent/child callbacks in registration order. Libc protects its environment and
+allocator across the snapshot and resets those gates in the child. Normal POSIX
+restrictions on operations after a multithreaded fork still apply.
+
+Exec captures path, argv and environment into registered heap work and builds a
+complete replacement ELF, stack and TLS on protected workers. A failed load
+leaves the old image and descriptors intact. After staging succeeds, exec
+claims the process, prevents new peer-thread publication, terminates and reaps
+peers, then switches the calling thread to the new address space. PID, parent,
+children, cwd and credentials survive. Caught signal dispositions and alternate
+stacks reset; ignored dispositions and the calling mask survive. Only CLOEXEC
+slots close in the original FD table, preserving its surviving record locks.
+Old image ownership transfers to protected deferred cleanup. Success returns
+directly to the replacement entry point. The loader currently accepts native
+Alix ELF programs; this is not foreign-binary or script-interpreter support.
+
+`/usr/bin/time.elf command [arguments...]` exposes the new path as a normal
+userland utility: fork, exec/PATH lookup, wait, status propagation and elapsed
+time. It is included in the ordinary application download archive. Existing
+QEMU runner receipts include `fork-exec-time-qemu.log`,
+`fork-exec-swap-accepted-qemu.log` and `fork-exec-failure-qemu.log` under
+`build/test-out/`. These establish successful native execution and failed-load
+recovery; they are not exhaustive POSIX fork/exec conformance.

@@ -14,6 +14,9 @@ struct child_record
     fd_description_t *reservation;
     child_record_t *next;
     uint32_t references;
+    bool executing;
+    process_t *exec_image;
+    process_tls_allocation_t exec_tls;
     bool published, claimed, reaped, kill_sent, closed;
 };
 typedef struct { fd_table_t *table; } child_table_owner_t;
@@ -73,6 +76,7 @@ static int child_record_close(void *context)
         (void)fd_table_reservation_cancel(record->reservation);
         fd_description_put(record->reservation);
     }
+    process_discard_image(record->exec_image);
     fd_description_put(record->launch.cwd);
     fd_table_put(record->launch.files);
     __atomic_store_n(&record->closed, true, __ATOMIC_RELEASE);
@@ -291,6 +295,16 @@ static void child_launch_handler(io_request_t *request, io_service_result_t *res
     for (uint32_t index = 0; index < work->argc; ++index) arguments[index] = work->data + work->offsets[index];
     for (uint32_t index = 0; index < work->envc; ++index) environment[index] = work->data + work->env_offsets[index];
     record->launch.environment = environment; record->launch.environment_count = work->envc;
+    if (record->executing)
+    {
+        record->launch.executable_path = executable_path;
+        record->exec_image = process_prepare_exec_image(image, bytes, &record->launch,
+            arguments, work->argc, &record->exec_tls);
+        if (!record->exec_image) result->result = -ENOMEM;
+        else if (!fd_description_get(description)) result->result = -EOVERFLOW;
+        else { result->result = 1; result->description_owned = description; }
+        goto finished;
+    }
     spinlock_preempt_disable();
     bool initialized = process_creation_watch_init(&record->watch);
     spinlock_preempt_enable();
@@ -382,6 +396,7 @@ bool io_process_services_start(void)
         return false;
     }
     g_launch_service = launch; g_wait_service = wait; g_reaper = reaper;
+    if (!process_vm_pager_start()) serial_printf("[pager] service unavailable");
     __atomic_store_n(&g_start, 2, __ATOMIC_RELEASE);
     return true;
 }
@@ -553,16 +568,34 @@ static int child_capture_actions(const syscall_spawn_t *specification, child_lau
     return 0;
 }
 
-static int64_t child_spawn(const char *path, uintptr_t argv, const syscall_spawn_t *specification)
+static int64_t child_exec_finish(syscall_frame_t *frame)
+{
+    io_request_status_t status;
+    int error = process_io_wait_current(&status);
+    spinlock_preempt_disable();
+    io_request_t *request = NULL;
+    if (!error) error = process_io_result_current(&request, &status);
+    if (!error && status.result < 0) error = (int)status.result;
+    child_record_t *record = !error ? fd_description_context(io_request_description(request)) : NULL;
+    spinlock_preempt_enable();
+    if (!error) error = process_exec_commit(frame, record->exec_image, &record->exec_tls);
+    spinlock_preempt_disable();
+    (void)process_io_finish_current(error != 0);
+    spinlock_preempt_enable();
+    return error;
+}
+
+static int64_t child_spawn(const char *path, uintptr_t argv, const syscall_spawn_t *specification,
+                           syscall_frame_t *exec_frame)
 {
     spinlock_preempt_disable();
     fd_table_t *table = child_current_table();
     child_record_t *record = calloc(1, sizeof(*record));
-    if (record) record->references = 1;
+    if (record) { record->references = 1; record->executing = exec_frame != NULL; }
     fd_description_t *description = record ? fd_description_create_deferred(&child_record_ops, record, process_fd_retirement_queue()) : NULL;
     int error = !table ? -ESRCH : !description ? -ENOMEM : 0;
     if (!description) { free(record); record = NULL; }
-    if (!error) error = fd_table_reserve_deferred(table, &record->reservation);
+    if (!error && !exec_frame) error = fd_table_reserve_deferred(table, &record->reservation);
     if (!error)
     {
         record->launch.cwd = process_acquire_cwd_owner(current_process_local(), &record->launch.uid, &record->launch.gid);
@@ -623,7 +656,7 @@ static int64_t child_spawn(const char *path, uintptr_t argv, const syscall_spawn
     }
     else error = child_submit(request, true);
     spinlock_preempt_enable();
-    return error ? error : child_finish(true, NULL);
+    return error ? error : exec_frame ? child_exec_finish(exec_frame) : child_finish(true, NULL);
 }
 
 static int64_t child_wait(int64_t pid, void *output, uint64_t flags, bool info, bool peek)
@@ -718,7 +751,7 @@ int64_t io_process_dispatch(uint32_t operation, uint64_t first, uint64_t second,
          * CPU. No allocation or temporary ownership can escape cancellation. */
         return user_copy_to_user((void *)(uintptr_t)first, process->executable_path, length + 1) ? (int64_t)length : -EFAULT;
     }
-    if (operation == SYSCALL_PROCESS_SPAWN) return child_spawn((const char *)first, second, NULL);
+    if (operation == SYSCALL_PROCESS_SPAWN) return child_spawn((const char *)first, second, NULL, NULL);
     if (operation == SYSCALL_PROCESS_SPAWN_EX)
     {
         syscall_spawn_t specification;
@@ -730,7 +763,7 @@ int64_t io_process_dispatch(uint32_t operation, uint64_t first, uint64_t second,
                                     SYSCALL_SPAWN_CLOEXEC_DEFAULT | SYSCALL_SPAWN_SEARCH_PATH)) return -ENOTSUP;
         if (!(specification.flags & SYSCALL_SPAWN_SEARCH_PATH) && specification.search_path) return -EINVAL;
         if ((specification.signal_mask | specification.signal_default) & ~ALIX_SIGNAL_MASK) return -EINVAL;
-        return child_spawn((const char *)(uintptr_t)specification.path, (uintptr_t)specification.argv, &specification);
+        return child_spawn((const char *)(uintptr_t)specification.path, (uintptr_t)specification.argv, &specification, NULL);
     }
     if (operation == SYSCALL_PROCESS_WAIT) return child_wait((int64_t)first, (void *)second, third, false, false);
     if (operation == SYSCALL_PROCESS_WAIT_INFO)
@@ -747,4 +780,55 @@ int64_t io_process_dispatch(uint32_t operation, uint64_t first, uint64_t second,
                           third & SYSCALL_PROCESS_NOHANG, true, (third & SYSCALL_PROCESS_WAIT_NOWAIT) != 0);
     }
     return -EINVAL;
+}
+
+int64_t io_process_fork(const syscall_frame_t *frame)
+{
+    if (!frame || !current_thread_local() || !current_thread_local()->is_user ||
+        __atomic_load_n(&g_start, __ATOMIC_ACQUIRE) != 2) return -ENOSYS;
+    spinlock_preempt_disable();
+    fd_table_t *table = child_current_table();
+    child_record_t *record = calloc(1, sizeof(*record));
+    if (record) record->references = 1;
+    fd_description_t *description = record ? fd_description_create_deferred(&child_record_ops,
+        record, process_fd_retirement_queue()) : NULL;
+    int error = !table ? -ESRCH : !description ? -ENOMEM : 0;
+    if (!description) { free(record); record = NULL; }
+    if (!error) error = fd_table_reserve_deferred(table, &record->reservation);
+    if (!error)
+    {
+        process_t *source = current_process_local();
+        record->launch.cwd = process_acquire_cwd_owner(source, &record->launch.uid, &record->launch.gid);
+        record->launch.creation_mask = source->creation_mask;
+        error = record->launch.cwd ? fd_table_clone_deferred(process_current_fd_table(), false, &record->launch.files) : -ENOMEM;
+    }
+    if (!error && !process_creation_watch_init(&record->watch)) error = -ENOMEM;
+    process_t *child = !error ? process_fork_current(frame, &record->launch, &record->watch) : NULL;
+    if (!error) process_creation_watch_complete(&record->watch);
+    if (!error && !child) error = -ENOMEM;
+    if (child)
+    {
+        __atomic_add_fetch(&record->references, 1u, __ATOMIC_ACQ_REL);
+        child_enqueue_orphan(record);
+        error = fd_table_reservation_commit(record->reservation, description, 0);
+        if (error >= 0)
+        {
+            record->published = true;
+            fd_description_t *reservation = record->reservation; record->reservation = NULL;
+            fd_description_put(reservation);
+            error = 0;
+        }
+    }
+    int64_t result = error ? error : (int64_t)record->watch.pid;
+    fd_description_put(description);
+    spinlock_preempt_enable();
+    return result;
+}
+
+int64_t io_process_exec(syscall_frame_t *frame)
+{
+    if (__atomic_load_n(&g_start, __ATOMIC_ACQUIRE) != 2) return -ENOSYS;
+    syscall_spawn_t specification = {0};
+    specification.environment = frame->r10;
+    return child_spawn((const char *)frame->rsi, frame->rdx, &specification, frame);
 }

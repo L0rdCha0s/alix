@@ -4,6 +4,7 @@
 #include "types.h"
 
 #define USER_ATK_TITLE_MAX 64
+#define USER_ATK_TITLE_TEXT_MAX 4096u /* Includes the terminating NUL. */
 #define USER_ATK_EVENT_QUEUE_MAX 64
 
 typedef enum
@@ -66,6 +67,9 @@ typedef enum
     USER_ATK_CONTROL_DISPLAY,
     USER_ATK_CONTROL_WORK_AREA,
     USER_ATK_CONTROL_INPUT_IDLE,
+    /* Input is raw UTF-8 bytes, excluding NUL, rather than a control record.
+     * Existing opcodes and 104-byte records keep their original ABI. */
+    USER_ATK_CONTROL_TITLE_TEXT,
 } user_atk_control_opcode_t;
 #define USER_ATK_STATE_VISIBLE 1u
 #define USER_ATK_STATE_FOCUSED 2u

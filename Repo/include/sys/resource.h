@@ -13,8 +13,8 @@ struct rlimit { rlim_t rlim_cur, rlim_max; };
 #define RLIMIT_NOFILE SYSCALL_RESOURCE_NOFILE
 #define RLIMIT_AS SYSCALL_RESOURCE_AS
 #define RUSAGE_SELF SYSCALL_USAGE_SELF
-/* Native measured fields. No swap/file-backed paging is implemented yet, so
- * successful recoverable user faults are minor faults; major faults stay zero. */
+/* Native measured fields. Minor faults count recoverable memory faults;
+ * major faults count successful disk swap-ins, including syscall preflight. */
 struct rusage
 {
     struct timeval ru_utime, ru_stime;

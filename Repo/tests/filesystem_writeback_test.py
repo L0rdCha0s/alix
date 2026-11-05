@@ -31,6 +31,7 @@ typedef struct { spinlock_t lock; } wait_queue_t;
 static void spinlock_init(spinlock_t *lock) { lock->locked = 0; }
 static void spinlock_lock(spinlock_t *lock) { if (lock->locked++) abort(); }
 static void spinlock_unlock(spinlock_t *lock) { if (!lock->locked--) abort(); }
+static void serial_printf(const char *fmt, ...);
 '''
     for path in ("include/block.h", "include/vfs.h", "src/kernel/vfs_internal.h", "include/alixfs.h"):
         program += without_includes(path)
@@ -70,6 +71,7 @@ static void *phys_to_virt(paddr_t p) {return (void *)p;}
 static uint64_t timekeeping_now_seconds(void) {return 123456;}
 """
     vfs = (ROOT / "src/kernel/vfs.c").read_text()
+    program += function_definition(vfs, "static void vfs_release_retired_nodes") + "\n"
     program += function_definition(vfs, "void vfs_queue_dirty_node") + "\n"
     program += without_includes("src/kernel/vfs_mapping.c")
     program += without_includes("src/kernel/alixfs.c")

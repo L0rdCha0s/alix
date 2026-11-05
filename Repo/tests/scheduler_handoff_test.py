@@ -28,16 +28,25 @@ def main() -> int:
 #define THREAD_STATE_ZOMBIE 3
 #define THREAD_PRIORITY_NORMAL 1
 #define THREAD_PRIORITY_UI 2
+#define SMP_MAX_CPUS 2
+#define PROCESS_LIFETIME_ALIVE 0
+#define PROCESS_STATE_ZOMBIE 3
 typedef struct { bool locked; } spinlock_t;
+typedef struct { unsigned lifetime_state, state; } process_t;
 typedef struct thread {
     unsigned state; bool is_idle, wake_pending, preempt_pending, in_transition, context_valid, in_run_queue;
     uint32_t running_cpu, time_slice_remaining; uint64_t last_scheduled_tick; spinlock_t context_lock;
     bool affinity_enabled; uint32_t affinity_cpu, priority;
+    bool pending_destroy, exited; process_t *process;
 } thread_t;
-typedef struct { uint32_t total; } run_queue_t;
+typedef struct { uint32_t total, cpu_index; } run_queue_t;
 static thread_t current, selected[2], idle;
+static thread_t *g_current_threads[2];
 static thread_t *g_idle_threads[2] = {&idle, &idle};
 static run_queue_t run_queue;
+static run_queue_t enqueue_queues[2];
+static bool testing_enqueue;
+static unsigned enqueue_locks;
 static uint64_t g_scheduler_switch_count, g_cpu_switch_counts[2];
 static bool scheduler_locked, claimed, reject_first;
 static uint64_t irq_flags, last_saved_flags;
@@ -66,6 +75,7 @@ static const char *thread_state_name(unsigned state) { (void)state; return "test
 static bool thread_in_run_queue_load(thread_t *t) { return t->in_run_queue; }
 static void log_discard(const char *format, ...) { (void)format; }
 #define SCHED_LOG(...) log_discard(__VA_ARGS__)
+#define SCHED_DBG(...) log_discard(__VA_ARGS__)
 static uint64_t scheduler_lock_acquire(const char *where)
 {
     (void)where; CHECK(!scheduler_locked, "scheduler lock acquired recursively");
@@ -78,9 +88,14 @@ static void scheduler_lock_release(uint64_t flags)
      * With IF=1, local timer preemption can also interleave in this window. */
     if (claimed) unsafe_unlocks++;
 }
-static run_queue_t *scheduler_run_queue(uint32_t cpu) { (void)cpu; return &run_queue; }
+static run_queue_t *scheduler_run_queue(uint32_t cpu) {
+    CHECK(cpu<2,"enqueue selected unavailable CPU");
+    return testing_enqueue ? &enqueue_queues[cpu] : &run_queue;
+}
 static uint64_t run_queue_lock_acquire(run_queue_t *queue, const char *where)
-{ (void)queue; (void)where; CHECK(scheduler_locked, "queue selected without scheduler lock"); return irq_flags; }
+{ (void)queue; (void)where; CHECK(scheduler_locked, "queue selected without scheduler lock");
+  if(testing_enqueue) CHECK(++enqueue_locks<=2,"UI placement recursively defeated explicit affinity");
+  return irq_flags; }
 static void run_queue_lock_release(run_queue_t *queue, uint64_t flags) { (void)queue; (void)flags; }
 static void enqueue_current_thread_local(thread_t *t)
 {
@@ -104,6 +119,21 @@ static void scheduler_log_pick(thread_t *cur, thread_t *next, uint32_t cpu, cons
 static void scheduler_trace(const char *why, thread_t *t) { (void)why; (void)t; }
 static void process_reap_orphans(void) { CHECK(!scheduler_locked && !claimed, "handoff left scheduler locked or thread claimed"); }
 static void process_reap_retired_memory(void) { CHECK(!scheduler_locked, "memory reaper called under scheduler lock"); }
+static uint32_t scheduler_required_cpu(const thread_t *thread);
+static uint32_t scheduler_select_target_cpu(thread_t *thread) {
+    uint32_t required=scheduler_required_cpu(thread);return required==RUN_QUEUE_CPU_INVALID?0:required;
+}
+static bool thread_lifetime_active(thread_t *thread) { return !thread->pending_destroy; }
+static void thread_debug_check_ownership(thread_t *thread,const char *where) { (void)thread;(void)where; }
+static void thread_clear_running_cpu(thread_t *thread) { thread->running_cpu=RUN_QUEUE_CPU_INVALID; }
+static void run_queue_push_locked(run_queue_t *queue,thread_t *thread) {
+    CHECK(scheduler_locked && !thread->in_run_queue,"duplicate or unlocked enqueue");
+    thread->in_run_queue=true;++queue->total;++enqueues;enqueued_cpu=queue->cpu_index;
+}
+static void scheduler_verify_run_queue_locked(run_queue_t *queue,const char *where) { (void)queue;(void)where; }
+static void scheduler_log_enqueue(thread_t *thread,uint32_t cpu,const char *where) { (void)thread;(void)cpu;(void)where; }
+static void scheduler_shell_log(const char *where,thread_t *thread) { (void)where;(void)thread; }
+static void scheduler_nudge_cpu(uint32_t cpu) { CHECK(cpu==enqueued_cpu,"nudged wrong enqueue CPU"); }
 '''
     program += "static bool switch_to_thread(thread_t *next" + (", uint64_t flags" if locked_argument else "") + ")\n{\n"
     if not locked_argument:
@@ -125,6 +155,7 @@ static void process_reap_retired_memory(void) { CHECK(!scheduler_locked, "memory
 '''
     if "static uint32_t scheduler_required_cpu" in scheduler:
         program += function_definition(scheduler, "static uint32_t scheduler_required_cpu") + "\n"
+    program += function_definition(scheduler, "void enqueue_thread_on_cpu_locked") + "\n"
     program += function_definition(scheduler, "void scheduler_schedule") + "\n"
     program += r'''
 static void reset(bool irq_enabled, bool retry)
@@ -137,6 +168,8 @@ static void reset(bool irq_enabled, bool retry)
     empty_local = switched_to_idle = false; enqueues = empty_dequeues = 0;
     enqueued_cpu = expected_enqueue_cpu = RUN_QUEUE_CPU_INVALID;
     g_ui_cpu_index = RUN_QUEUE_CPU_INVALID; cpu_online[0] = cpu_online[1] = true;
+    testing_enqueue=false;enqueue_locks=0;
+    enqueue_queues[0]=(run_queue_t){.cpu_index=0};enqueue_queues[1]=(run_queue_t){.cpu_index=1};
 }
 int main(void)
 {
@@ -209,6 +242,23 @@ int main(void)
                       "unbound/same-CPU fast path changed");
             }
         }
+    /* Exercise production enqueue, not the handoff model's current-thread
+     * stub: UI classification must never recursively override valid affinity. */
+    for(unsigned scenario=0;scenario<3;++scenario) {
+        reset(true,false);testing_enqueue=true;g_ui_cpu_index=1;
+        current=(thread_t){.state=THREAD_STATE_READY,.priority=THREAD_PRIORITY_UI,
+                           .running_cpu=RUN_QUEUE_CPU_INVALID};
+        if(scenario) { current.affinity_enabled=true;current.affinity_cpu=scenario==1?0:1; }
+        uint32_t expected=scenario==1?0:1;
+        uint64_t flags=scheduler_lock_acquire("enqueue_fixture");
+        enqueue_thread_on_cpu_locked(&current,1);
+        scheduler_lock_release(flags);
+        CHECK(enqueues==1 && enqueue_locks==1 && enqueued_cpu==expected,
+              "UI enqueue did not honor explicit affinity before reserved UI CPU");
+        CHECK(current.in_run_queue && current.context_valid && !current.in_transition &&
+              current.running_cpu==RUN_QUEUE_CPU_INVALID && !scheduler_locked && (irq_flags&512),
+              "UI enqueue corrupted thread or interrupt ownership");
+    }
     puts("scheduler handoff test passed"); return 0;
 }
 '''

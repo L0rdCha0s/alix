@@ -30,6 +30,10 @@ int pipe2(int fds[2], int flags);
 pid_t fork(void);
 int execv(const char *path, char *const argv[]);
 int execvp(const char *file, char *const argv[]);
+int execve(const char *path, char *const argv[], char *const envp[]);
+int execl(const char *path, const char *argument, ...);
+int execle(const char *path, const char *argument, ...);
+int execlp(const char *path, const char *argument, ...);
 int chdir(const char *path);
 char *getcwd(char *buffer, size_t capacity);
 /* Absolute launch-path snapshot, including NUL on success. Return byte length

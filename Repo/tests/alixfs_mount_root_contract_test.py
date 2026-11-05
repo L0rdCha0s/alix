@@ -19,6 +19,7 @@ def main():
 #define VFS_UID_ROOT 0u
 #define VFS_GID_ROOT 0u
 #define VFS_PATH_MAX 4096u
+static void serial_printf(const char *format, ...) { (void)format; }
 typedef struct { bool locked; } spinlock_t;
 static void spinlock_init(spinlock_t *l) { l->locked=false; }
 static void spinlock_lock(spinlock_t *l) { CHECK(!l->locked); l->locked=true; }

@@ -53,6 +53,8 @@ exception_common:
     and rsp, -16
     call exception_dispatch
     mov rsp, rbx
+.global process_resume_exception
+process_resume_exception_return:
     pop r15
     pop r14
     pop r13
@@ -70,5 +72,15 @@ exception_common:
     pop rax
     add rsp, 16
     iretq
+
+# The frame belongs to the current thread's kernel stack. No IST or foreign
+# stack pointer survives a sleep, migration or asynchronous disk operation.
+process_resume_exception:
+    cli
+    mov rsp, rdi
+    mov ax, 0x33
+    mov ds, ax
+    mov es, ax
+    jmp process_resume_exception_return
 
 .section .note.GNU-stack,"",@progbits

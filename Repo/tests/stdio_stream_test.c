@@ -5,6 +5,9 @@
 #include "unistd.h"
 #include "serial.h"
 
+extern uint64_t __alix_stdio_cached_tells;
+extern uint64_t __alix_stdio_buffered_seeks;
+
 #define WORKERS 8u
 #define RECORDS 64u
 #define RECORD_BYTES 32u
@@ -89,6 +92,9 @@ int main(void)
     free(record);
     free(writers);
     free(path);
-    serial_printf("STDIO_STREAM_TEST: PASS pushback=1 position=1 workers=8 records=512\n");
+    CHECK(__alix_stdio_cached_tells && __alix_stdio_buffered_seeks, "private stream position cache");
+    serial_printf("STDIO_STREAM_TEST: PASS pushback=1 position=1 workers=8 records=512 cached_tells=%llu buffered_seeks=%llu\n",
+                  (unsigned long long)__alix_stdio_cached_tells,
+                  (unsigned long long)__alix_stdio_buffered_seeks);
     return 0;
 }

@@ -103,6 +103,15 @@ native TCP open/connect/available interfaces. The original syscall IDs retain
 their legacy global-FD ABI for installed applications. Neither namespace falls
 back to the other when an integer is absent.
 
+Registered regular-file READ/PREAD, SEEK and stat requests can complete inline
+when their data and metadata are resident and the required locks are immediately
+available. Contention, shared writable mapping coherence and persistent
+timestamp updates use the protected worker path. Nonblocking TCP/UDP operations
+and immediately ready poll/select requests likewise avoid a worker handoff.
+The live caller still owns all user copying; both paths retain the same request
+and descriptor lifetime rules. Pending event requests wake on readiness changes,
+with a one-tick fallback for deadlines and sources without a notifier.
+
 The upstream toolchain links `syscall-owned.o` and `fcntl.o`, while ordinary
 Alix targets retain `syscall.o`. The owned wrappers translate negative kernel
 errors to `-1` plus thread-local errno. `fcntl` supports F_GETFD, F_SETFD,

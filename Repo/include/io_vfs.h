@@ -68,6 +68,10 @@ typedef struct
  * File offset gates sleep; their wait predicates receive heap-owned handles. */
 void io_vfs_execute(io_request_t *request, io_service_result_t *result,
                      fd_retirement_queue_t *retirement);
+/* Registered request, bounded preparation guard. Only resident regular-file
+ * reads, seeks and metadata snapshots can complete here. False means no
+ * operation occurred and the same request must go to the protected worker. */
+bool io_vfs_try_execute(io_request_t *request, io_service_result_t *result);
 /* Caller holds a description reference; regular-file backend identity only. */
 bool io_vfs_description_valid(const fd_description_t *description);
 /* Caller pins the description. Key is borrowed only while that pin lives. */
@@ -76,6 +80,7 @@ const void *io_vfs_record_key(const fd_description_t *description);
 int io_vfs_record_base(const fd_description_t *description, int whence, int64_t *base);
 bool io_vfs_mapping_writable(const fd_description_t *description);
 paddr_t io_vfs_mapping_page(const fd_description_t *description, size_t index);
+bool io_vfs_mapping_private(const fd_description_t *description);
 fd_description_t *io_vfs_sync_bundle_create(size_t capacity);
 bool io_vfs_sync_bundle_add(fd_description_t *bundle, fd_description_t *mapping);
 /* Caller pins a regular-file description through use of this embedded state. */

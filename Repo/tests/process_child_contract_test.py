@@ -37,6 +37,8 @@ typedef struct {
 } alix_siginfo_t;
 typedef struct {bool terminal,quiescent,context_closed;uint32_t status,pid,kills;fd_table_t *files;} process_t;
 typedef struct {process_t *owner;uint64_t pid;bool complete;} process_creation_watch_t;
+typedef struct {uintptr_t base,thread_pointer;size_t size;} process_tls_allocation_t;
+static void process_discard_image(process_t *image){CHECK(!image);}
 typedef struct {fd_description_t *cwd;fd_table_t *files;uint32_t uid,gid;uint64_t parent_pid;} process_launch_context_t;
 typedef struct {void *buffer;size_t bytes;fd_description_t *description;} io_request_t;
 typedef struct {int64_t result;fd_description_t *description_owned;} io_service_result_t;

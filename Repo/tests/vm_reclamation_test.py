@@ -21,6 +21,8 @@ def main():
 #include <stdarg.h>
 #define CHECK(c) do { if (!(c)) { fprintf(stderr, "VM check failed line %d: %s\n", __LINE__, #c); exit(1); } } while (0)
 #define SMP_MAX_CPUS 4
+#define USER_PAGE_SWAPPED 4u
+#define USER_PAGE_BUSY 8u
 #define PAGE_SIZE_BYTES_LOCAL 4096UL
 #define USER_ADDRESS_SPACE_BASE USER_DEFAULT_POINTER_BASE
 #define USER_ADDRESS_SPACE_LIMIT USER_DEFAULT_POINTER_LIMIT
@@ -42,6 +44,7 @@ static void paging_restore_interrupts(uint64_t old) { flags=old; }
 static uint32_t smp_current_cpu_index(void) { CHECK(online_cpu[current_cpu]); return current_cpu; }
 static uint32_t smp_online_cpu_mask(void) { return 3; }
 static void smp_tlb_flush_mask(uint32_t mask) { CHECK(flags==0); sent_mask=mask; }
+static void process_vm_notify_tlb_completion(void) {}
 static void flush_local_tlb(void) {
     ++flushes;
     if (inject_request_during_flush) { ++g_tlb_request_generation; inject_request_during_flush=false; }
@@ -54,10 +57,12 @@ static void flush_local_tlb(void) {
     ):
         program += function_definition(paging, signature) + "\n"
     program += r'''
-typedef struct { bool locked; } spinlock_t;
+typedef struct { bool locked; uint32_t value; } spinlock_t;
 static unsigned held_locks;
 static bool require_reaper_guard;
 static uint64_t cpu_save_flags(void) { return flags; }
+static void cpu_cli(void) { flags=0; }
+static void cpu_restore_flags(uint64_t saved) { flags=saved; }
 static bool spinlock_preempt_disabled(void) { return held_locks != 0; }
 static void spinlock_preempt_disable(void) { ++held_locks; }
 static void spinlock_preempt_enable(void) { CHECK(held_locks); --held_locks; }
@@ -96,7 +101,7 @@ typedef struct process_user_region {
     struct process_retired_memory *retirement; struct process_user_region *next;
 } process_user_region_t;
 typedef struct {
-    uint64_t pid; paging_space_t address_space;
+    uint64_t pid; paging_space_t address_space; spinlock_t memory_lock;
     process_heap_l2_t **heap_page_dirs; size_t heap_dir_count;
     uintptr_t user_heap_base,user_heap_limit,user_heap_committed;
     uintptr_t user_stack_top,user_stack_committed; size_t user_stack_size,user_stack_page_count;
@@ -105,8 +110,13 @@ typedef struct {
 static bool process_vm_resolve_locked(process_t *p,uintptr_t a,bool write,uint8_t **host,size_t *available) {
     (void)p;(void)a;(void)write;(void)host;(void)available; return false;
 }
-static uint64_t process_memory_lock(process_t *p) { (void)p; ++held_locks; return flags; }
-static void process_memory_unlock(process_t *p,uint64_t f) { (void)p; (void)f; --held_locks; }
+static uint64_t process_memory_lock(process_t *p) {
+    CHECK(!p->memory_lock.value);p->memory_lock.value=1;++held_locks;
+    uint64_t saved=flags;flags=0;return saved;
+}
+static void process_memory_unlock(process_t *p,uint64_t f) {
+    CHECK(p->memory_lock.value && held_locks);p->memory_lock.value=0;--held_locks;flags=f;
+}
 '''
     start = memory.index("typedef struct\n{\n    paddr_t physical;")
     end = memory.index("uint64_t process_memory_lock", start)
@@ -120,7 +130,8 @@ static void process_memory_unlock(process_t *p,uint64_t f) { (void)p; (void)f; -
         "bool process_heap_release_from", "void process_free_heap_pages",
         "static void process_heap_rollback", "bool process_heap_commit_range",
         "static uintptr_t process_stack_bottom", "static bool process_stack_translate",
-        "bool process_memory_resolve_user_locked", "bool process_memory_read_user_u32", "static bool process_stack_commit_range",
+        "bool process_memory_resolve_user_locked", "static bool process_memory_read_user_u32_locked",
+        "bool process_memory_read_user_u32(", "bool process_memory_try_read_user_u32(", "static bool process_stack_commit_range",
     ):
         program += function_definition(memory, signature) + "\n"
     program += r'''
@@ -169,6 +180,19 @@ int main(void) {
     CHECK(!process_memory_read_user_u32(&p,p.user_heap_base+129,&value));
     CHECK(!process_memory_read_user_u32(&p,p.user_heap_base+7*4096,&value));
     CHECK(!process_memory_read_user_u32(&p,0,&value));
+    for(unsigned enabled=0;enabled<2;++enabled) {
+        flags=enabled?512:0;held_locks=2;p.memory_lock.value=1;
+        bool busy=false;value=0xfeed1234;
+        CHECK(!process_memory_try_read_user_u32(&p,p.user_heap_base+128,&value,&busy) && busy);
+        CHECK(value==0xfeed1234 && held_locks==2 && flags==(enabled?512u:0u) && p.memory_lock.value==1);
+        p.memory_lock.value=0;busy=true;
+        CHECK(process_memory_try_read_user_u32(&p,p.user_heap_base+128,&value,&busy) && !busy);
+        CHECK(value==0x12345678 && held_locks==2 && flags==(enabled?512u:0u) && !p.memory_lock.value);
+        value=0xfeed1234;
+        CHECK(!process_memory_try_read_user_u32(&p,p.user_heap_base+7*4096,&value,&busy) && !busy);
+        CHECK(value==0xfeed1234 && held_locks==2 && flags==(enabled?512u:0u) && !p.memory_lock.value);
+    }
+    held_locks=0;flags=512;
     fail_malloc=true;
     CHECK(!process_heap_release_from(&p,p.user_heap_base+4096));
     CHECK(unmap_calls==0 && process_heap_entry_present(p.heap_page_dirs[0],1));

@@ -511,7 +511,7 @@ thread_t *thread_create(process_t *process,
         spinlock_lock(&process->threads_lock);
         bool can_publish = __atomic_load_n(&process->lifetime_state, __ATOMIC_ACQUIRE) ==
                                PROCESS_LIFETIME_ALIVE &&
-                           process->state != PROCESS_STATE_ZOMBIE;
+                           process->state != PROCESS_STATE_ZOMBIE && !process->exec_owner_tid;
         if (can_publish && !is_idle)
         {
             thread->base_priority = process->default_priority;

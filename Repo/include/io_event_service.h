@@ -28,6 +28,9 @@ io_event_service_t *io_event_service_create(size_t capacity, io_event_handler_t 
 int io_event_service_request_create(io_event_service_t *service, size_t bytes,
                                     uint32_t uid, uint32_t gid, io_request_t **out);
 int io_event_service_submit(io_event_service_t *service, io_request_t *request);
+/* Publish a transport/IPC readiness transition after releasing its data locks.
+ * The hub has permanent storage and retains no socket, caller or service owner. */
+void io_event_service_notify(void);
 /* One persistent controller cancels pending requests and joins both workers.
  * Caller-held WAITER references must be released separately. External API users
  * must be quiescent before destroy; shutdown is not an external lifetime pin. */

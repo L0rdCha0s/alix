@@ -47,12 +47,15 @@ typedef struct {int64_t result;} io_request_status_t;
 static fd_description_t description={true,0};static io_request_t pending;
 static unsigned guard, live, submits, signals;
 static bool registered, fail_alloc, fail_create, fail_submit, cancelled;
+static bool fail_realloc;
+static uint64_t g_user_message_prepare_saved_bytes, g_user_message_empty_control_skips;
 static int64_t response=8;
 static const void *blocked;
 static const char *expected_payload;
 static void spinlock_preempt_disable(void){CHECK(!guard);++guard;}
 static void spinlock_preempt_enable(void){CHECK(guard==1&&!live);--guard;}
 static void *checked_calloc(size_t n,size_t bytes){CHECK(guard);if(fail_alloc)return NULL;void*p=calloc(n,bytes);CHECK(p);++live;return p;}
+static void *checked_realloc(void*p,size_t bytes){CHECK(guard&&p&&live);if(fail_realloc)return NULL;void*q=realloc(p,bytes);CHECK(q);return q;}
 static void checked_free(void*p){if(p){CHECK(guard&&live);--live;free(p);}}
 static bool user_copy_from_user(void*out,const void*in,size_t bytes){CHECK(guard);if((uintptr_t)in<4096||in==blocked)return false;memcpy(out,in,bytes);return true;}
 static bool user_copy_to_user(void*out,const void*in,size_t bytes){CHECK(guard);if((uintptr_t)out<4096||out==blocked)return false;memcpy(out,in,bytes);return true;}
@@ -62,6 +65,20 @@ static bool io_tcp_description_valid(fd_description_t*d){return d&&d->socket;}
 /* TCP-only dependency model; UDP is executed by native socket/Quinn tests. */
 static bool io_udp_description_valid(const fd_description_t*d){(void)d;return false;}
 static io_udp_state_t *io_udp_state(io_request_t*r){(void)r;CHECK(false);return NULL;}
+/* This fixture models TCP messages; native browser/socketpair acceptance owns
+ * SCM_RIGHTS behavior. Keep all local-only calls unreachable here. */
+typedef struct io_local_control io_local_control_t;
+#define IO_LOCAL_CONTROL_BYTES 272u
+static bool io_local_description_valid(const fd_description_t*d){(void)d;return false;}
+static void *process_fd_retirement_queue(void){CHECK(false);return NULL;}
+static void *process_current_fd_table(void){CHECK(false);return NULL;}
+static void *fd_description_context(fd_description_t*d){(void)d;CHECK(false);return NULL;}
+static void *io_request_cwd(io_request_t*r){(void)r;CHECK(false);return NULL;}
+static int io_local_control_create(void*q,fd_description_t**out){(void)q;(void)out;CHECK(false);return -EIO;}
+static int io_local_control_capture(io_local_control_t*c,void*t,const void*d,size_t n){(void)c;(void)t;(void)d;(void)n;CHECK(false);return -EIO;}
+static int io_local_control_install(io_local_control_t*c,void*t,size_t n,bool cloexec){(void)c;(void)t;(void)n;(void)cloexec;CHECK(false);return -EIO;}
+static const void *io_local_control_output(io_local_control_t*c,size_t*n,uint32_t*f){(void)c;(void)n;(void)f;CHECK(false);return NULL;}
+static void io_local_control_commit(io_local_control_t*c){(void)c;CHECK(false);}
 static int user_file_create(user_file_service_t kind,size_t bytes,fd_description_t*d,void*cwd,io_request_t**out){
     CHECK(kind==USER_TCP&&guard&&!registered&&!cwd&&bytes<=65536);
     if(fail_create){fd_description_put(d);return -ENOMEM;}
@@ -89,6 +106,7 @@ static int process_io_result_current(io_request_t**r,io_request_status_t*s){(voi
 static int process_io_finish_current(bool cancel){(void)cancel;CHECK(guard&&registered&&!live);registered=false;fd_description_put(pending.description);return 0;}
 static int process_signal_raise(int signal,int code){CHECK(!guard&&!registered&&!live&&signal==13&&!code);++signals;return 0;}
 #define calloc checked_calloc
+#define realloc checked_realloc
 #define free checked_free
 '''
 source = (ROOT / "src/kernel/io/user_file.c").read_text()
@@ -96,6 +114,7 @@ code += function_definition(source, "static int64_t user_file_message_finish(")
 code += function_definition(source, "static int64_t user_file_message(")
 code += r'''
 #undef calloc
+#undef realloc
 #undef free
 static void clean(void){CHECK(!guard&&!registered&&!live&&!description.refs);}
 int main(void){
@@ -113,6 +132,9 @@ int main(void){
     unsigned prior=submits;
     CHECK(user_file_message(100,3,NULL,0)==-EFAULT);clean();
     m->vector_count=1025;CHECK(user_file_message(100,3,m,0)==-EINVAL);clean();m->vector_count=3;
+    m->vector_count=5;fail_realloc=true;CHECK(user_file_message(100,3,m,0)==-ENOMEM);clean();fail_realloc=false;
+    /* Growing captures the original header and copies only the supplied table. */
+    m->vector_count=1024;CHECK(user_file_message(101,3,m,0)==8);clean();m->vector_count=3;prior=submits;
     m->vectors=1;CHECK(user_file_message(100,3,m,0)==-EFAULT);clean();m->vectors=(uintptr_t)v;
     v[2].base=1;CHECK(user_file_message(100,3,m,0)==-EFAULT);clean();v[2].base=(uintptr_t)b;
     v[0].length=INT64_MAX;v[2].length=1;

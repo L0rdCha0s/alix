@@ -7,6 +7,12 @@ from audio_stream_contract_test import ROOT, compile_and_run, function_definitio
 
 def main():
     production = (ROOT / "src/kernel/process/process_vm.c").read_text()
+    # Keep this existing transaction model scoped to VM ownership; disk workers
+    # and process cloning execute in the native guest.
+    production = production.split("bool process_vm_clone_locked(", 1)[0]
+    start = production.index("bool process_vm_fault_access(")
+    end = production.index("static bool vm_area_append(", start)
+    production = production[:start] + production[end:]
     production = "\n".join(line for line in production.splitlines() if not line.startswith("#include"))
     layout_defines = chr(10).join(line for line in (ROOT / "include/memory_layout.h").read_text().splitlines()
                                 if line.startswith("#define USER_DEFAULT_"))
@@ -25,6 +31,8 @@ def main():
 #define USER_HEAP_SIZE USER_DEFAULT_HEAP_SIZE
 #define USER_STUB_CODE_BASE (USER_DEFAULT_POINTER_LIMIT+1ULL-8192ULL)
 #define RFLAGS_IF_BIT 512UL
+#define USER_PAGE_SWAPPED ((paddr_t)4)
+#define USER_PAGE_BUSY ((paddr_t)8)
 #define SYSCALL_VM_PROT_NONE 0u
 #define SYSCALL_VM_PROT_READ 1u
 #define SYSCALL_VM_PROT_WRITE 2u
@@ -44,19 +52,25 @@ typedef uintptr_t paddr_t;
 typedef struct fd_description {unsigned refs;bool writable,bundle;size_t count;paddr_t pages[3];struct fd_description *children[3];} fd_description_t;
 typedef struct { unsigned unused; } paging_space_t;
 typedef struct { uint64_t generation; uint32_t cpu_mask; } paging_tlb_ticket_t;
+typedef struct { unsigned wakes, lock; void *head; } wait_queue_t;
+static void wait_queue_wait(wait_queue_t *,bool (*)(void *),void *);
+static void wait_queue_wake_all(wait_queue_t *);
 struct process_vm_area;
 struct process_vm_transaction;
 typedef struct {
     bool is_user; paging_space_t address_space;
     struct process_vm_area *vm_areas;
     struct process_vm_transaction *vm_pending;
+    paging_tlb_ticket_t vm_cow_ticket;
+    bool vm_pager_busy;
 } process_t;
 static process_t process = {.is_user=true};
 static uint64_t irq_flags=512, generation, acknowledged;
 static unsigned memory_locks, sleeps, physical_live, metadata_live;
 static int fail_metadata=-1, fail_physical=-1;
-static bool fail_prepare, destroy_during_wait, quiescent;
+static bool fail_prepare, destroy_during_wait, quiescent, complete_before_wait;
 static void (*during_wait)(void);
+static void (*after_wake)(wait_queue_t *);
 static jmp_buf canceled;
 typedef struct { uintptr_t address; paddr_t physical; unsigned protection; } fake_leaf_t;
 static fake_leaf_t leaves[8192];
@@ -68,6 +82,12 @@ static uintptr_t align_up_uintptr(uintptr_t x,uintptr_t n) { return (x+n-1)&~(n-
 static uintptr_t align_down_uintptr(uintptr_t x,uintptr_t n) { return x&~(n-1); }
 static size_t align_up_size(size_t x,size_t n) { return (x+n-1)&~(n-1); }
 static uint64_t cpu_save_flags(void) { return irq_flags; }
+static uint64_t spinlock_lock_irqsave(unsigned *lock) {
+    CHECK(!*lock);*lock=1;uint64_t flags=irq_flags;irq_flags=0;return flags;
+}
+static void spinlock_unlock_irqrestore(unsigned *lock,uint64_t flags) {
+    CHECK(*lock);*lock=0;irq_flags=flags;
+}
 static bool spinlock_preempt_disabled(void) { return memory_locks!=0; }
 static process_t *current_process_local(void) { return &process; }
 static uint64_t process_memory_lock(process_t *p) { CHECK(p==&process && !memory_locks); uint64_t old=irq_flags; irq_flags=0; ++memory_locks; return old; }
@@ -116,14 +136,30 @@ static paging_tlb_ticket_t paging_request_tlb_flush(paging_space_t *space) {
 }
 static bool paging_tlb_flush_complete(paging_tlb_ticket_t ticket) { return acknowledged>=ticket.generation; }
 void process_vm_destroy(process_t *p);
-static void process_sleep_ms(uint32_t ms) {
-    CHECK(ms==1 && memory_locks==0 && irq_flags==512 && process.vm_pending); ++sleeps;
+void process_vm_notify_tlb_completion(void);
+static void wait_queue_wake_all(wait_queue_t *queue) {
+    CHECK(!memory_locks && !queue->lock);++queue->wakes;queue->head=NULL;
+    if(after_wake)after_wake(queue);
+}
+static void wait_queue_wait(wait_queue_t *queue,bool (*predicate)(void *),void *context) {
+    CHECK(queue && memory_locks==0 && irq_flags==512 && process.vm_pending);
+    /* A completion before queue insertion is consumed by the predicate. */
+    if(complete_before_wait) {
+        complete_before_wait=false;acknowledged=generation;
+        process_vm_notify_tlb_completion();
+    }
+    if(predicate(context)) return;
+    queue->head=context;
+    ++sleeps;
     if(during_wait) { void (*callback)(void)=during_wait; during_wait=NULL; callback(); }
     if(destroy_during_wait) {
+        queue->head=NULL; /* Termination removes the thread before teardown. */
         destroy_during_wait=false; quiescent=true; process_vm_destroy(&process); quiescent=false;
         longjmp(canceled,1);
     }
     acknowledged=generation;
+    process_vm_notify_tlb_completion();
+    CHECK(predicate(context));
 }
 static fd_description_t *model_file_create(void) {return calloc(1,sizeof(fd_description_t));}
 static bool fd_description_get(fd_description_t *f) {CHECK(f && f->refs);++f->refs;return true;}
@@ -133,6 +169,7 @@ static void fd_description_put(fd_description_t *f) {
     else for(size_t i=0;i<f->count;++i)user_memory_free_page(f->pages[i]);
     free(f);
 }
+static bool io_vfs_mapping_private(const fd_description_t *f) {(void)f;return false;}
 static bool io_vfs_mapping_writable(const fd_description_t *f) {return f->writable;}
 static paddr_t io_vfs_mapping_page(const fd_description_t *f,size_t index) {return index<f->count?f->pages[index]:0;}
 static fd_description_t *io_vfs_sync_bundle_create(size_t capacity) {
@@ -150,6 +187,8 @@ static const uint32_t anonymous_flags=SYSCALL_VM_MAP_PRIVATE|SYSCALL_VM_MAP_ANON
 static void clear_process(void) {
     quiescent=true; process_vm_destroy(&process); quiescent=false;
     CHECK(!metadata_live && !physical_live && !memory_locks && irq_flags==512);
+    CHECK(!g_vm_tlb_pending_transactions);
+    CHECK(!g_vm_progress_queue.head && !g_vm_serial_queue.head);
     memset(leaves,0,sizeof(leaves)); leaf_count=0; physical_count=0;
     fail_metadata=fail_physical=-1; fail_prepare=false;
 }
@@ -177,7 +216,38 @@ static void touch_during_discard(void) {
     CHECK(fault(racing_address,true,false) && physical_live==2 && leaf(racing_address)->physical==fresh);
     *resolve(racing_address,true)=0x72;
 }
+static process_vm_transaction_t *replacement_on_wake;
+static void replace_journal_before_repark(wait_queue_t *queue) {
+    CHECK(queue==&g_vm_serial_queue && replacement_on_wake);
+    __atomic_store_n(&process.vm_pending,replacement_on_wake,__ATOMIC_RELEASE);
+    replacement_on_wake=NULL;after_wake=NULL;
+    CHECK(!vm_process_ready(&process));
+    queue->head=&process; /* The awakened waiter parks behind the new journal. */
+}
 int main(void) {
+    /* Serialization predicates must remain nonblocking under scheduler/queue
+     * serialization even when another CPU holds the process memory lock. */
+    process_vm_transaction_t *old=calloc(1,sizeof(*old)),*next=calloc(1,sizeof(*next));
+    CHECK(old && next);
+    __atomic_store_n(&process.vm_pending,old,__ATOMIC_RELEASE);
+    memory_locks=1;CHECK(!vm_process_ready(&process));memory_locks=0;
+    g_vm_serial_queue.head=&process;replacement_on_wake=next;
+    after_wake=replace_journal_before_repark;
+    uint64_t serial_wakes=g_vm_serial_wakes;
+    vm_finish(&process,old);
+    CHECK(process.vm_pending==next && g_vm_serial_queue.head && g_vm_serial_wakes==serial_wakes+1);
+    vm_finish(&process,next);
+    CHECK(!process.vm_pending && !g_vm_serial_queue.head && g_vm_serial_wakes==serial_wakes+2);
+    memory_locks=1;CHECK(vm_process_ready(&process));memory_locks=0;
+    CHECK(!metadata_live);
+    /* A TLB IPI interrupting a lock owner only records deferred progress. */
+    g_vm_progress_queue.head=&process;
+    g_vm_tlb_pending_transactions=1;memory_locks=1;
+    process_vm_notify_tlb_completion();
+    CHECK(g_vm_tlb_notify_pending && !g_vm_progress_queue.wakes);
+    memory_locks=0;process_vm_poll_tlb_completion();
+    CHECK(!g_vm_tlb_notify_pending && g_vm_progress_queue.wakes==1);
+    g_vm_tlb_pending_transactions=0;
     CHECK(process_vm_map(&process,0,0,3,anonymous_flags)==-22);
     CHECK(process_vm_map(&process,0,4096,0x80,anonymous_flags)==-22);
     CHECK(process_vm_map(&process,0,4096,3,2)==-22);
@@ -186,8 +256,26 @@ int main(void) {
     CHECK(process_vm_map(&process,0x100000000,4096,3,anonymous_flags|16)==-22);
     CHECK(process_vm_map(&process,0,SIZE_MAX,0,anonymous_flags)==-22);
     CHECK(metadata_live==0 && physical_live==0);
+    uint64_t map_generation=generation;
+    unsigned map_sleeps=sleeps;
     CHECK(process_vm_map(&process,0,4096,3,anonymous_flags & ~SYSCALL_VM_MAP_NORESERVE)>0);
-    CHECK(physical_live==1);
+    CHECK(physical_live==1 && !process.vm_pending);
+    CHECK(generation==map_generation && sleeps==map_sleeps && g_vm_fresh_maps==1);
+    clear_process();
+    /* Fixed commits over a PROT_NONE reservation have no old present leaf.
+     * Hiding a committed page still waits, then inaccessible reuse is safe. */
+    uintptr_t reserved=(uintptr_t)process_vm_map(&process,0,8192,0,anonymous_flags);
+    CHECK(process_vm_map(&process,reserved,4096,3,anonymous_flags|16)==(int64_t)reserved);
+    CHECK(generation==map_generation && sleeps==map_sleeps);
+    CHECK(process_vm_protect(&process,reserved,4096,0)==0);
+    CHECK(generation==map_generation+1 && sleeps==map_sleeps+1);
+    map_generation=generation;map_sleeps=sleeps;
+    CHECK(process_vm_map(&process,reserved,4096,3,anonymous_flags|16)==(int64_t)reserved);
+    CHECK(generation==map_generation && sleeps==map_sleeps);
+    complete_before_wait=true;
+    CHECK(process_vm_protect(&process,reserved,4096,1)==0);
+    CHECK(!complete_before_wait && generation==map_generation+1 && sleeps==map_sleeps);
+    map_generation=generation;
     clear_process();
     /* Advisory hints must never make a legal nonfixed reservation fail. */
     const uintptr_t hints[]={1,USER_HEAP_BASE,USER_STUB_CODE_BASE,UINTPTR_MAX};
@@ -206,6 +294,7 @@ int main(void) {
     size_t huge=12ULL<<30;
     CHECK(process_vm_map(&process,high,huge,0,anonymous_flags)==(int64_t)high);
     CHECK(!process.vm_areas->pages && physical_live==0 && leaf_count==0);
+    CHECK(generation==map_generation && sleeps==map_sleeps && !process.vm_pending);
     CHECK(process_vm_protect(&process,high,4096,3)==0);
     CHECK(process_vm_protect(&process,high+huge-4096,4096,3)==0);
     CHECK(physical_live==2 && resolve(high,true) && resolve(high+huge-4096,true));

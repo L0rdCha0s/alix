@@ -1120,6 +1120,25 @@ typedef struct
     alixfs_load_node_t nodes[];
 } alixfs_load_state_t;
 
+/* The first pass owns unlinked nodes. A failed mount must release those
+ * allocations here: clearing mount_point cannot reach them yet. */
+static void alixfs_load_abort(alixfs_mount_t *fs, alixfs_load_state_t *load)
+{
+    size_t nodes = 0, bytes = 0;
+    for (uint32_t id = 0; id < fs->header.node_capacity; ++id)
+    {
+        vfs_node_t *node = load->nodes[id].node;
+        if (!node || id == fs->header.root_id) continue;
+        ++nodes;
+        bytes += node->capacity;
+        free(node->data);
+        free(node->name);
+        free(node);
+    }
+    free(load);
+    serial_printf("[alixfs] mount aborted released_nodes=%zu released_file_bytes=%zu", nodes, bytes);
+}
+
 static bool alixfs_mount_read(alixfs_mount_t *fs, alixfs_load_state_t *load,
                               uint64_t offset, void *buffer, size_t length)
 {
@@ -1235,13 +1254,13 @@ bool alixfs_mount_load(alixfs_mount_t *fs, vfs_mount_t *mount)
         uint8_t *buffer = (uint8_t *)malloc(node_header_size);
         if (!buffer)
         {
-            free(load);
+            alixfs_load_abort(fs, load);
             return false;
         }
         if (!alixfs_mount_read(fs, load, entry->offset, buffer, node_header_size))
         {
             free(buffer);
-            free(load);
+            alixfs_load_abort(fs, load);
             return false;
         }
         alixfs_node_disk_v2_t disk_common;
@@ -1289,27 +1308,32 @@ bool alixfs_mount_load(alixfs_mount_t *fs, vfs_mount_t *mount)
         size_t content_end;
         if (__builtin_add_overflow(node_header_size, (size_t)disk_common.name_len, &content_end) ||
             __builtin_add_overflow(content_end, (size_t)disk_common.data_len, &content_end) || content_end > entry->length)
-        { free(buffer); free(load); return false; }
+        { free(buffer); alixfs_load_abort(fs, load); return false; }
         size_t metadata_bytes = node_header_size + disk_common.name_len;
         uint8_t *metadata = realloc(buffer, metadata_bytes + sizeof(alixfs_mode_disk_t));
-        if (!metadata) { free(buffer); free(load); return false; }
+        if (!metadata) { free(buffer); alixfs_load_abort(fs, load); return false; }
         buffer = metadata;
         if (entry->offset > UINT64_MAX - content_end ||
             (disk_common.name_len && !alixfs_mount_read(fs, load, entry->offset + node_header_size,
                 buffer + node_header_size, disk_common.name_len)))
-        { free(buffer); free(load); return false; }
+        { free(buffer); alixfs_load_abort(fs, load); return false; }
         uint32_t permissions = disk_common.type == VFS_NODE_FILE ? 0666u :
                                disk_common.type == VFS_NODE_BLOCK ? 0600u : 0777u;
         if (entry->length != content_end)
         {
             if (entry->length - content_end != sizeof(alixfs_mode_disk_t))
-            { free(buffer); free(load); return false; }
+            { free(buffer); alixfs_load_abort(fs, load); return false; }
             if (!alixfs_mount_read(fs, load, entry->offset + content_end,
                                      buffer + metadata_bytes, sizeof(alixfs_mode_disk_t)))
-            { free(buffer); free(load); return false; }
+            { free(buffer); alixfs_load_abort(fs, load); return false; }
             const alixfs_mode_disk_t *mode = (const void *)(buffer + metadata_bytes);
             if (mode->magic != ALIXFS_MODE_MAGIC || mode->version != 1 || (mode->permissions & ~0777u))
-            { free(buffer); free(load); return false; }
+            {
+                serial_printf("[alixfs] invalid mode trailer node=%u offset=0x%llX magic=0x%llX version=%u permissions=0x%X",
+                    id, (unsigned long long)(entry->offset + content_end),
+                    (unsigned long long)mode->magic, mode->version, mode->permissions);
+                free(buffer); alixfs_load_abort(fs, load); return false;
+            }
             permissions = mode->permissions;
         }
         vfs_node_t *node = load->nodes[id].node;
@@ -1319,7 +1343,7 @@ bool alixfs_mount_load(alixfs_mount_t *fs, vfs_mount_t *mount)
             if (!node)
             {
                 free(buffer);
-                free(load);
+                alixfs_load_abort(fs, load);
                 return false;
             }
             load->nodes[id].node = node;
@@ -1343,7 +1367,7 @@ bool alixfs_mount_load(alixfs_mount_t *fs, vfs_mount_t *mount)
             {
                 spinlock_unlock(&node->data_lock);
                 free(buffer);
-                free(load);
+                alixfs_load_abort(fs, load);
                 return false;
             }
             memcpy(name, buffer + offset, disk_common.name_len);
@@ -1364,7 +1388,7 @@ bool alixfs_mount_load(alixfs_mount_t *fs, vfs_mount_t *mount)
             {
                 spinlock_unlock(&node->data_lock);
                 free(buffer);
-                free(load);
+                alixfs_load_abort(fs, load);
                 return false;
             }
             /* Files are not linked into the mount until the second pass.
@@ -1388,7 +1412,7 @@ bool alixfs_mount_load(alixfs_mount_t *fs, vfs_mount_t *mount)
             if (!read_ok)
             {
                 spinlock_unlock(&node->data_lock);
-                free(buffer); free(load); return false;
+                free(buffer); alixfs_load_abort(fs, load); return false;
             }
             node->size = disk_common.data_len;
             node->data[disk_common.data_len] = '\0';

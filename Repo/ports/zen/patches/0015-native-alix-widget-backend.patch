@@ -633,7 +633,7 @@
 +#endif
 --- /dev/null
 +++ b/widget/alix/nsLookAndFeel.cpp
-@@ -0,0 +1,209 @@
+@@ -0,0 +1,219 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -652,8 +652,18 @@
 +
 +nsresult nsLookAndFeel::NativeGetColor(ColorID aID, ColorScheme aScheme,
 +                                       nscolor &aResult) {
-+  aResult = GetStandinForNativeColor(aID, aScheme);
-+  return NS_OK;
++  // The stand-in palette has no themed scrollbar colors and returns white
++  // for unknown IDs. Let ScrollbarDrawing select its contrast-aware defaults.
++  switch (aID) {
++    case ColorID::ThemedScrollbar:
++    case ColorID::ThemedScrollbarThumb:
++    case ColorID::ThemedScrollbarThumbHover:
++    case ColorID::ThemedScrollbarThumbActive:
++      return NS_ERROR_NOT_AVAILABLE;
++    default:
++      aResult = GetStandinForNativeColor(aID, aScheme);
++      return NS_OK;
++  }
 +}
 +
 +nsresult nsLookAndFeel::NativeGetInt(IntID aID, int32_t &aResult) {
@@ -922,7 +932,7 @@
 +#endif
 --- /dev/null
 +++ b/widget/alix/nsWindow.cpp
-@@ -0,0 +1,730 @@
+@@ -0,0 +1,740 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -1200,7 +1210,17 @@
 +}
 +nsresult nsWindow::SetTitle(const nsAString &title) {
 +  auto utf8 = NS_ConvertUTF16toUTF8(title);
-+  size_t bytes = std::min<size_t>(utf8.Length(), sizeof(mControl.title) - 1);
++  size_t bytes = std::min<size_t>(utf8.Length(), USER_ATK_TITLE_TEXT_MAX - 1);
++  while (bytes && bytes < utf8.Length() &&
++         (static_cast<unsigned char>(utf8[bytes]) & 0xc0) == 0x80)
++    --bytes;
++  int result = sys_ui_set_title(mHandle, utf8.get(), bytes);
++  if (!result)
++    return NS_OK;
++  // Preserve compatibility with kernels predating the length-aware opcode.
++  if (result != -EINVAL && result != -ENOTSUP && result != -ENOSYS)
++    return NS_ERROR_FAILURE;
++  bytes = std::min<size_t>(utf8.Length(), sizeof(mControl.title) - 1);
 +  while (bytes && bytes < utf8.Length() &&
 +         (static_cast<unsigned char>(utf8[bytes]) & 0xc0) == 0x80)
 +    --bytes;

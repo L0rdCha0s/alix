@@ -138,6 +138,13 @@ ssize_t vfs_readlink_snapshot(vfs_node_t *cwd, const char *path, void *buffer,
 /* Recheck callback exclusion under data_lock on every operation, so a later
  * vfs_set_file_callbacks cannot execute a callback with service identity. */
 ssize_t vfs_read_data_at(vfs_node_t *file, size_t offset, void *buffer, size_t count);
+/* Bounded resident-file steps. Caller retains the node and holds a preparation
+ * guard. A false return changes no data, offset, metadata or output: use the
+ * protected worker instead. No callback, allocation, persistence or wait. */
+bool vfs_try_read_data_at(vfs_node_t *file, size_t offset, void *buffer, size_t count,
+                          ssize_t *result);
+bool vfs_try_stat_data(vfs_node_t *file, vfs_stat_snapshot_t *output);
+bool vfs_try_node_stat_info(vfs_node_t *file, vfs_stat_info_t *output);
 ssize_t vfs_write_data_at(vfs_node_t *file, size_t offset, const void *data, size_t count);
 /* Select EOF and commit the complete write under the same node data lock.
  * position is caller-owned synchronous state, never retained by the VFS. */
@@ -192,6 +199,8 @@ bool vfs_format(block_device_t *device);
 bool vfs_mount_device(block_device_t *device, vfs_node_t *mount_point);
 bool vfs_is_mount_point(const vfs_node_t *node);
 bool vfs_sync_all(void);
+/* Final shutdown checkpoint; stops subsequent backend writes. Thaws on failure. */
+bool vfs_prepare_shutdown(void);
 bool vfs_sync_dirty(void);
 bool vfs_flush_node(vfs_node_t *node);
 /* Snapshot current mounts; returns total count, fills up to max entries. */

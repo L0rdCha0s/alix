@@ -86,11 +86,28 @@ socket naming/listening and collection of unreachable descriptor-passing cycles
 remain separate work. The actual Gecko parent now passes socket-pair creation
 and launches its native socket subprocess; full browser startup remains ongoing.
 
-Nonblocking local reads/writes and message operations execute their bounded
-ring-buffer step in the calling syscall. Their registered request is completed
+Nonblocking TCP, UDP and local reads/writes and message operations execute their
+bounded transport step in the calling syscall. Their registered request is completed
 without an executor round trip; payloads, descriptor references and failed-copy
 rollback still use the same request-owned records and deferred cleanup. Blocking
-operations and poll/select continue to use the readiness executor.
+operations use the readiness executor. Poll/select first checks readiness in the
+calling syscall and submits only when it must wait. The executor wakes promptly
+on TCP, UDP and local readiness transitions, with a one-tick timeout fallback for
+deadlines and other descriptor backends. A permanent sequence-numbered wait hub
+prevents a transition between a readiness scan and sleeping from being lost;
+transport notifications run after releasing transport locks.
+
+TCP write readiness uses remaining retained-payload and remote-window capacity,
+including space available while earlier bytes await acknowledgement. Short sends
+are bounded to that capacity and rechecked under the transport lock. Appending
+data preserves the oldest outstanding retransmission deadline and retry backoff;
+the retention limit remains one MSS. Each event-executor scan also stops taking
+the shared request-queue lock after its first empty result. A later submission
+changes the readiness sequence and starts another scan.
+
+Message preparation reserves four vector headers for ordinary calls and grows
+only to the supplied vector count. Empty local sends omit ancillary ownership
+records; receives retain the same SCM_RIGHTS capture and rollback owners.
 
 The initial IPv4 DNS/netdb layer now has native lookup, ownership and cancellation
 evidence; see [resolver.md](resolver.md) for capability and verification limits.

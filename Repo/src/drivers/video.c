@@ -472,7 +472,7 @@ static void cursor_draw_overlay_to(volatile uint32_t *dst_fb, uint32_t page_inde
     }
 
     page_index &= 1u;
-    for (int row = 0; row < CURSOR_H; ++row)
+    for (int row = 0; (!cursor_under_valid || cursor_x != prev_cursor_x || cursor_y != prev_cursor_y) && row < CURSOR_H; ++row)
     {
         int dst_y = cursor_y + row;
         if ((unsigned)dst_y >= (unsigned)g_video_height) continue;
@@ -555,8 +555,8 @@ static void cursor_draw_overlay(void)
     /* clamp */
     if (cursor_x < 0) cursor_x = 0;
     if (cursor_y < 0) cursor_y = 0;
-    if (cursor_x > g_video_width  - CURSOR_W)  cursor_x = g_video_width  - CURSOR_W;
-    if (cursor_y > g_video_height - CURSOR_H)  cursor_y = g_video_height - CURSOR_H;
+    if (cursor_x >= g_video_width) cursor_x = g_video_width - 1;
+    if (cursor_y >= g_video_height) cursor_y = g_video_height - 1;
 
     cursor_draw_overlay_to(framebuffer, framebuffer_page);
     if (framebuffer_pageflip)
@@ -1202,7 +1202,30 @@ static void video_flush_rects_to_fb(const video_dirty_rect_t *rects, int count, 
         {
             volatile uint32_t *dst = &dst_fb[y * g_framebuffer_pitch + r->x0];
             uint32_t *src = &backbuffer[y * g_video_width + r->x0];
-            fb_memcpy_wc((void *)dst, src, row_bytes);
+            int left = cursor_x > r->x0 ? cursor_x : r->x0;
+            int right = cursor_x + CURSOR_W < r->x1 ? cursor_x + CURSOR_W : r->x1;
+            if (!video_active || !cursor_under_valid || cursor_x != prev_cursor_x || cursor_y != prev_cursor_y ||
+                y < cursor_y || y >= cursor_y + CURSOR_H || left >= right)
+            {
+                fb_memcpy_wc((void *)dst, src, row_bytes);
+                continue;
+            }
+            /* Keep the cursor in the pixels being published, including on
+             * the next page before flipping. Never expose a cursor-less frame. */
+            fb_memcpy_wc((void *)dst, src, (size_t)(left - r->x0) * sizeof(*src));
+            uint32_t page = framebuffer_pageflip && dst_fb == framebuffer_page_ptr(1) ? 1u : 0u;
+            int row = y - cursor_y;
+            const char *shape = cursor_shape_active ? cursor_shape_active[row] : cursor_shape_arrow[row];
+            for (int x = left; x < right; ++x)
+            {
+                uint32_t color = src[x - r->x0];
+                cursor_under[page][row * CURSOR_W + x - cursor_x] = g_gop_backend ? framebuffer_pack(color) : color;
+                char pixel = shape[x - cursor_x];
+                if (pixel != '.') color = pixel == 'X' ? cursor_color_primary() : cursor_color_shadow();
+                dst[x - r->x0] = g_gop_backend ? framebuffer_pack(color) : color;
+            }
+            fb_memcpy_wc((void *)(dst + right - r->x0), src + right - r->x0,
+                         (size_t)(r->x1 - right) * sizeof(*src));
         }
     }
 }
@@ -1284,8 +1307,8 @@ static bool video_perform_refresh_locked(bool full_refresh_prepared)
         return false;
     }
 
-    /* Erase cursor overlay before modifying/flushing the framebuffer. */
-    cursor_restore_background();
+    /* Rendering changes the backbuffer. Publication composes the cursor into
+     * its dirty rows, keeping the old displayed cursor alive while we draw. */
 
     if (do_full)
     {
@@ -1488,7 +1511,8 @@ void video_request_refresh_window(atk_widget_t *window)
     }
 
     spinlock_lock(&g_video_lock);
-    refresh_window = window;
+    if (refresh_window && refresh_window != window) refresh_requested_full = true;
+    else refresh_window = window;
     refresh_requested = true;
     spinlock_unlock(&g_video_lock);
 }
@@ -1541,8 +1565,12 @@ void video_on_mouse_event(int dx, int dy, bool left_pressed, bool right_pressed)
     {
         return;
     }
-
     spinlock_lock(&g_video_render_lock);
+    if (!dx && !dy && left_pressed == last_left_down && right_pressed == last_right_down)
+    {
+        spinlock_unlock(&g_video_render_lock);
+        return;
+    }
 
     bool dragging = atk_drag_active();
     spinlock_lock(&g_video_lock);
@@ -1551,12 +1579,6 @@ void video_on_mouse_event(int dx, int dy, bool left_pressed, bool right_pressed)
         refresh_window = NULL;
         refresh_requested_full = false;
         refresh_requested = false;
-    }
-    else if (refresh_window)
-    {
-        refresh_requested_full = true;
-        refresh_window = NULL;
-        refresh_requested = true;
     }
     spinlock_unlock(&g_video_lock);
 

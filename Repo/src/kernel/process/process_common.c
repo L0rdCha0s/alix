@@ -1392,9 +1392,16 @@ static void thread_free_resources(thread_t *thread)
     }
 
     process_signal_thread_cleanup(thread);
+    free(thread->vm_fault_state);
+    thread->vm_fault_state = NULL;
     fd_description_put(thread->vm_file_prepare);
     thread->vm_file_prepare = NULL;
     process_t *owner_proc = thread->process;
+    if (owner_proc && thread->vm_syscall_active)
+    {
+        thread->vm_syscall_active = false;
+        __atomic_sub_fetch(&owner_proc->vm_syscall_users, 1u, __ATOMIC_ACQ_REL);
+    }
     bool owner_valid = false;
     if (owner_proc)
     {
@@ -1404,6 +1411,7 @@ static void thread_free_resources(thread_t *thread)
 
     if (owner_valid)
     {
+        process_futex_cancel_wait_locked(thread);
         spinlock_lock(&owner_proc->threads_lock);
         if (owner_proc->current_thread == thread)
         {

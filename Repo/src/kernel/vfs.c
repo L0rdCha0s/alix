@@ -666,6 +666,7 @@ static vfs_node_t *vfs_alloc_node(vfs_node_type_t type)
 
 static bool vfs_node_allows_mutation(const vfs_node_t *node)
 {
+    if (node && node->mount && __atomic_load_n(&node->mount->shutdown_frozen, __ATOMIC_ACQUIRE)) return false;
     if (!node)
     {
         return false;
@@ -795,10 +796,43 @@ static vfs_node_t *vfs_find_child(vfs_node_t *parent, const char *name)
     return NULL;
 }
 
+/* Destructors run under namespace/data locks and cannot wait for writeback.
+ * Transfer only the dead node's disk identity; release its large buffers now.
+ * The mount gate serializes reuse of its extent with payload IO and commit. */
+static bool vfs_retire_disk_node(vfs_node_t *node)
+{
+    vfs_mount_t *mount = node->mount;
+    if (!mount || !mount->backend || mount->mount_point == node || node->disk_id == UINT32_MAX)
+        return false;
+    spinlock_lock(&mount->dirty_lock);
+    node->retired_next = mount->retired_head;
+    mount->retired_head = node;
+    mount->dirty = true;
+    ++mount->dirty_seq;
+    spinlock_unlock(&mount->dirty_lock);
+    storage_request_flush();
+    return true;
+}
+
+/* Caller owns the mount writeback gate, never a node or namespace lock. */
+static void vfs_release_retired_nodes(vfs_mount_t *mount)
+{
+    spinlock_lock(&mount->dirty_lock);
+    vfs_node_t *pending = mount->retired_head;
+    mount->retired_head = NULL;
+    spinlock_unlock(&mount->dirty_lock);
+    while (pending)
+    {
+        vfs_node_t *node = pending;
+        pending = node->retired_next;
+        alixfs_mount_release_node(mount->backend, node);
+        free(node);
+    }
+}
+
 static void vfs_free_subtree(vfs_node_t *node)
 {
     if (!node) return;
-    vfs_mount_t *mount = node->mount;
     vfs_node_t *child = node->first_child;
     while (child)
     {
@@ -817,15 +851,11 @@ static void vfs_free_subtree(vfs_node_t *node)
     node->data = NULL;
     node->size = 0;
     node->capacity = 0;
-    if (mount && mount->backend && mount->mount_point != node)
-    {
-        alixfs_mount_release_node(mount->backend, node);
-    }
     vfs_unlock_node_data(node);
     if (name) free(name);
     if (data) free(data);
     if (node->fifo) io_pipe_named_destroy(node->fifo);
-    free(node);
+    if (!vfs_retire_disk_node(node)) free(node);
 }
 
 /* Ensure file has room for at least `need` bytes (+1 for trailing NUL). */
@@ -1208,6 +1238,11 @@ static bool vfs_mount_flush_single(vfs_node_t *node)
     {
         return false;
     }
+    if (__atomic_load_n(&mount->shutdown_frozen, __ATOMIC_ACQUIRE))
+    {
+        vfs_sync_lock_release(mount);
+        return false;
+    }
     /* Persist new directory ancestors first so a freshly downloaded file has
      * valid parent IDs on the next mount. Retain the chain across yielding IO. */
     size_t count = 0;
@@ -1247,6 +1282,7 @@ static bool vfs_mount_flush_single(vfs_node_t *node)
     }
     if (ok)
     {
+        vfs_release_retired_nodes(mount);
         ok = alixfs_mount_commit(mount->backend);
     }
     if (ok)
@@ -2521,6 +2557,90 @@ ssize_t vfs_read_data_at(vfs_node_t *file, size_t offset, void *buffer, size_t c
     return vfs_read_at_internal(file, offset, buffer, count, false);
 }
 
+/* Do not use vfs_lock_node_data here: it pulls shared writable mappings and
+ * can dirty metadata. The caller already suppresses preemption for its owned
+ * request, and a busy lock must send that request to its protected worker. */
+static bool vfs_try_lock_regular_data(vfs_node_t *file)
+{
+    if (!file || !spinlock_preempt_disabled()) return false;
+    uint32_t expected = 0;
+    if (!__atomic_compare_exchange_n(&file->data_lock.value, &expected, 1, false,
+                                      __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) return false;
+    if (file->type != VFS_NODE_FILE || file->read_cb || file->write_cb || file->mapped_writers)
+    {
+        spinlock_unlock_raw(&file->data_lock);
+        return false;
+    }
+    return true;
+}
+
+bool vfs_try_read_data_at(vfs_node_t *file, size_t offset, void *buffer, size_t count,
+                          ssize_t *result)
+{
+    if (!result || !buffer || count > 65536u || !vfs_try_lock_regular_data(file)) return false;
+    if (offset >= file->size || !count)
+    {
+        *result = 0;
+        spinlock_unlock_raw(&file->data_lock);
+        return true;
+    }
+    if (!file->data || file->capacity < file->size)
+    {
+        spinlock_unlock_raw(&file->data_lock);
+        return false;
+    }
+    uint64_t now = vfs_now_seconds();
+    if (file->atime != now && file->mount && file->mount->supports_times &&
+        (file->atime <= file->mtime || file->atime <= file->ctime ||
+         now < file->atime || now - file->atime >= 86400))
+    {
+        /* Fall back before copying or changing the descriptor offset. The
+         * worker owns the relatime update and dirty-queue publication. */
+        spinlock_unlock_raw(&file->data_lock);
+        return false;
+    }
+    size_t bytes = file->size - offset;
+    if (bytes > count) bytes = count;
+    memcpy(buffer, file->data + offset, bytes);
+    file->atime = now;
+    *result = (ssize_t)bytes;
+    spinlock_unlock_raw(&file->data_lock);
+    return true;
+}
+
+bool vfs_try_stat_data(vfs_node_t *file, vfs_stat_snapshot_t *output)
+{
+    if (!output || !vfs_try_lock_regular_data(file)) return false;
+    *output = (vfs_stat_snapshot_t){ .size_bytes = file->size, .type = file->type,
+        .atime = file->atime, .mtime = file->mtime, .ctime = file->ctime };
+    spinlock_unlock_raw(&file->data_lock);
+    return true;
+}
+
+bool vfs_try_node_stat_info(vfs_node_t *file, vfs_stat_info_t *output)
+{
+    if (!file || !output || !spinlock_preempt_disabled()) return false;
+    uint32_t expected = 0;
+    if (!__atomic_compare_exchange_n(&g_vfs_tree_lock.value, &expected, 1, false,
+                                      __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) return false;
+    uint64_t inode = file->object_id;
+    uint64_t device = file->mount ? file->mount->mount_point->object_id : 0;
+    if (!inode || (file->mount && !device) || !vfs_try_lock_regular_data(file))
+    {
+        vfs_tree_lock_release();
+        return false;
+    }
+    *output = (vfs_stat_info_t){
+        .metadata = { .size_bytes = file->size, .type = file->type,
+                      .atime = file->atime, .mtime = file->mtime, .ctime = file->ctime },
+        .device = device + 1, .inode = inode, .links = file == root || file->parent ? 1 : 0,
+        .uid = file->uid, .gid = file->gid, .permissions = file->permissions,
+    };
+    spinlock_unlock_raw(&file->data_lock);
+    vfs_tree_lock_release();
+    return true;
+}
+
 
 /*
  * Write bytes to a regular file at an explicit offset.
@@ -3434,6 +3554,7 @@ static bool vfs_mount_writeback(vfs_mount_t *mount, bool force)
     {
         return true;
     }
+    if (__atomic_load_n(&mount->shutdown_frozen, __ATOMIC_ACQUIRE)) return !force;
     if (!vfs_mount_collect_mapped(mount)) return false;
     bool do_flush = force;
     bool force_all = false;
@@ -3467,6 +3588,11 @@ static bool vfs_mount_writeback(vfs_mount_t *mount, bool force)
     {
         return false;
     }
+    if (__atomic_load_n(&mount->shutdown_frozen, __ATOMIC_ACQUIRE))
+    {
+        vfs_sync_lock_release(mount);
+        return !force;
+    }
     spinlock_lock(&mount->dirty_lock);
     bool queued = mount->writeback_head != NULL;
     spinlock_unlock(&mount->dirty_lock);
@@ -3476,6 +3602,7 @@ static bool vfs_mount_writeback(vfs_mount_t *mount, bool force)
     if (queued && !vfs_mount_flush_queued(mount, force)) ok = false;
     if (ok && mount->backend)
     {
+        vfs_release_retired_nodes(mount);
         ok = alixfs_mount_commit(mount->backend);
     }
     if (ok && force && mount->device)
@@ -3647,6 +3774,44 @@ bool vfs_sync_all(void)
         }
     }
     return ok;
+}
+
+bool vfs_prepare_shutdown(void)
+{
+    vfs_tree_lock_acquire();
+    vfs_mount_t *head = mounts;
+    vfs_tree_lock_release();
+    for (vfs_mount_t *mount = head; mount; mount = mount->next)
+    {
+        bool frozen = false;
+        for (unsigned attempt = 0; attempt < 16 && !frozen; ++attempt)
+        {
+            if (!vfs_mount_writeback(mount, true)) break;
+            vfs_sync_lock_acquire(mount);
+            spinlock_lock(&mount->dirty_lock);
+            bool pending = mount->dirty || mount->writeback_head || mount->retired_head;
+            if (!pending)
+            {
+                __atomic_store_n(&mount->shutdown_frozen, true, __ATOMIC_RELEASE);
+                frozen = true;
+            }
+            spinlock_unlock(&mount->dirty_lock);
+            vfs_sync_lock_release(mount);
+        }
+        if (!frozen)
+        {
+            /* A failed shutdown leaves the running system writable. */
+            for (vfs_mount_t *thaw = head; thaw; thaw = thaw->next)
+            {
+                vfs_sync_lock_acquire(thaw);
+                __atomic_store_n(&thaw->shutdown_frozen, false, __ATOMIC_RELEASE);
+                vfs_mark_mount_dirty(thaw);
+                vfs_sync_lock_release(thaw);
+            }
+            return false;
+        }
+    }
+    return true;
 }
 
 /*

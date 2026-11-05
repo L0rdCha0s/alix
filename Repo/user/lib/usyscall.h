@@ -33,6 +33,7 @@ int sys_ui_poll_event_timeout(uint32_t handle, user_atk_event_t *event, uint32_t
 int sys_ui_close(uint32_t handle);
 int sys_ui_capture(uint32_t handle, uint32_t flags);
 int sys_ui_control(uint32_t handle, uint32_t operation, user_atk_window_control_t *control);
+int sys_ui_set_title(uint32_t handle, const char *title, size_t length);
 int sys_yield(void);
 int sys_sleep_ms(uint32_t ms);
 int sys_sigaction(int number, const alix_sigaction_t *action, alix_sigaction_t *old, size_t size);

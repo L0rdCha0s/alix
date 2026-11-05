@@ -19,6 +19,7 @@
 #include "atk/atk_font.h"
 #ifdef KERNEL_BUILD
 #include "user_atk_host.h"
+#include "atk_menu_bar.h"
 #endif
 
 static inline bool pointer_is_canonical(const void *ptr)
@@ -557,22 +558,27 @@ void atk_window_ensure_inside(atk_widget_t *window)
 
     int screen_w = video_screen_width();
     int screen_h = video_screen_height();
+    int min_y = 0;
+#ifdef KERNEL_BUILD
+    min_y = atk_menu_bar_height(atk_state_get());
+    if (atk_window_is_chrome_visible(window)) min_y += ATK_WINDOW_BORDER;
+#endif
     if (window->width > screen_w)
     {
         window->width = screen_w;
     }
-    if (window->height > screen_h)
+    if (window->height > screen_h - min_y)
     {
-        window->height = screen_h;
+        window->height = screen_h - min_y;
     }
 
     int max_x = screen_w - window->width;
     int max_y = screen_h - window->height;
 
     if (window->x < 0) window->x = 0;
-    if (window->y < 0) window->y = 0;
     if (window->x > max_x) window->x = max_x;
     if (window->y > max_y) window->y = max_y;
+    if (window->y < min_y) window->y = min_y;
 }
 
 bool atk_window_supports_resize(const atk_widget_t *window)
@@ -757,6 +763,8 @@ void atk_window_set_title_text(atk_widget_t *window, const char *title)
         {
             priv->title[i] = title[i];
         }
+        /* Do not leave a partial UTF-8 code point at the storage boundary. */
+        while (i && ((unsigned char)title[i] & 0xC0u) == 0x80u) --i;
     }
     priv->title[i] = '\0';
     priv->surface_valid = false;
@@ -1267,7 +1275,11 @@ static void window_draw_internal(const atk_state_t *state, const atk_widget_t *w
                         atk_color_tint(theme->window_border, 12));
 
         int title_baseline = atk_font_baseline_for_rect(window->y, ATK_WINDOW_TITLE_HEIGHT);
-        atk_rect_t clip = { window->x, window->y, window->width, ATK_WINDOW_TITLE_HEIGHT };
+        int title_right = window->x + window->width - ATK_WINDOW_TITLE_PADDING_X;
+        if (priv->close_button)
+            title_right = window->x + priv->close_button->x - 4;
+        atk_rect_t clip = { window->x + ATK_WINDOW_TITLE_PADDING_X, window->y,
+            title_right - window->x - ATK_WINDOW_TITLE_PADDING_X, ATK_WINDOW_TITLE_HEIGHT };
         atk_font_draw_string_clipped(window->x + ATK_WINDOW_TITLE_PADDING_X,
                                      title_baseline,
                                      priv->title,

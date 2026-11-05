@@ -3,6 +3,7 @@
 #include "atk_internal.h"
 #include "libc.h"
 #include "ttf.h"
+#include "font.h"
 #include "utf8.h"
 #include "video.h"
 
@@ -10,6 +11,7 @@
 #define ATK_FONT_ENABLE_TTF 1
 #define ATK_FONT_LOAD_FROM_VFS 1
 #include "vfs.h"
+#include "spinlock.h"
 #else
 #define ATK_FONT_ENABLE_TTF 1
 #define ATK_FONT_LOAD_FROM_VFS 0
@@ -58,8 +60,12 @@ typedef struct
 } atk_font_state_t;
 
 static atk_font_state_t g_font_state = { 0 };
+#if ATK_FONT_LOAD_FROM_VFS
+static bool g_font_preparing;
+#endif
 
 static bool atk_font_load(void);
+static bool atk_font_initialize(void);
 static atk_font_glyph_t *atk_font_get_glyph(uint32_t codepoint);
 
 static inline bool atk_font_pointer_is_canonical(const void *ptr)
@@ -98,6 +104,24 @@ static bool atk_font_read_user(uint8_t **data_out, size_t *size_out);
 bool atk_font_available(void)
 {
     return atk_font_load();
+}
+
+bool atk_font_prepare(void)
+{
+#if ATK_FONT_LOAD_FROM_VFS
+    if (__atomic_load_n(&g_font_state.ready, __ATOMIC_ACQUIRE)) return true;
+    /* A VFS owner can be preempted on this CPU. Never wait for it while a
+     * generic UI/render lock prevents this thread from yielding. */
+    if (spinlock_preempt_disabled()) return false;
+    bool expected = false;
+    if (!__atomic_compare_exchange_n(&g_font_preparing, &expected, true, false,
+                                     __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) return false;
+    bool ready = atk_font_initialize();
+    __atomic_store_n(&g_font_preparing, false, __ATOMIC_RELEASE);
+    return ready;
+#else
+    return atk_font_load();
+#endif
 }
 
 int atk_font_text_width(const char *text)
@@ -201,13 +225,8 @@ void atk_font_draw_string_clipped(int x,
         return;
     }
 
-    if (!atk_font_load())
-    {
-        (void)clip;
-        int top = baseline_y - ATK_FONT_HEIGHT;
-        video_draw_text(x, top, text, fg, bg);
-        return;
-    }
+    (void)bg; /* Both backends composite glyphs over the existing surface. */
+    bool scalable = atk_font_load();
 
     int clip_x0 = 0;
     int clip_y0 = 0;
@@ -242,6 +261,35 @@ void atk_font_draw_string_clipped(int x,
 
     video_color_t row_pixels[ATK_FONT_MAX_ROW_PIXELS];
     int pen_x = x;
+
+    if (!scalable)
+    {
+        int top = baseline_y - ATK_FONT_HEIGHT;
+        size_t count = 0;
+        for (const unsigned char *cursor = (const unsigned char *)text;
+             *cursor && count < ATK_FONT_TEXT_GUARD; ++cursor, ++count, pen_x += FONT_BASIC_WIDTH)
+        {
+            const uint8_t *glyph = font_basic_get_glyph8x8(*cursor);
+            if (!glyph) continue;
+            int left = pen_x < clip_x0 ? clip_x0 : pen_x;
+            int right = pen_x + FONT_BASIC_WIDTH;
+            if (right > clip_x1) right = clip_x1;
+            if (left >= right) continue;
+            for (int row = 0; row < FONT_BASIC_HEIGHT_X2; ++row)
+            {
+                int y = top + row;
+                if (y < clip_y0 || y >= clip_y1) continue;
+                uint8_t bits = glyph[row / 2];
+                for (int col = left; col < right; ++col)
+                    row_pixels[col - left] = (bits & (0x80u >> (col - pen_x))) ?
+                        (fg | 0xFF000000u) : 0;
+                /* Synchronous blit; the bounded row buffer never escapes. */
+                video_blit_rgba32_untracked(left, y, right - left, 1, row_pixels,
+                    (right - left) * (int)sizeof(*row_pixels), true);
+            }
+        }
+        return;
+    }
 
     size_t guard = 0;
     const char *cursor = text;
@@ -391,34 +439,45 @@ void atk_font_draw_string_clipped(int x,
 
 static bool atk_font_load(void)
 {
+#if ATK_FONT_LOAD_FROM_VFS
+    /* Rendering and layout are cache-only, including after a missing or bad
+     * font. An explicit unlocked prepare call is the only retry point. */
+    return __atomic_load_n(&g_font_state.ready, __ATOMIC_ACQUIRE);
+#else
+    return atk_font_initialize();
+#endif
+}
+
+static bool atk_font_initialize(void)
+{
 #if !ATK_FONT_ENABLE_TTF
     return false;
 #endif
 
-    if (g_font_state.ready)
+    if (__atomic_load_n(&g_font_state.ready, __ATOMIC_ACQUIRE))
     {
         return true;
     }
 
 #if ATK_FONT_LOAD_FROM_VFS
-    vfs_node_t *node = vfs_open_file(vfs_root(), ATK_FONT_PATH, false, false);
-    if (!node)
+    vfs_node_t *node = NULL;
+    if (vfs_open_data_access_owned(vfs_root(), ATK_FONT_PATH, false, false,
+                                   false, 0, 0, 4u /* VFS R_OK, not SYSCALL_OPEN_READ */, &node) != 0)
     {
         return false;
     }
     size_t size = 0;
-    const char *data = vfs_data(node, &size);
-    if (!data || size == 0)
+    vfs_node_type_t type = VFS_NODE_DIR;
+    uint8_t *buffer = NULL;
+    if (vfs_stat(node, &size, &type, NULL, NULL, NULL) && type == VFS_NODE_FILE && size)
+        buffer = malloc(size);
+    /* One data-locked copy owns the bytes independently of later edits,
+     * truncation or removal of the retained node. No VFS alias escapes. */
+    bool copied = buffer && vfs_read_data_at(node, 0, buffer, size) == (ssize_t)size;
+    vfs_node_release_owned(node);
+    if (!copied)
     {
-        return false;
-    }
-    g_font_state.font_blob = (uint8_t *)data;
-    g_font_state.font_blob_size = size;
-    g_font_state.font_blob_owned = false;
-    if (!ttf_font_load(&g_font_state.font, g_font_state.font_blob, g_font_state.font_blob_size))
-    {
-        g_font_state.font_blob = NULL;
-        g_font_state.font_blob_size = 0;
+        free(buffer);
         return false;
     }
 #else
@@ -428,6 +487,7 @@ static bool atk_font_load(void)
     {
         return false;
     }
+#endif
     g_font_state.font_blob = buffer;
     g_font_state.font_blob_size = size;
     g_font_state.font_blob_owned = true;
@@ -439,25 +499,21 @@ static bool atk_font_load(void)
         g_font_state.font_blob_owned = false;
         return false;
     }
-#endif
-
     if (!ttf_font_metrics(&g_font_state.font, ATK_FONT_PIXEL_SIZE, &g_font_state.metrics))
     {
         ttf_font_unload(&g_font_state.font);
         g_font_state.font.impl = NULL;
-#if !ATK_FONT_LOAD_FROM_VFS
         if (g_font_state.font_blob_owned && g_font_state.font_blob)
         {
             free(g_font_state.font_blob);
         }
-#endif
         g_font_state.font_blob = NULL;
         g_font_state.font_blob_size = 0;
         g_font_state.font_blob_owned = false;
         return false;
     }
 
-    g_font_state.ready = true;
+    __atomic_store_n(&g_font_state.ready, true, __ATOMIC_RELEASE);
     return true;
 }
 

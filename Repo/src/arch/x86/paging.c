@@ -1793,6 +1793,7 @@ void paging_initialize_cpu_tlb(uint32_t cpu_index)
 void paging_handle_remote_tlb_flush(void)
 {
     paging_initialize_cpu_tlb(smp_current_cpu_index());
+    process_vm_notify_tlb_completion();
 }
 
 /*

@@ -1,4 +1,5 @@
 #include "libc.h"
+#include "serial_format.h"
 
 #include "fd.h"
 #include "process.h"
@@ -290,4 +291,23 @@ size_t strnlen(const char *text, size_t maximum)
     size_t count = 0;
     while (count < maximum && text[count]) ++count;
     return count;
+}
+
+typedef struct { char *buffer; size_t capacity, used; } kernel_format_buffer_t;
+static void kernel_format_putc(void *context, char value)
+{
+    kernel_format_buffer_t *output = context;
+    if (output->capacity && output->used < output->capacity - 1) output->buffer[output->used] = value;
+    ++output->used;
+}
+int snprintf(char *buffer, size_t size, const char *format, ...)
+{
+    if ((!buffer && size) || !format) return -1;
+    kernel_format_buffer_t output = {buffer, size, 0};
+    serial_format_ctx_t context = {.putc = kernel_format_putc, .ctx = &output};
+    va_list arguments; va_start(arguments, format);
+    serial_format_vprintf(&context, format, arguments);
+    va_end(arguments);
+    if (size) buffer[output.used < size ? output.used : size - 1] = 0;
+    return context.error || output.used > INT32_MAX ? -1 : (int)output.used;
 }

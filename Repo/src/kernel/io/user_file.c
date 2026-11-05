@@ -37,6 +37,11 @@ _Static_assert(NET_DNS_MAX_ADDRS == SYSCALL_DNS_ADDR_MAX && NET_DNS_NAME_MAX == 
 static io_event_service_t *g_user_tcp_service;
 static io_service_t *g_user_dns_service;
 static uint32_t g_user_file_start;
+/* Monotonic diagnostic counters, readable by the browser harness through GDB. */
+static uint64_t g_user_file_inline_socket, g_user_file_inline_poll;
+static uint64_t g_user_message_prepare_saved_bytes, g_user_message_empty_control_skips;
+static uint64_t g_user_storage_operations[64];
+static uint64_t g_user_file_inline_storage[64];
 
 static bool user_tcp_handler(io_request_t *request, io_service_result_t *result)
 {
@@ -183,7 +188,35 @@ static void user_file_abort(io_request_t *request)
 static int user_file_submit(user_file_service_t kind, io_request_t *request)
 {
     fd_description_t *description = io_request_description(request);
-    if (kind == USER_TCP && io_local_description_valid(description) &&
+    if (kind == USER_STORAGE && io_request_buffer_size(request) >= sizeof(io_vfs_operation_t))
+    {
+        uint32_t opcode = ((io_vfs_operation_t *)io_request_buffer(request))->opcode;
+        if (opcode < 64) __atomic_add_fetch(&g_user_storage_operations[opcode], 1, __ATOMIC_RELAXED);
+        io_service_result_t completed = {.result = -EIO, .description_owned = NULL};
+        if (io_vfs_try_execute(request, &completed))
+        {
+            if (completed.description_owned) fatal("inline file operation returned an owner");
+            int result = io_request_complete_inline(request, completed.result);
+            if (result) user_file_abort(request);
+            else if (opcode < 64) __atomic_add_fetch(&g_user_file_inline_storage[opcode], 1, __ATOMIC_RELAXED);
+            return result;
+        }
+    }
+    if (kind == USER_POLL)
+    {
+        io_service_result_t completed = {.result = -EIO, .description_owned = NULL};
+        if (io_poll_execute(request, &completed))
+        {
+            if (completed.description_owned) fatal("inline poll returned an owner");
+            int result = io_request_complete_inline(request, completed.result);
+            if (result) user_file_abort(request);
+            else __atomic_add_fetch(&g_user_file_inline_poll, 1, __ATOMIC_RELAXED);
+            return result;
+        }
+    }
+    if (kind == USER_TCP && (io_local_description_valid(description) ||
+                            io_tcp_description_valid(description) ||
+                            io_udp_description_valid(description)) &&
         io_request_buffer_size(request) >= sizeof(io_tcp_operation_t))
     {
         io_tcp_operation_t *operation = io_request_buffer(request);
@@ -195,10 +228,11 @@ static int user_file_submit(user_file_service_t kind, io_request_t *request)
              * concurrently. This bounded step never waits or retains a stack. */
             operation->flags |= SYSCALL_MSG_DONTWAIT;
             io_service_result_t completed = {.result = -EIO, .description_owned = NULL};
-            if (!io_local_execute(request, &completed) || completed.description_owned)
-                fatal("nonblocking local operation retained executor work");
+            if (!user_tcp_handler(request, &completed) || completed.description_owned)
+                fatal("nonblocking socket operation retained executor work");
             int result = io_request_complete_inline(request, completed.result);
             if (result) user_file_abort(request);
+            else __atomic_add_fetch(&g_user_file_inline_socket, 1, __ATOMIC_RELAXED);
             return result;
         }
     }
@@ -1071,7 +1105,7 @@ typedef struct
 typedef struct
 {
     syscall_msghdr_t message;
-    syscall_iovec_t vectors[SYSCALL_IOV_MAX];
+    syscall_iovec_t vectors[];
 } user_message_prepare_t;
 
 static int64_t user_file_message_finish(uint32_t operation, size_t metadata_offset, uint32_t flags)
@@ -1158,12 +1192,23 @@ static int64_t user_file_message(uint32_t operation, uint64_t fd, const void *he
     user_message_prepare_t *prepare = NULL;
     if (!result)
     {
-        prepare = calloc(1, sizeof(*prepare));
+        /* Four vectors cover ordinary IPC without a second allocation. Larger
+         * messages grow only after their header has been captured once. */
+        prepare = calloc(1, sizeof(*prepare) + 4 * sizeof(syscall_iovec_t));
         if (!prepare) result = -ENOMEM;
         else if (!user_copy_from_user(&prepare->message, header, sizeof(prepare->message))) result = -EFAULT;
     }
     uint64_t count = prepare ? prepare->message.vector_count : 0;
     if (!result && count > SYSCALL_IOV_MAX) result = -EINVAL;
+    if (!result && count > 4)
+    {
+        user_message_prepare_t *expanded = realloc(prepare,
+            sizeof(*prepare) + (size_t)count * sizeof(syscall_iovec_t));
+        if (!expanded) result = -ENOMEM;
+        else prepare = expanded;
+    }
+    if (!result) __atomic_add_fetch(&g_user_message_prepare_saved_bytes,
+        (SYSCALL_IOV_MAX - (count > 4 ? count : 4)) * sizeof(syscall_iovec_t), __ATOMIC_RELAXED);
     if (!result && (prepare->message.name || (!reading && prepare->message.name_length) ||
                     (!reading && !local && prepare->message.control_length))) result = -EOPNOTSUPP;
     if (!result && count && !user_copy_from_user(prepare->vectors,
@@ -1181,7 +1226,10 @@ static int64_t user_file_message(uint32_t operation, uint64_t fd, const void *he
     size_t bytes = total < capacity ? (size_t)total : capacity;
     size_t metadata_offset = sizeof(io_tcp_operation_t) + ((bytes + 7) & ~(size_t)7);
     fd_description_t *control_owner = NULL;
-    if (!result && local) result = io_local_control_create(process_fd_retirement_queue(), &control_owner);
+    if (!result && local && (reading || prepare->message.control_length))
+        result = io_local_control_create(process_fd_retirement_queue(), &control_owner);
+    else if (!result && local)
+        __atomic_add_fetch(&g_user_message_empty_control_skips, 1, __ATOMIC_RELAXED);
     if (!result && local && !reading && prepare->message.control_length)
     {
         size_t control_bytes = prepare->message.control_length;

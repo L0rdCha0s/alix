@@ -35,6 +35,7 @@ typedef struct
     uint64_t available, event_sequence;
     uint32_t mss;
     int32_t error_code;
+    uint64_t write_capacity; /* Remaining retained-payload and peer-window space. */
 } net_tcp_owned_status_t;
 typedef struct
 {

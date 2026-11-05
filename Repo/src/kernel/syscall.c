@@ -1131,7 +1131,7 @@ static int64_t syscall_do_open(const char *path, uint64_t flags)
  * - Some syscalls (notably `SYSCALL_YIELD` when invoked from the user preempt
  *   stub) return additional information via RAX (resume RIP).
  */
-uint64_t syscall_dispatch(syscall_frame_t *frame, uint64_t vector)
+static uint64_t syscall_dispatch_inner(syscall_frame_t *frame, uint64_t vector, uint64_t initial_resume)
 {
     (void)vector;
 
@@ -1173,9 +1173,20 @@ uint64_t syscall_dispatch(syscall_frame_t *frame, uint64_t vector)
         case SYSCALL_SLEEP_INTERRUPTIBLE:
             result = process_signal_sleep((uint32_t)frame->rdi, frame->rsi); break;
         case SYSCALL_EXIT:
+            process_vm_syscall_leave();
             process_exit((int)frame->rdi);
             return 0;
         case SYSCALL_PROCESS:
+            if (frame->rdi == SYSCALL_PROCESS_FORK)
+            {
+                result = (frame->rsi || frame->rdx || frame->r10) ? -EINVAL : io_process_fork(frame);
+                break;
+            }
+            if (frame->rdi == SYSCALL_PROCESS_EXEC)
+            {
+                result = io_process_exec(frame);
+                break;
+            }
             result = io_process_dispatch((uint32_t)frame->rdi, frame->rsi, frame->rdx, frame->r10);
             break;
         case SYSCALL_WRITE:
@@ -1233,7 +1244,7 @@ uint64_t syscall_dispatch(syscall_frame_t *frame, uint64_t vector)
             {
                 /* A kernel preemption inside the hook can reuse the TLS
                  * resume slot. Consume the user destination before yielding. */
-                uint64_t resume = process_take_preempt_resume_rip();
+                uint64_t resume = initial_resume;
                 signal_preempt_resume = resume;
                 process_preempt_hook();
                 if (resume)
@@ -1703,4 +1714,21 @@ uint64_t syscall_dispatch(syscall_frame_t *frame, uint64_t vector)
     frame->rax = (uint64_t)result;
     process_signal_syscall_return(frame, signal_preempt_resume);
     return frame->rax;
+}
+
+uint64_t syscall_dispatch(syscall_frame_t *frame, uint64_t vector)
+{
+    /* Capture a user preemption destination before any pager wait can reuse
+     * the kernel preemption TLS slot on this same thread. */
+    uint64_t resume = frame && frame->rax == SYSCALL_YIELD ? process_take_preempt_resume_rip() : 0;
+    int error = process_vm_syscall_enter();
+    uint64_t result;
+    if (error)
+    {
+        process_vm_syscall_leave();
+        process_exit_signal(ALIX_SIGBUS);
+    }
+    else result = syscall_dispatch_inner(frame, vector, resume);
+    process_vm_syscall_leave();
+    return result;
 }

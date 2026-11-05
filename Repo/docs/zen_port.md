@@ -166,6 +166,18 @@ loader, creates a unique profile under `/root` on the cloned AlixFS volume,
 starts the real desktop compositor and launches Zen through its terminal.
 The source image and its profiles are never written. Run `make` first.
 
+The runner defaults to a new random profile and QEMU user networking. To match
+normal vmnet-shared networking, pass `--net-backend vmnet-shared
+--collector-host <host-bridge-IPv4>`. The fixture server binds only that bridge
+address, and a random locally administered guest MAC avoids taking another
+running VM's DHCP lease. The result records the backend, collector address and
+MAC. `--use-default-profile` instead opens the cloned disk's existing default
+profile, preserving its startup/session behavior. That option can send stored
+cookies/session state on external navigation and requires explicit user
+authorization for an online diagnostic run. The normal fresh-profile mode
+never opens the source disk's saved browser profile.
+
+
 ```sh
 python3 ports/zen/benchmark_browser.py \
   --data-image build/ports/zen/performance-20261104/f-data.img \
@@ -174,8 +186,19 @@ python3 ports/zen/benchmark_browser.py \
   --url local --url https://www.smh.com.au/ --repeat 2 --timeout 120
 ```
 
-`--bundle` installs the specified ZIP before timing starts; omit it to use the
-installed copy in the cloned image. `local` serves the existing calculator.
+`--bundle` installs the packaged fonts and specified Zen ZIP before timing
+starts, requires successful extractor exit statuses, and checks every installed
+file against its archive hash. Omit it to use the installed copy in the cloned
+image. Failed filesystem mounts abort the benchmark, and unique completion
+lines prevent terminal redraws from being mistaken for completed commands.
+`local` serves the existing calculator.
+`--shutdown-check` closes the main native browser window, submits shutdown in
+Terminal while browser cleanup may still be running, and retains `shutdown.img`
+after successful OS poweroff for independent filesystem inspection. Terminal
+queues one submitted command while its foreground process exits.
+`--geometry-check` additionally samples cursor pixels during real refreshes,
+drags against the system-bar boundary, shrinks the native window and compares
+pixels outside it with the desktop. It is used with `--shutdown-check`.
 Repeated URLs reuse the same browser/profile, allowing cold and warm document
 loads to be distinguished. Each invocation creates a fresh profile. Output
 directories must not already exist. The private instrumentation uses autoconfig
@@ -191,6 +214,16 @@ corroborate native pixels; `events.jsonl`, `serial.log`, `network.pcap` and the
 post-timing `kernel-profile.log` provide the underlying evidence. Debugger
 snapshots run after timing. `--kernel`, `--quantum` (ticks) and `--steal` support
 controlled kernel experiments. The standard guest timer is 100 Hz.
+
+The calculator also receives three real QMP Return key presses per visit
+(`--input-samples` changes the count). Its focused Add button must receive a
+trusted key event, update the expected result and paint. The actor listens for
+privileged `MozAfterPaint` on `windowRoot`. `event_to_paint_ms` measures the guest
+key handler to paint; `key_to_report_upper_bound_ms` includes host input delivery
+and the outbound reporting delay, so it is an upper bound rather than a pure
+paint latency. Input screenshots preserve the visible result. Kernel counters
+are sampled before browser launch and after completion; `workload_counters`
+excludes bundle installation and desktop setup.
 
 The follow-up results are in `build/ports/zen/kernel-performance-20261104.json`.
 In the matched calculator comparison, browser startup fell from 34.24 to
@@ -218,6 +251,140 @@ against the actual linked images. All ten reported icon URLs and all 258 Zen
 icon resources are present. The updated bundle is published at the normal
 download path. Boot the rebuilt kernel, close Zen and rerun `/usr/bin/dl-zen.sh`
 to replace an existing installed browser; profiles need no reset.
+
+### Five platform performance improvements
+
+The subsequent measured build is recorded in
+`build/ports/zen/top5-20261104/result.json`, with raw comparisons in
+`comparison.json`. It groups the changes into five areas:
+
+1. **File I/O:** default 4 KiB stdio buffering, direct bulk transfers, and
+   try-only inline resident read/pread/seek/stat operations. Contention,
+   writable shared mappings and persistent timestamp updates retain worker
+   handling. Native checking also found and fixed missing `0666` creation-mode
+   arguments in `fopen`/`freopen`.
+2. **Network readiness:** bounded nonblocking TCP/UDP and ready poll operations
+   complete in the caller; pending requests wake on readiness notifications
+   instead of always waiting for the next 10 ms tick.
+3. **Allocation:** adjacent-free `realloc` growth, copies outside the allocator
+   lock, no duplicate clearing of fresh `sbrk` pages, right-sized message iovec
+   capture and no unused ancillary owners on empty-control sends.
+4. **Scheduling and rendering:** address-indexed futex waiters replace process
+   thread scans. Kernel font preparation occurs before video/ATK locks; drawing
+   uses cached state, including missing-font fallback. The harness captured a
+   real deadlock where the compositor prevented a preempted VFS lock owner on
+   its own CPU from resuming. The font snapshot now owns its bytes as well.
+5. **Virtual memory:** fresh mappings into empty intervals avoid unnecessary
+   TLB shootdowns and pending-transaction sleeps. Replacement, permission,
+   discard and unmap barriers remain.
+
+Two independent private-disk boots per build/workload used eight CPUs, 4 GiB,
+`max,+rdrand`, a 20 ms normal quantum and work stealing disabled. Each local run
+loaded the calculator three times and delivered nine real keyboard probes;
+each news run visited SMH, the calculator, then SMH again. Medians were:
+
+| Measurement | Before | After |
+| --- | ---: | ---: |
+| Local cold first contentful paint | 8.46 s | 4.07 s |
+| Local repeat first contentful paint | 1.12 s | 1.02 s |
+| Local key-event-to-paint | 100 ms | 70 ms |
+| SMH cold first contentful paint | 23.21 s | 10.29 s |
+| SMH cold load event | 100.22 s | 36.14 s |
+| SMH repeat first contentful paint | 7.83 s | 11.01 s |
+| SMH repeat load event | 33.46 s | 34.80 s |
+
+Worker completions decreased by 66% for the local workload and 65% for news.
+Whole harness workload duration decreased by 24% and 38%, respectively; this
+includes startup, reporting and harness pauses. Repeat news paint did **not**
+improve in these samples. Its resource counts differed (57/116 before versus
+105/119 after), so the public-site results do not establish a uniform speedup
+or isolate individual patch effects. Warm local gains were also modest.
+
+All 12 page loads and 24 keyboard probes in the four updated-build boots
+completed without page faults. Screenshots show native calculator results and
+the SMH page. Existing native checks cover allocation, synchronization, VM,
+stdio, TCP/poll, compositor controls, shared mapping coherence, synchronous
+writes and independent remount readback. The historical VFS host fixture was
+not passed; its stale model does not execute the new inline helpers. Exact
+scope and logs are recorded in the result manifest. This remains QEMU evidence.
+
+The measured kernel SHA-256 is
+`48485d61c4700c76ae1b5eca33980f2e8cb285f0606923d5efe18d63a77ec4c1`;
+the published bundle SHA-256 is
+`d7faca11029bd6682122e4409cfd2b0b448e1cedd1bee1fdd4a1e8e8b276cebc`.
+The previous published bundle is retained in
+`build/ports/zen/top5-20261104/previous-published/`. The user's installed data
+image was not changed; boot the rebuilt kernel and run `/usr/bin/dl-zen.sh`
+before reopening Zen to use both halves of the update.
+
+### Second performance batch
+
+`build/ports/zen/round2-20261104/result.json` records the next kernel/runtime
+batch. It adds generation-driven VM completion and separate serialization
+queues, nonblocking futex memory checks under scheduler serialization, barrier
+elision for old ranges without present pages, private stdio position caching,
+TCP capacity/RTO corrections, fewer event-queue lock acquisitions, and UI CPU
+placement with explicit-affinity precedence. Public `FILE` layout is unchanged.
+Nine executables were relinked against the changed runtime; all eight packaged
+executables match their linked load/TLS bytes.
+
+The ordinary harness comparison uses two independent boots per build/workload,
+the same eight-CPU/4-GiB configuration, and exact frozen build hashes. Medians:
+
+| Measurement | Previous release | Second batch |
+| --- | ---: | ---: |
+| Local cold contentful paint | 6.21 s | 3.04 s |
+| Local repeat contentful paint | 550 ms | 460 ms |
+| SMH cold contentful paint | 17.83 s | 8.96 s |
+| SMH cold load event | 44.05 s | 34.42 s |
+| SMH repeat contentful paint | 12.68 s | 14.24 s |
+| Early cold local key-to-paint | 75 ms | 525 ms |
+
+These results are mixed: contentful-paint and whole-workload times improve,
+but early interaction is not uniformly faster. The raw cold-input regression
+is retained in `comparison.json`. One news visit with two document time origins
+was excluded and repeated; the replacement is recorded as `final-news3`.
+The intermediate-build baseline and both scheduler ablations are also retained
+with explicit exclusions. No timing result is substituted silently.
+
+An optional `--native-input` mode now waits for an exact, changing marker in
+QMP framebuffer pixels before injecting each key. The marker exists only in
+the disposable calculator instrumentation. Its readiness wait is reported
+separately from input latency, with no fixed settling delay. This verifies that
+the selected, visible document actually reached the native surface. Two boots
+per build confirmed native controls at a median 37.49 -> 28.61 host seconds
+after launch. Warm visible-control key-to-paint improved 70 -> 55 ms; the
+all-input median stayed at 75 ms and cold visible-control input worsened
+165 -> 600 ms. These samples are separate from the early-input comparison,
+and do not establish an across-the-board responsiveness improvement.
+
+The Alix look-and-feel adapter must return `NS_ERROR_NOT_AVAILABLE` for the
+four `ThemedScrollbar*` colors that its native palette does not implement.
+Returning the stand-in palette's default white reports a valid color and
+suppresses Gecko's scrollbar fallback, making the track and thumb white.
+Gecko now chooses its normal contrast-aware light/dark colors, while author
+scrollbar colors continue through the upstream drawing path. The existing
+browser harness accepts `--scrollbar-check --url local --native-input
+--input-samples 1` to inspect the native thumb pixels and drag it on a long
+disposable page; this does not change the installed browser's preferences.
+The 2026-11-05 QEMU check reproduced the white scrollbar with the previous
+bundle, then observed both native thumbs with the rebuilt bundle and scrolled
+the page by dragging the vertical thumb. Zen exited with status 0 and the
+guest shut down cleanly. The private installation also survived a cold boot;
+all 50 browser files matched the package and every other file retained its
+contents and mode. Evidence is in `build/ports/zen/scrollbars-20261105/`.
+
+All 18 page loads and 42 trusted input probes in the six selected updated-build
+boots completed without a logged fatal page fault. Existing native VM,
+permission-fault, mapping/remount, synchronization, pthread, polling, compositor
+and owned-libc suites passed, alongside targeted host sanitizer checks.
+The kernel is `e9fd7203cd05386ffa36985e37fb25da32a147217cba420cc84bf698a7f80ee2`;
+the browser ZIP is
+`2f9c36a8159cf434f567bc2a52c4ccb05ab7df190aad79cd2f7988b75854868e`.
+The prior release is retained for rollback. This remains QEMU evidence;
+ordinary host desktop activity, public content and the small sample size limit
+timing conclusions. The user's original data image was not booted or modified
+by these checks.
 
 ### Earlier bring-up checkpoints
 

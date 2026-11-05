@@ -501,9 +501,13 @@ static bool write_full(int fd, const uint8_t *data, size_t len)
     size_t offset = 0;
     while (offset < len)
     {
+        errno = 0;
         ssize_t wrote = write(fd, data + offset, len - offset);
+        if (wrote < 0 && errno == EINTR) continue;
         if (wrote <= 0)
         {
+            printf("unzip: write fd=%d offset=%zu total=%zu rc=%lld errno=%d\n",
+                   fd, offset, len, (long long)wrote, errno);
             return false;
         }
         offset += (size_t)wrote;
@@ -1328,7 +1332,11 @@ static bool zip_extract_entry(const uint8_t *zip_data,
         }
     }
 
-    close(fd);
+    if (close(fd) != 0)
+    {
+        printf("unzip: close failed for %s (errno=%d)\n", out_path, errno);
+        ok = false;
+    }
     if (ok)
     {
         printf("unzip: %s\n", out_path);

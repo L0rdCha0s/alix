@@ -9,7 +9,7 @@ bool shell_cmd_shutdown(shell_state_t *shell, shell_output_t *out, const char *a
     (void)args;
 
     shell_output_write(out, "Syncing disks... ");
-    if (!vfs_sync_all())
+    if (!vfs_prepare_shutdown())
     {
         return shell_output_error(out, "failed to sync mounted filesystems");
     }

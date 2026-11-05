@@ -69,8 +69,16 @@ returns bounded bytes without a NUL. Native path/target limits are 4095 bytes;
 overlong replacement fails before mutation. Existing oversized targets remain
 stored and report `ENAMETOOLONG` through the checked APIs.
 
-Regular-file worker adapters retain nodes before releasing the tree lock and
-serialize shared offsets with a sleeping gate. They reject callback-backed
+Regular-file adapters retain nodes before releasing the tree lock and
+serialize shared offsets with an ownership gate. Registered requests first try
+bounded resident READ/PREAD, SEEK and metadata operations in the caller. Offset,
+data and namespace locks are tried once; contention falls back to a protected
+worker. Reads requiring persistent relatime updates, shared writable mapping
+coherence, callbacks or nonresident data also fall back before any copy or
+offset change. SET/CUR seeks need only offset ownership; END needs a size
+snapshot. Writes, path operations, mapping preparation and persistence remain
+worker operations. No caller stack or user pointer enters a continuation.
+The ordinary data adapters reject callback-backed
 nodes, whose identity and context lifetimes require separate adapters. The
 original user open/read/write syscall IDs retain the legacy global FD table.
 The upstream runtime instead selects syscall 71 and private descriptors, with

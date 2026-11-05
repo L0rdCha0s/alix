@@ -562,6 +562,7 @@ void process_destroy_marked(process_t *process)
     process->current_thread = NULL;
     for (thread_t *cursor = thread; cursor; cursor = cursor->process_next)
     {
+        process_futex_cancel_wait_locked(cursor);
         cursor->process = NULL;
     }
     spinlock_unlock(&process->threads_lock);
@@ -1518,6 +1519,8 @@ bool process_query_user_layout(const process_t *process,
     return process->is_user && process->user_entry_point != 0 && layout->stack_top != 0;
 }
 
+static uint64_t g_sbrk_zero_bytes_avoided;
+
 /*
  * User-mode `sbrk(2)` implementation.
  *
@@ -1578,14 +1581,19 @@ static int64_t process_user_sbrk_locked(process_t *process, int64_t increment)
                 return -1;
             }
         }
-        if (!process_heap_zero_range(process, current, inc))
+        /* Commit already zeroed every fresh page. Only bytes exposed within
+         * the old final page need another clear, including shrink/regrow. */
+        uintptr_t zero_end = new_brk < commit_start ? new_brk : commit_start;
+        size_t zero_bytes = zero_end > current ? zero_end - current : 0;
+        if (!process_heap_zero_range(process, current, zero_bytes))
         {
             serial_printf("[sbrk] zero failed pid=0x%016llX range=[0x%016llX,0x%016llX)\n",
                           (unsigned long long)process->pid,
                           (unsigned long long)current,
-                          (unsigned long long)(current + inc));
+                          (unsigned long long)(current + zero_bytes));
             return -1;
         }
+        __atomic_fetch_add(&g_sbrk_zero_bytes_avoided, inc - zero_bytes, __ATOMIC_RELAXED);
     }
     else if (increment < 0)
     {
@@ -1995,6 +2003,7 @@ int process_user_thread_prepare_exit(void)
 
 void process_user_thread_exit(int status)
 {
+    process_vm_syscall_leave();
     thread_t *current = current_thread_local();
     if (!current)
     {
@@ -2425,6 +2434,8 @@ void process_on_timer_tick(interrupt_frame_t *frame)
     {
         return;
     }
+
+    process_vm_poll_tlb_completion();
 
     /* IRQ0 runs on the BSP and broadcasts schedule IPIs to the APs.  Global
      * housekeeping must run once per tick, not once on every CPU, otherwise

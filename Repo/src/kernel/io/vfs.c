@@ -28,6 +28,8 @@ static int io_vfs_mapping_close(void *context)
 static const fd_ops_t io_vfs_mapping_ops = { .close = io_vfs_mapping_close };
 static bool io_vfs_mapping_valid(const fd_description_t *description)
 { return description && fd_description_ops(description)->close == io_vfs_mapping_close; }
+bool io_vfs_mapping_private(const fd_description_t *description)
+{ return io_vfs_mapping_valid(description) && vfs_mapping_private(((io_vfs_mapping_t *)fd_description_context(description))->mapping); }
 bool io_vfs_mapping_writable(const fd_description_t *description)
 { return io_vfs_mapping_valid(description) && ((io_vfs_mapping_t *)fd_description_context(description))->writable; }
 paddr_t io_vfs_mapping_page(const fd_description_t *description, size_t index)
@@ -449,6 +451,112 @@ static void io_vfs_stat_info_encode(const vfs_stat_info_t *input, syscall_stat_i
         .uid = input->uid, .gid = input->gid, .block_size = 4096,
         .blocks = m->size_bytes / 512 + (m->size_bytes % 512 != 0),
     };
+}
+
+bool io_vfs_try_execute(io_request_t *request, io_service_result_t *result)
+{
+    if (!request || !result || !spinlock_preempt_disabled() ||
+        io_request_buffer_size(request) < sizeof(io_vfs_operation_t)) return false;
+    fd_description_t *description = io_request_description(request);
+    if (!io_vfs_description_valid(description)) return false;
+    io_vfs_operation_t *operation = io_request_buffer(request);
+    size_t available = io_request_buffer_size(request) - sizeof(*operation);
+    if (operation->reserved || operation->count > available) return false;
+    io_vfs_file_t *file = fd_description_context(description);
+    result->description_owned = NULL;
+    switch (operation->opcode)
+    {
+        case IO_VFS_READ:
+        {
+            if (!file->readable || !io_vfs_offset_ready(file)) return false;
+            ssize_t bytes = 0;
+            bool complete = file->offset <= INT64_MAX && operation->count <= INT64_MAX - file->offset &&
+                vfs_try_read_data_at(file->node, (size_t)file->offset, operation->data,
+                                    (size_t)operation->count, &bytes);
+            if (complete)
+            {
+                if (bytes > 0) file->offset += (uint64_t)bytes;
+                result->result = bytes;
+            }
+            io_vfs_offset_unlock(file);
+            return complete;
+        }
+        case IO_VFS_PREAD:
+        {
+            if (!file->readable || operation->offset < 0 ||
+                operation->count > (uint64_t)(INT64_MAX - operation->offset)) return false;
+            ssize_t bytes = 0;
+            if (!vfs_try_read_data_at(file->node, (size_t)operation->offset, operation->data,
+                                     (size_t)operation->count, &bytes)) return false;
+            result->result = bytes;
+            return true;
+        }
+        case IO_VFS_SEEK:
+        {
+            if (vfs_node_type(file->node) != VFS_NODE_FILE) return false;
+            if (!io_vfs_offset_ready(file)) return false;
+            uint64_t base = 0;
+            result->result = -EINVAL;
+            if (operation->whence == SYSCALL_SEEK_CUR) base = file->offset;
+            else if (operation->whence == SYSCALL_SEEK_END)
+            {
+                /* These small synchronous snapshots never leave this call.
+                 * SET/CUR need only the description's offset ownership. */
+                vfs_stat_snapshot_t metadata;
+                if (!vfs_try_stat_data(file->node, &metadata))
+                {
+                    io_vfs_offset_unlock(file);
+                    return false;
+                }
+                base = metadata.size_bytes;
+            }
+            else if (operation->whence != SYSCALL_SEEK_SET) goto seek_done;
+            if (base > INT64_MAX) result->result = -EOVERFLOW;
+            else
+            {
+                int64_t target;
+                if (!__builtin_add_overflow((int64_t)base, operation->offset, &target) && target >= 0)
+                {
+                    file->offset = (uint64_t)target;
+                    result->result = target;
+                }
+            }
+seek_done:
+            io_vfs_offset_unlock(file);
+            return true;
+        }
+        case IO_VFS_STAT:
+        {
+            vfs_stat_snapshot_t metadata;
+            if (!vfs_try_stat_data(file->node, &metadata)) return false;
+            operation->stat = (syscall_stat_t){ .size_bytes = metadata.size_bytes, .type = metadata.type,
+                .atime = metadata.atime, .mtime = metadata.mtime, .ctime = metadata.ctime };
+            result->result = 0;
+            return true;
+        }
+        case IO_VFS_STAT_INFO:
+        {
+            bool times = (operation->flags & SYSCALL_STAT_TIME_FIELDS) != 0;
+            size_t bytes = times ? sizeof(syscall_stat_times_t) : sizeof(syscall_stat_info_t);
+            if (operation->count || operation->offset || operation->whence ||
+                operation->flags & ~SYSCALL_STAT_TIME_FIELDS || available < bytes) return false;
+            vfs_stat_info_t metadata;
+            if (!vfs_try_node_stat_info(file->node, &metadata)) return false;
+            io_vfs_stat_info_encode(&metadata, (void *)operation->data);
+            result->result = 0;
+            if (times)
+            {
+                syscall_stat_times_t *reply = (void *)operation->data;
+                if (reply->info.atime > INT64_MAX || reply->info.mtime > INT64_MAX || reply->info.ctime > INT64_MAX)
+                { result->result = -EOVERFLOW; return true; }
+                reply->accessed = (syscall_file_timestamp_t){(int64_t)reply->info.atime, 0};
+                reply->modified = (syscall_file_timestamp_t){(int64_t)reply->info.mtime, 0};
+                reply->changed = (syscall_file_timestamp_t){(int64_t)reply->info.ctime, 0};
+            }
+            return true;
+        }
+        default: return false;
+    }
 }
 
 void io_vfs_execute(io_request_t *request, io_service_result_t *result,

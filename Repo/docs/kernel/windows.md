@@ -26,11 +26,24 @@ Focus and mouse capture boost the application's main thread, rather than all
 of its workers. Background rendering/IPC threads keep their normal priority so
 they cannot collectively starve the kernel I/O workers on which the UI waits.
 
-Bounds allow off-screen positions within +/-1,048,576 pixels and client
-dimensions from 1 to 16,384 pixels. Actual allocation can fail with `-ENOMEM`.
+Bounds accept positions within +/-1,048,576 pixels and requested client
+dimensions from 1 to 16,384 pixels. The kernel clamps client sizes to the
+desktop work area and top positions below the system bar, including native
+frame borders. Actual accepted geometry is returned to the caller. Dragging
+and resizing use the same top boundary. Actual allocation can fail with `-ENOMEM`.
 Allocation/image-binding failure preserves the previous surface and geometry.
-Changing decorations preserves client position and dimensions. Titles use the
-existing bounded kernel title storage and readback reports any truncation.
+Changing decorations preserves client position and dimensions. Window titles
+retain up to 4095 UTF-8 bytes; painting clips to the available title-bar space
+before the close button. The original fixed-size control record remains
+unchanged, including its 63-byte UTF-8-safe title preview on readback.
+
+`sys_ui_set_title(handle, text, length)` uses the appended
+`USER_ATK_CONTROL_TITLE_TEXT` opcode on syscall 73. Its input is raw UTF-8 bytes
+excluding NUL, with a maximum length of 4095. An empty title is allowed;
+embedded NULs, inaccessible input and foreign or closed handles are rejected.
+The kernel copies input into owned heap storage before publication under the
+ATK state lock. The Gecko adapter uses this path, with its earlier short-title
+operation retained as a fallback for older kernels.
 
 Creation adds `USER_ATK_WINDOW_FLAG_HIDDEN` and
 `USER_ATK_WINDOW_FLAG_BORDERLESS`; existing creation flags and wire layouts are

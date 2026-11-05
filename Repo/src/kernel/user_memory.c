@@ -2,6 +2,7 @@
 
 #include "pmm.h"
 #include "serial.h"
+#include "swap.h"
 
 #define USER_MEMORY_PAGE_SIZE 4096ULL
 
@@ -35,6 +36,7 @@ paddr_t user_memory_alloc(size_t bytes)
 
 void user_memory_free(paddr_t addr, size_t bytes)
 {
+    if (addr & USER_PAGE_SWAPPED) { swap_release(addr); return; }
     if (!pmm_is_ready() || addr == 0 || bytes == 0)
     {
         return;
@@ -62,6 +64,7 @@ bool user_memory_alloc_page(paddr_t *phys_out)
 
 void user_memory_free_page(paddr_t phys)
 {
+    if (phys & USER_PAGE_SWAPPED) { swap_release(phys); return; }
     if (!pmm_is_ready() || phys == 0)
     {
         return;

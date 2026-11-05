@@ -64,11 +64,49 @@ Services.obs.addObserver(function ready(window) {
     emit({ event: "page", index, requested_url: ALIX_BENCH_URLS[index],
            guest_wall_ms: Date.now() - started, timed_out: timedOut,
            load_status: loadStatus, ...data });
+    if (!timedOut && !data.error && !data.error_page) {
+      for (let sample = 0; sample < ALIX_BENCH_INPUT_SAMPLES; sample++) {
+        try {
+          const actor = browser.browsingContext.currentWindowGlobal.getActor("AlixBench");
+          window.focus();
+          browser.focus();
+          const ready = await actor.sendQuery("input_prepare", {
+            sample, title: ALIX_BENCH_PAGE_TITLE || "Add Two Numbers",
+            ...(ALIX_BENCH_NATIVE_INPUT ? { native_input: true, index } : {}),
+          });
+          if (!ready.supported) break;
+          emit({ event: "input_ready", index, sample, expected: ready.expected,
+                 selected_tab: window.gBrowser.selectedTab === tab,
+                 visibility: ready.visibility, document_focused: ready.document_focused,
+                 focused: ready.focused,
+                 ...(ready.native_marker ? { native_marker: ready.native_marker } : {}) });
+          const response = await actor.sendQuery("input_result");
+          emit({ event: "input", index, sample, ...response,
+                 selected_tab: window.gBrowser.selectedTab === tab });
+          if (response.error) break;
+        } catch (error) {
+          emit({ event: "input", index, sample, error: String(error) });
+          break;
+        }
+      }
+    }
+    if (ALIX_BENCH_SCROLLBAR && !timedOut && !data.error) {
+      const actor = browser.browsingContext.currentWindowGlobal.getActor("AlixBench");
+      const ready = await actor.sendQuery("scrollbar_prepare");
+      emit({ event: "scrollbar_ready", index, ...ready });
+      emit({ event: "scrollbar", index, ...await actor.sendQuery("scrollbar_result") });
+    }
     window.setTimeout(next, 1000);
   }
   function next() {
     index++;
     if (index >= ALIX_BENCH_URLS.length) {
+      if (ALIX_BENCH_PAGE_TITLE !== null) {
+        // Exercise Gecko's native title setter with a controlled complete
+        // string, independently of delayed tab-label updates during startup.
+        window.docShell.treeOwner.QueryInterface(Ci.nsIBaseWindow).title = ALIX_BENCH_PAGE_TITLE;
+        emit({ event: "native_title_set", title: ALIX_BENCH_PAGE_TITLE });
+      }
       emit({ event: "complete" });
       return;
     }

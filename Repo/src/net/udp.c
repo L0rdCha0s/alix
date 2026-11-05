@@ -6,6 +6,7 @@
 #include "spinlock.h"
 #include "timer.h"
 #include "errno.h"
+#include "io_event_service.h"
 #include <stdint.h>
 
 #define UDP_SOCKET_LIMIT 256u
@@ -210,6 +211,7 @@ bool net_udp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
     if (!local || !source_port || !destination_port) return false;
     uint64_t flags = spinlock_lock_irqsave(&g_udp_lock);
     bool handled = false;
+    bool became_readable = false;
     for (net_udp_socket_t *socket = g_udp_sockets; socket; socket = socket->next)
     {
         if (socket->local_port != destination_port || (socket->bound_ip && socket->bound_ip != destination) ||
@@ -225,12 +227,14 @@ bool net_udp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
             .length = (uint32_t)bytes, .interface_index = interface_index,
             .source_port = source_port, .tos = ip[1], .ttl = ip[8] };
         if (bytes) memcpy(packet->data, udp + 8, bytes);
+        became_readable = socket->head == NULL;
         if (socket->tail) socket->tail->next = packet; else socket->head = packet;
         socket->tail = packet; ++socket->packet_count; socket->queued_bytes += (uint32_t)bytes;
         g_udp_queue_bytes += charged;
         break;
     }
     spinlock_unlock_irqrestore(&g_udp_lock, flags);
+    if (became_readable) io_event_service_notify();
     return handled;
 }
 

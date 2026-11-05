@@ -89,8 +89,9 @@ threads/address-space users at those call sites.
 
 These legacy helpers establish **safe backing reuse** while retaining their
 asynchronous completion contract. The native anonymous VM interfaces described
-below additionally await their completion tickets outside all locks before
-returning from mapping, protection and unmapping transactions.
+below additionally await completion tickets outside all locks before returning
+from replacement, protection and unmapping transactions. Fresh mappings into
+empty intervals do not require a shootdown.
 `tests/vm_reclamation_test.py` exercises production generation/retirement code
 with delayed CPU acknowledgement, a request arriving during invalidation, OOM,
 heap/stack rollback, and unmapped-word access.
@@ -186,9 +187,8 @@ syscalls 48–50. The current backend supports process-private anonymous mapping
 shared mappings and private snapshots; see [file mappings](file_mappings.md) for
 cache coherence, `msync`, ownership and current EOF/truncation restrictions.
 
-`MAP_NORESERVE` is accepted for anonymous and file mappings. Alix has no swap
-reservation mechanism, so this selects its existing reservation policy rather
-than introducing a separate backing store. `PROT_NONE` intervals remain sparse;
+`MAP_NORESERVE` is accepted for anonymous and file mappings. Alix now has a [swap pager](paging.md), but no per-mapping swap reservation
+quota. This flag therefore retains the existing allocation admission policy. `PROT_NONE` intervals remain sparse;
 granting access still commits pages as described below. The native VM fixture
 checks an 8 GiB reservation, bounded physical usage and a committed high page.
 
@@ -215,12 +215,35 @@ preparation fails; their allocation tracking is now dynamic instead of a fixed
 
 The process owns an in-flight transaction journal. It contains removed metadata,
 retired backing and the completion ticket, so killing the requesting thread's
-process cannot strand allocations on its kernel stack. Native VM operations are
-serialized until the journal completes. Leaf/metadata publication happens under
+process cannot strand allocations on its kernel stack. Changes to existing
+present mappings are serialized until the journal completes. A transaction whose
+old range has no present leaf publishes without a TLB shootdown or pending
+journal. This includes fresh mappings, fixed commits over PROT_NONE reservations,
+and sparse ranges. x86 does not cache nonpresent translations, and any previous
+removal/protection barrier has completed before the next operation starts.
+Replacement, protection, discard and unmap of present pages retain their barriers.
+Leaf/metadata publication happens under
 `memory_lock`; the caller releases every lock and restores interrupts before
 waiting for remote acknowledgement. Only then are retired backing and metadata
 reclaimed and the syscall allowed to return. Quiescent process teardown also
 owns a journal abandoned by process termination.
+
+Completion waits use a permanent TLB progress queue and generation predicates,
+rather than one-tick sleeps. Serialized VM callers use a separate permanent
+queue, so partial TLB acknowledgements do not wake them before journal cleanup.
+A remote TLB acknowledgement records progress and wakes the completion queue
+only when the interrupted context holds no generic spinlock.
+Otherwise a safe timer/schedule-IPI hook performs the deferred wake; the IPI
+never waits for a scheduler lock while interrupting a subsidiary-lock owner.
+The queue predicate and registration use scheduler serialization, closing the
+acknowledgement-before-sleep race. The serialization predicate only acquire-loads
+the atomically published pending pointer; it never takes `memory_lock` under the
+global scheduler lock. Clearing the pending journal wakes serialized VM callers
+after releasing `memory_lock`. Both wake paths check for waiters under the queue
+lock and release it before taking the scheduler lock, avoiding empty wake calls.
+Every journal clear performs that check, including when a previously awakened
+caller parked behind a newer journal. Process teardown only removes its
+active-journal accounting; it does not attempt a wake while tearing down locks.
 
 `madvise(address, length, MADV_DONTNEED)` uses syscall 56 to discard private
 anonymous backing without changing the mapping's address or permissions. The
@@ -235,9 +258,9 @@ A discarded page is a null entry in its VMA's backing array. The first allowed
 user instruction fault or safe syscall copy allocates one zero-filled page
 under `memory_lock` and publishes its prepared PTE. Permission checks happen
 before allocation, so a write to read-only memory, any access to `PROT_NONE`,
-and execution without `PROT_EXEC` remain rejected. The fault path never waits
-for an IPI: a refill during an outstanding discard uses new backing while the
-journal retains the old page until acknowledgement. Two first touches serialize
+and execution without `PROT_EXEC` remain rejected. The locked refill never waits for an IPI: it uses new backing while the
+journal retains the old page until acknowledgement. The fault continuation
+can await completion after releasing locks, as described in [paging](paging.md). Two first touches serialize
 under the lock and share the one committed page. A failed allocation leaves the
 page sparse; a failed syscall copy reports failure and a failed user fault takes
 the existing fatal-user-fault path. Protection changes, fixed replacement,

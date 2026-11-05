@@ -11,6 +11,13 @@ ZEN_SELECT_OBJECT := $(USER_OBJDIR)/lib/select-owned.o
 ZEN_IOCTL_OBJECT := $(USER_OBJDIR)/lib/ioctl-owned.o
 ZEN_RESOURCE_OBJECT := $(USER_OBJDIR)/lib/resource-owned.o
 ZEN_DSO_START := $(USER_OBJDIR)/lib/dso_start.o
+
+$(USER_OBJDIR)/time.elf: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/apps/time/time.o $(USER_LD_SCRIPT)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/apps/time/time.o
+
+$(USER_BIN_DIR)/time: $(USER_OBJDIR)/time.elf
+	@mkdir -p $(@D)
+	cp $< $@
 ZEN_USER_RUNTIME_OBJECTS := $(filter-out $(USER_OBJDIR)/lib/syscall.o $(USER_OBJDIR)/lib/libc.o $(USER_OBJDIR)/lib/socket.o $(USER_OBJDIR)/lib/select.o $(USER_OBJDIR)/lib/ioctl.o $(USER_OBJDIR)/lib/resource.o,$(USER_COMMON_OBJECTS)) $(ZEN_UPSTREAM_LIBC) $(ZEN_OWNED_SYSCALL) $(ZEN_FCNTL_OBJECT) $(ZEN_TERMIOS_OBJECT) $(ZEN_POLL_OBJECT) $(ZEN_SOCKET_OBJECT) $(ZEN_SELECT_OBJECT) $(ZEN_IOCTL_OBJECT) $(ZEN_RESOURCE_OBJECT)
 
 $(ZEN_UPSTREAM_LIBC): user/lib/libc.c

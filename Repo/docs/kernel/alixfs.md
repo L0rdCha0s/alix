@@ -137,6 +137,13 @@ failed speculative reads fall back to the requested record. All scratch memory
 is heap-owned and released before mount returns. This avoids thousands of tiny
 AHCI requests and the former second read of every complete file payload.
 
+Until the linking pass, the load-state table owns every new node, name and
+file buffer. Every failure path releases those allocations before discarding
+the table; clearing the mount-point directory cannot reach unlinked nodes.
+Invalid mode trailers log their node ID and disk offset and still reject the
+mount. Failed loading never silently substitutes permissions or formats the
+volume. The abort log reports the number of released nodes and file bytes.
+
 The VFS tree lock still protects mount publication, so `/proc` process
 registration and `/dev` USB registration wait for this load. That contention
 made a slow root mount appear to hang audio and USB initialization together.
@@ -193,6 +200,22 @@ Flush flow (typical):
    - the header if dirty (`alixfs_flush_header`)
 
 Design note: payload writes happen before the chunk table entry is persisted, which tends to avoid pointing on-disk metadata at unwritten payload data. This is not a journal, but it is an intentional “data first, metadata later” ordering.
+
+The mount writeback gate also owns disk-space reclamation. A final VFS node
+release frees its in-memory buffers, then transfers its remaining disk identity
+to a mount retirement queue. Writeback drains that queue under the same gate
+before committing metadata. Unlink and process cleanup therefore cannot edit
+the free-list, chunk table or dirty bitmap concurrently with yielding payload
+IO or a metadata snapshot. Queue links belong to dead heap nodes, never to a
+caller's stack. Failed mounts release their unpublished nodes directly.
+
+OS shutdown uses `vfs_prepare_shutdown`: force writeback, check that queued
+updates and retirements are drained, and freeze the backend under its writeback
+gate. A background flush that was already waiting must recheck that flag before
+starting IO. This prevents disk updates after the final successful flush and
+before ACPI poweroff. A failed checkpoint thaws mounts and leaves the OS running
+with an error. This clean-shutdown ordering does not add journaling or power-cut
+recovery.
 
 ## Allocation and Free Space
 

@@ -208,7 +208,10 @@ int main(int argc, char **argv)
         shutdown(unavailable,SHUT_RDWR)!=-1 || errno!=EOPNOTSUPP ||
         bind(-1,NULL,0)!=-1 || errno!=EBADF || close(unavailable))return 1;
     int *pair=calloc(2,sizeof(*pair));if(!pair)return 1;pair[0]=-17;pair[1]=-19;
-    if(socketpair(AF_UNIX,SOCK_STREAM,0,pair)!=-1 || errno!=EOPNOTSUPP || pair[0]!=-17 || pair[1]!=-19)return 1;
+    if(socketpair(AF_INET,SOCK_STREAM,0,pair)!=-1 || errno!=EAFNOSUPPORT || pair[0]!=-17 || pair[1]!=-19)return 1;
+    if(socketpair(AF_UNIX,SOCK_STREAM,0,pair) || pair[0]<0 || pair[1]<0 || pair[0]==pair[1] ||
+        write(pair[0],"pair",4)!=4 || read(pair[1],jobs[0].first,4)!=4 || memcmp(jobs[0].first,"pair",4) ||
+        close(pair[0]) || close(pair[1]))return 1;
     free(pair);
     serial_printf("SOCKET_ENTRYPOINTS: PASS unsupported_errors=1 no_output=1 connected_forwarding=1\n");
     for (unsigned index = 0; index < 8; ++index)

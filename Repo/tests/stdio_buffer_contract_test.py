@@ -45,10 +45,17 @@ static void input_and_positions(void) {
     CHECK(native_fflush(s)==0&&f->position==0&&!s->pushback_pending&&!s->read_end);
     CHECK(native_fgetc(s)=='a'&&native_fwrite("Q",1,1,s)==1&&native_ftell(s)==2&&f->position==1);
     CHECK(native_fflush(s)==0&&f->position==2&&!memcmp(f->data,"aQcdef",6));
-    CHECK(native_fseek(s,0,SEEK_SET)==0&&native_fgetc(s)=='a'&&native_fseek(s,1,SEEK_CUR)==0&&native_fgetc(s)=='c');
+    CHECK(native_fseek(s,0,SEEK_SET)==0&&native_fgetc(s)=='a');
+    unsigned seeks=f->seek_calls;
+    CHECK(native_fseek(s,1,SEEK_CUR)==0&&native_fgetc(s)=='c'&&f->seek_calls==seeks);
     native_fpos_t saved;CHECK(native_fgetpos(s,&saved)==0&&saved==3);
-    CHECK(native_fgetc(s)=='d'&&native_fsetpos(s,&saved)==0&&native_fgetc(s)=='d');
-    native_rewind(s);CHECK(native_fgetc(s)=='a');CHECK(native_fclose(s)==0);
+    CHECK(native_fgetc(s)=='d'&&native_fsetpos(s,&saved)==0&&native_fgetc(s)=='d'&&f->seek_calls==seeks);
+    native_rewind(s);CHECK(native_fgetc(s)=='a');
+    CHECK(native_fflush(s)==0);
+    int descriptor=native_fileno(s);CHECK(descriptor==s->fd);
+    CHECK(model_lseek(descriptor,2,SEEK_SET)==2&&native_ftell(s)==2);
+    CHECK(model_lseek(descriptor,4,SEEK_SET)==4&&native_ftell(s)==4);
+    CHECK(native_fclose(s)==0);
 
     s=open_stream("r","abcdef",false);f=model_file(s->fd);CHECK(native_setvbuf(s,NULL,_IOFBF,4)==0);
     CHECK(native_fgetc(s)=='a'&&f->position==4);

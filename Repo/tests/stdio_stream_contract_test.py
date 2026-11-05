@@ -38,6 +38,7 @@ def build_program():
 #include <errno.h>
 #include <limits.h>
 #include <pthread.h>
+#include <stdarg.h>
 #include <sched.h>
 #include <sys/types.h>
 #undef _IONBF
@@ -119,6 +120,11 @@ static model_file_t *model_file(int fd) {
 }
 static int model_open(const char *path,uint64_t flags,...) {
     CHECK(path && next_fd<64);
+    if (flags & SYSCALL_OPEN_CREATE) {
+        va_list arguments; va_start(arguments,flags);
+        unsigned mode=va_arg(arguments,unsigned); va_end(arguments);
+        CHECK(mode==0666u);
+    }
     if (fail_open_error) { int error=fail_open_error; fail_open_error=0; return -error; }
     int fd=(int)next_fd++; model_file_t *file=calloc(1,sizeof(*file)); CHECK(file);
     file->capacity=131072; file->data=calloc(1,file->capacity); CHECK(file->data);
@@ -177,6 +183,10 @@ static int64_t model_lseek(int fd,int64_t offset,int whence) {
 static native_FILE *open_stream(const char *mode,const char *data,bool seekable) {
     next_data=data; next_seekable=seekable;
     native_FILE *stream=native_fopen("fixture",mode); CHECK(stream);
+    CHECK(stream->buffering==_IOFBF && stream->buffer_capacity==BUFSIZ && stream->buffer);
+    /* This fixture exercises explicitly unbuffered behavior. The buffered
+     * suite selects its own modes using the same production stream setup. */
+    CHECK(native_setvbuf(stream,NULL,_IONBF,0)==0);
     model_file(stream->fd)->stream=stream; return stream;
 }
 static void pushback_and_position(void) {

@@ -34,6 +34,7 @@ typedef struct
     bool running;
     int shell_handle;
     bool command_active;
+    char *pending_command;
     bool last_output_newline;
 } atk_shell_app_t;
 
@@ -552,6 +553,24 @@ static void shell_on_submit(atk_widget_t *terminal, void *context, const char *l
     }
 
     const char *command = (line && *line) ? line : "";
+    if (app->command_active)
+    {
+        if (app->pending_command)
+        {
+            shell_append(app, "A command is already waiting.\n");
+            return;
+        }
+        size_t length = strlen(command) + 1;
+        app->pending_command = malloc(length);
+        if (!app->pending_command)
+        {
+            shell_append(app, "Unable to queue command: out of memory.\n");
+            return;
+        }
+        memcpy(app->pending_command, command, length);
+        shell_append(app, "Waiting for the current command to finish...\n");
+        return;
+    }
     int start = sys_shell_exec(app->shell_handle, command, 0);
     if (start < 0)
     {
@@ -676,6 +695,15 @@ static bool shell_poll_output(atk_shell_app_t *app)
             shell_append(app, "\n");
         }
         shell_append_prompt(app);
+        if (app->pending_command)
+        {
+            char *pending = app->pending_command;
+            app->pending_command = NULL;
+            shell_append(app, pending);
+            shell_append(app, "\n");
+            shell_on_submit(app->terminal, app, pending);
+            free(pending);
+        }
         changed = true;
     }
     return changed;
@@ -742,6 +770,9 @@ int main(void)
     atk_main_register_close_handler(shell_on_close_event, &app);
 
     atk_main(&main_cfg);
+
+    free(app.pending_command);
+    app.pending_command = NULL;
 
     if (app.shell_handle >= 0)
     {

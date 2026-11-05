@@ -96,6 +96,7 @@
 #define STACK_OWNER_BUCKET_SIZE (1UL << STACK_OWNER_BUCKET_SHIFT)
 #define STACK_OWNER_BUCKET_COUNT 256u
 #define STACK_OWNER_BUCKET_MASK (STACK_OWNER_BUCKET_COUNT - 1)
+#define PROCESS_FUTEX_BUCKET_COUNT 64u
 
 typedef uint64_t cpu_context_t;
 
@@ -334,6 +335,9 @@ struct thread
      * syscall stack. Scheduler locking protects registration and notification. */
     wait_queue_t futex_queue;
     uintptr_t futex_address;
+    thread_t *futex_bucket_prev;
+    thread_t *futex_bucket_next;
+    bool futex_indexed;
     bool futex_waiting;
     bool futex_notified;
     bool futex_interrupted;
@@ -341,6 +345,7 @@ struct thread
     alix_siginfo_t signal_info[ALIX_SIGNAL_COUNT];
     alix_stack_t signal_altstack;
     struct process_signal_frame *signal_frames;
+    struct process_signal_tid_alias *signal_tid_aliases;
     uint64_t signal_sequence;
     uint64_t signal_jump_epoch;
     uint32_t signal_depth;
@@ -351,6 +356,8 @@ struct thread
     bool sigwait_active;
     wait_queue_t sigwait_queue;
     fd_description_t *vm_file_prepare; /* Caller-independent ownership until VM publication. */
+    void *vm_fault_state;
+    bool vm_syscall_active;
 };
 
 struct process
@@ -371,10 +378,15 @@ struct process
     spinlock_t memory_lock;
     spinlock_t context_lock;
     thread_t *threads;
+    uint32_t vm_syscall_users;
+    bool vm_pager_busy;
+    /* Scheduler-locked, intrusive registrations; no borrowed user pointers. */
+    thread_t *futex_buckets[PROCESS_FUTEX_BUCKET_COUNT];
     uint32_t thread_count;
     uint32_t running_thread_count;
     uint32_t join_waiters;
     uint64_t user_exit_owner_tid;
+    uint64_t exec_owner_tid;
     alix_sigaction_t signal_actions[ALIX_SIGNAL_COUNT];
     alix_sigset_t signal_pending;
     alix_siginfo_t signal_info[ALIX_SIGNAL_COUNT];
@@ -403,6 +415,8 @@ struct process
     process_user_region_t *user_regions;
     struct process_vm_area *vm_areas;
     struct process_vm_transaction *vm_pending;
+    paging_tlb_ticket_t vm_cow_ticket;
+    uint64_t vm_swapped_pages;
     uintptr_t user_entry_point;
     void *user_elf_metadata;
     size_t user_elf_metadata_size;
@@ -444,6 +458,15 @@ struct process
 };
 
 #define RUN_QUEUE_CPU_INVALID 0xFFFFFFFFu
+bool process_clone_user_memory_locked(process_t *child, process_t *source);
+bool process_vm_clone_locked(process_t *child, process_t *source);
+bool process_vm_pager_start(void);
+int process_vm_syscall_enter(void);
+void process_vm_syscall_leave(void);
+bool process_vm_page_in(process_t *, uintptr_t);
+paddr_t *process_legacy_page_slot_locked(process_t *, uintptr_t);
+paddr_t *process_legacy_swap_candidate_locked(process_t *, uintptr_t *, bool swapped);
+
 #define RUN_QUEUE_CPU_CLAIMED 0xFFFFFFFEu
 
 typedef struct run_queue
@@ -804,6 +827,10 @@ void process_free_user_regions(process_t *process);
 bool process_heap_release_from(process_t *process, uintptr_t virt_start);
 void process_reap_retired_memory(void);
 bool process_memory_read_user_u32(process_t *process, uintptr_t address, uint32_t *value_out);
+/* A busy memory lock returns false with busy_out=true, without waiting or
+ * exposing physical backing; all interrupt/preemption state is restored. */
+bool process_memory_try_read_user_u32(process_t *process, uintptr_t address,
+                                      uint32_t *value_out, bool *busy_out);
 bool process_vm_contains_locked(process_t *process, uintptr_t address);
 bool process_vm_fault_locked(process_t *process, uintptr_t address, bool write_access, bool execute_access);
 bool process_vm_resolve_locked(process_t *process, uintptr_t address, bool write_access,
@@ -914,6 +941,8 @@ bool thread_assert_stack_current(thread_t *thread, const char *context);
 bool thread_process_deferred_frees_locked(uint32_t cpu_index, deferred_free_stats_t *stats);
 /* Ordinary idle context only; skips IRQ-disabled or preempt-guarded calls. */
 void process_reap_deferred_threads(void);
+/* Scheduler lock held; call before removing a thread's process ownership. */
+void process_futex_cancel_wait_locked(thread_t *thread);
 void thread_stack_watch_maybe_arm(thread_t *thread);
 void thread_registry_add(thread_t *thread);
 void procfs_register_process_priority(process_t *process);
@@ -953,4 +982,13 @@ static inline void paging_space_clear_active_cpu(paging_space_t *space, uint32_t
     __atomic_fetch_and(&space->active_cpu_mask, ~(1u << cpu_index), __ATOMIC_RELEASE);
 }
 
+process_t *process_fork_current(const syscall_frame_t *frame, process_launch_context_t *context,
+                                process_creation_watch_t *watch);
+void process_discard_image(process_t *image);
+process_t *process_prepare_exec_image(const uint8_t *, size_t, process_launch_context_t *,
+    const char *const *, size_t, process_tls_allocation_t *);
+int process_exec_commit(syscall_frame_t *, process_t *, const process_tls_allocation_t *);
+bool process_signal_fork_prepare(const thread_t *, void **);
+void process_signal_fork_commit(thread_t *, void *);
+void process_signal_fork_discard(void *);
 #endif /* PROCESS_INTERNAL_H */

@@ -10,6 +10,7 @@
 #include "atk_menu_bar.h"
 #include "atk_window.h"
 #include "atk/atk_list_view.h"
+#include "atk/atk_font.h"
 #include "atk/atk_scrollbar.h"
 #include "atk/atk_tabs.h"
 #include "atk/atk_text_input.h"
@@ -389,6 +390,19 @@ void atk_background_refresh(void)
 }
 
 #if defined(KERNEL_BUILD) && !defined(ATK_NO_DESKTOP_APPS)
+extern const unsigned char g_zen_desktop_icon_png[];
+extern const size_t g_zen_desktop_icon_png_size;
+
+static void atk_desktop_set_zen_icon(atk_widget_t *button)
+{
+    if (!button) return;
+    video_color_t *pixels = NULL;
+    int width = 0, height = 0, stride = 0;
+    if (png_decode_rgba32(g_zen_desktop_icon_png, g_zen_desktop_icon_png_size,
+                         &pixels, &width, &height, &stride) == 0 && pixels)
+        atk_button_set_icon(button, pixels, width, height, stride, true, true);
+}
+
 static bool atk_desktop_load_icon(const char *path,
                                   video_color_t **pixels_out,
                                   int *width_out,
@@ -699,7 +713,7 @@ static int atk_mask_background_regions(const atk_state_t *state,
             {
                 continue;
             }
-            atk_bg_rect_t mask;
+            atk_bg_rect_t mask = {0};
             atk_window_bounds(window, &mask);
 
             atk_bg_rect_t next[ATK_MAX_BG_RECTS];
@@ -1054,6 +1068,10 @@ static void atk_clear_focus_widget(atk_state_t *state)
 
 void atk_init(void)
 {
+#ifdef KERNEL_BUILD
+    /* video_init reaches here before either the render or ATK state lock. */
+    (void)atk_font_prepare();
+#endif
     atk_state_lock_init();
     uint64_t irq_state = atk_state_lock_acquire();
     atk_state_t *state = atk_state_get();
@@ -1147,12 +1165,12 @@ void atk_enter_mode(void)
                                     80,
                                     88,
                                     88,
-                                    "Browser",
+                                    "Zen",
                                     ATK_BUTTON_STYLE_TITLE_BELOW,
                                     true,
                                     action_open_atk_browser,
                                     state);
-    atk_desktop_set_button_icon(button, ATK_DESKTOP_ICON_BASE "/konqueror.png");
+    atk_desktop_set_zen_icon(button);
 
     button = atk_desktop_add_button(state,
                                     740,
@@ -2131,18 +2149,22 @@ static bool atk_window_resize_drag(atk_state_t *state, int cursor_x, int cursor_
 
     int screen_w = video_screen_width();
     int screen_h = video_screen_height();
+    int min_y = atk_menu_bar_height(state);
+#ifdef KERNEL_BUILD
+    if (atk_window_is_chrome_visible(win)) min_y += ATK_WINDOW_BORDER;
+#endif
     if (new_width > screen_w)
     {
         new_width = screen_w;
     }
-    if (new_height > screen_h)
+    if (new_height > screen_h - min_y)
     {
-        new_height = screen_h;
+        new_height = screen_h - min_y;
     }
     if (new_x < 0) new_x = 0;
-    if (new_y < 0) new_y = 0;
     if (new_x + new_width > screen_w) new_x = screen_w - new_width;
     if (new_y + new_height > screen_h) new_y = screen_h - new_height;
+    if (new_y < min_y) new_y = min_y;
 
     if (new_width == state->resize_proposed_w &&
         new_height == state->resize_proposed_h &&

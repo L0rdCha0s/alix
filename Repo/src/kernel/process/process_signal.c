@@ -3,6 +3,14 @@
 #include "signal_abi.h"
 #include "syscall.h"
 
+typedef struct process_signal_tid_alias
+{
+    uint64_t tid;
+    struct process_signal_tid_alias *next;
+} process_signal_tid_alias_t;
+
+static bool signal_checkpoint_owner(const thread_t *, uint64_t);
+
 #define SIGNAL_USER_CS (GDT_SELECTOR_USER_CODE | 3u)
 #define SIGNAL_USER_SS (GDT_SELECTOR_USER_DATA | 3u)
 #define SIGNAL_RFLAGS_ALLOWED 0x0000000000210ED7ULL
@@ -15,6 +23,7 @@ typedef struct process_signal_frame
     uint64_t owner_tid, sequence;
     alix_signal_frame_t image;
     uint8_t scratch_fp[512] __attribute__((aligned(16)));
+    uint64_t inherited_owner_tid;
 } process_signal_frame_t;
 
 _Static_assert(sizeof(alix_sigaction_t) == 24, "signal action wire");
@@ -416,7 +425,9 @@ static bool signal_return_valid(thread_t *thread, process_signal_frame_t *record
         mxcsr_mask = 0x0000FFBFu;
     return record->owner_tid == thread->tid && record->address == address &&
            image->magic == ALIX_SIGNAL_FRAME_MAGIC && image->version == ALIX_SIGNAL_ABI_VERSION &&
-           image->size == sizeof(*image) && image->owner_tid == thread->tid &&
+           image->size == sizeof(*image) &&
+           (image->owner_tid == thread->tid ||
+            (record->inherited_owner_tid && image->owner_tid == record->inherited_owner_tid)) &&
            image->sequence == record->sequence && image->frame_address == address &&
            context->uc_version == ALIX_SIGNAL_ABI_VERSION && context->uc_size == sizeof(*context) &&
            context->uc_flags == ALIX_UC_FXSAVE64 && !(context->uc_sigmask & ~ALIX_SIGNAL_MASK) &&
@@ -945,6 +956,12 @@ void process_signal_thread_cleanup(thread_t *thread)
 {
     if (!thread)
         return;
+    while (thread->signal_tid_aliases)
+    {
+        process_signal_tid_alias_t *alias = thread->signal_tid_aliases;
+        thread->signal_tid_aliases = alias->next;
+        free(alias);
+    }
     process_signal_frame_t *record = thread->signal_frames;
     thread->signal_frames = NULL;
     thread->sigwait_active = false;
@@ -1043,7 +1060,7 @@ int process_signal_jump(syscall_frame_t *frame, uint32_t operation, uintptr_t bu
             (saved->saved_mask & SIGNAL_UNBLOCKABLE) ||
             (!(saved->flags & ALIX_SIGJUMP_SAVE_MASK) && saved->saved_mask))
             result = -EINVAL;
-        else if (saved->owner_tid != thread->tid || !saved->epoch ||
+        else if (!signal_checkpoint_owner(thread, saved->owner_tid) || !saved->epoch ||
                  saved->epoch != thread->signal_jump_epoch)
             result = -EPERM;
         else if (thread->io_request)
@@ -1100,4 +1117,79 @@ int process_signal_jump(syscall_frame_t *frame, uint32_t operation, uintptr_t bu
     free(saved);
     cpu_restore_flags(irq);
     return result;
+}
+
+
+typedef struct
+{
+    process_signal_frame_t *frames;
+    process_signal_tid_alias_t *aliases;
+    uint64_t sequence, jump_epoch;
+    uint32_t depth;
+    bool onstack;
+} signal_fork_state_t;
+
+void process_signal_fork_discard(void *opaque)
+{
+    signal_fork_state_t *state = opaque;
+    if (!state) return;
+    while (state->frames)
+    { process_signal_frame_t *frame = state->frames; state->frames = frame->previous; free(frame); }
+    while (state->aliases)
+    { process_signal_tid_alias_t *alias = state->aliases; state->aliases = alias->next; free(alias); }
+    free(state);
+}
+
+bool process_signal_fork_prepare(const thread_t *source, void **output)
+{
+    *output = NULL;
+    signal_fork_state_t *state = calloc(1, sizeof(*state));
+    if (!state) return false;
+    state->sequence = source->signal_sequence; state->jump_epoch = source->signal_jump_epoch;
+    state->depth = source->signal_depth; state->onstack = source->signal_onstack;
+    process_signal_frame_t **tail = &state->frames;
+    for (process_signal_frame_t *old = source->signal_frames; old; old = old->previous)
+    {
+        process_signal_frame_t *copy = malloc(sizeof(*copy));
+        if (!copy) goto failed;
+        *copy = *old; copy->previous = NULL;
+        if (!copy->inherited_owner_tid) copy->inherited_owner_tid = old->owner_tid;
+        *tail = copy; tail = &copy->previous;
+    }
+    process_signal_tid_alias_t **alias_tail = &state->aliases;
+    process_signal_tid_alias_t *copy = malloc(sizeof(*copy));
+    if (!copy) goto failed;
+    *copy = (process_signal_tid_alias_t){source->tid, NULL};
+    *alias_tail = copy; alias_tail = &copy->next;
+    for (process_signal_tid_alias_t *old = source->signal_tid_aliases; old; old = old->next)
+    {
+        copy = malloc(sizeof(*copy));
+        if (!copy) goto failed;
+        *copy = (process_signal_tid_alias_t){old->tid, NULL};
+        *alias_tail = copy; alias_tail = &copy->next;
+    }
+    *output = state; return true;
+failed:
+    process_signal_fork_discard(state); return false;
+}
+
+void process_signal_fork_commit(thread_t *target, void *opaque)
+{
+    signal_fork_state_t *state = opaque;
+    target->signal_frames = state->frames;
+    target->signal_tid_aliases = state->aliases;
+    target->signal_sequence = state->sequence; target->signal_jump_epoch = state->jump_epoch;
+    target->signal_depth = state->depth; target->signal_onstack = state->onstack;
+    for (process_signal_frame_t *frame = state->frames; frame; frame = frame->previous)
+        frame->owner_tid = target->tid;
+    state->frames = NULL; state->aliases = NULL;
+    process_signal_fork_discard(state);
+}
+
+static bool signal_checkpoint_owner(const thread_t *thread, uint64_t tid)
+{
+    if (tid == thread->tid) return true;
+    for (process_signal_tid_alias_t *alias = thread->signal_tid_aliases; alias; alias = alias->next)
+        if (alias->tid == tid) return true;
+    return false;
 }

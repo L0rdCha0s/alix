@@ -31,6 +31,8 @@ Typical loop pattern:
 - Widget coordinates are relative to their parent.
 - Use `atk_widget_absolute_position()` / `atk_widget_absolute_bounds()` when you need screen-space geometry.
 - Prefer clipped drawing helpers where available (for example `atk_font_draw_string_clipped()`) to avoid overdraw outside a widget’s bounds.
+- Image painting clips both its background and source pixels to its parent and
+  validates row stride; source dimensions do not authorize painting outside a window.
 
 ## Input dispatch, focus, capture
 
@@ -50,6 +52,11 @@ Typical loop pattern:
 ## Performance and flicker avoidance
 
 - Mark dirty rectangles as tightly as possible; avoid full-screen invalidation unless necessary.
+- Remote windows skip publication when an uploaded frame matches the current
+  surface. Idle zero-motion mouse packets do not trigger cursor work. The video
+  flush composes the stationary cursor into dirty rows, including before page
+  flips, so rendering does not expose a cursor-less frame. Logical cursor
+  coordinates can reach the last screen pixel; the glyph is clipped at edges.
 - In userland, enable dirty tracking (`atk_user_enable_dirty_tracking(win, true)`) so `atk_user_present()` can skip redundant uploads to the kernel when nothing changed.
 - For apps that draw directly into the buffer every frame (games), you can disable dirty tracking and present every frame (or use `atk_user_present_force()`).
 - ATK assumes a single UI thread mutates UI state. Avoid modifying widgets concurrently from other threads.

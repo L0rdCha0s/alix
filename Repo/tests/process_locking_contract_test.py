@@ -49,6 +49,7 @@ def main() -> int:
 
     tick = function_body(process_api, "void process_on_timer_tick(interrupt_frame_t *frame)")
     for lock_taking_work in (
+        "process_vm_poll_tlb_completion()",
         "scheduler_log_process_age_snapshot(now_ticks)",
         "sleep_queue_wake_due(now_ticks)",
         "stack_watch_check_timeouts()",

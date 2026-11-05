@@ -14,6 +14,11 @@ typedef struct atk_rect atk_rect_t;
  */
 bool atk_font_available(void);
 
+/* Load a font snapshot outside UI/render locks. Kernel drawing never performs
+ * file I/O; failed preparation uses the bitmap fallback until an explicit
+ * later prepare call succeeds. Startup calls this before taking ATK locks. */
+bool atk_font_prepare(void);
+
 /* Return the pixel width of a UTF-8 string when drawn with the current font. */
 int atk_font_text_width(const char *text);
 
@@ -31,8 +36,8 @@ int atk_font_line_height(void);
 /*
  * Draw a string at (x, baseline_y).
  *
- * `fg` and `bg` are colors used by the renderer; background is used for any
- * glyph blending/clipping behavior.
+ * Both TrueType and bitmap glyphs composite over the current surface.
+ * `bg` is retained for API compatibility; callers paint any background first.
  */
 void atk_font_draw_string(int x, int baseline_y, const char *text, video_color_t fg, video_color_t bg);
 

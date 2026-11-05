@@ -50,6 +50,7 @@ def test_tcp():
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
+#include <errno.h>
 typedef struct { uint32_t ipv4_addr; } net_interface_t;
 typedef struct { int unused; } wait_queue_t;
 typedef void thread_t;
@@ -59,11 +60,18 @@ typedef struct net_tcp_socket net_tcp_socket_t;
 """ + types + r"""
 static net_tcp_socket_t sock;
 static unsigned wakes, acks;
+static unsigned preempt;
+static uint64_t g_tcp_pending_send_accepts, g_tcp_pending_send_bytes;
 static uint64_t now = 5, g_connect_timeout_ticks = 1200;
 static uint64_t timer_ticks(void) { return now; }
 static uint32_t timer_frequency(void) { return 100; }
 static uint64_t tcp_lock(void) { return 0; }
 static void tcp_unlock(uint64_t f) { (void)f; }
+static void spinlock_preempt_disable(void) { ++preempt; }
+static void spinlock_preempt_enable(void) { assert(preempt); --preempt; }
+static void io_event_service_notify(void) {}
+static void tcp_log_send_block(const net_tcp_socket_t *s,const char *why,size_t n)
+{ (void)s;(void)why;(void)n; }
 static void wait_queue_wake_all(wait_queue_t *q) { (void)q; wakes++; }
 static void tcp_log_hex32(uint32_t n) { (void)n; }
 static net_tcp_socket_t *tcp_find_socket(net_interface_t *i, uint16_t l,
@@ -86,6 +94,8 @@ static void tcp_reassembly_drain(net_tcp_socket_t *s) { (void)s; }
                       "static void tcp_mark_error", "static bool tcp_rx_reserve_space",
                       "static uint16_t read_be16", "static uint32_t read_be32",
                       "static uint16_t tcp_checksum", "static void tcp_process_payload",
+                      "static int tcp_owned_transport_pin_locked", "static void tcp_owned_transport_unpin_locked",
+                      "static size_t tcp_write_capacity_locked", "bool net_tcp_socket_send",
                       "void net_tcp_handle_frame"]:
         program += definition(source, signature) + "\n"
     program += r"""
@@ -193,6 +203,17 @@ int main(void)
     length = frame(17, 0, TCP_FLAG_ACK | TCP_FLAG_PSH);
     net_tcp_handle_frame(&iface, packet, length);
     assert(acks == 1 && !sock.ack_pending);
+    /* The already-supported sub-MSS append retains the oldest timer and
+     * cannot overrun the peer window while earlier bytes await their ACK. */
+    reset(); sock.awaiting_ack=true; sock.remote_window=8;
+    sock.pending_payload_len=sock.unacked_len=3; memcpy(sock.pending_payload,"old",3);
+    sock.last_send_tick=1; sock.retry_count=2;
+    assert(tcp_write_capacity_locked(&sock)==5);
+    assert(net_tcp_socket_send(&sock,(const uint8_t *)"new",3));
+    assert(sock.pending_payload_len==6 && sock.unacked_len==6 && !memcmp(sock.pending_payload,"oldnew",6));
+    assert(sock.last_send_tick==1 && sock.retry_count==2 && tcp_write_capacity_locked(&sock)==2);
+    assert(!net_tcp_socket_send(&sock,(const uint8_t *)"bad",3) && sock.pending_payload_len==6);
+    assert(g_tcp_pending_send_accepts==1 && g_tcp_pending_send_bytes==3 && !preempt);
     return 0;
 }
 """

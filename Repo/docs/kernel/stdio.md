@@ -44,8 +44,10 @@ The specification leaves that particular position unspecified.
 Explicit `fflush(stream)` reconciles pending input to the logical stream
 position before discarding its pushback. If the descriptor cannot seek, the
 flush fails and preserves the pending bytes. `fflush(NULL)` is an output-only operation
-and leaves input pushback alone. Streams start unbuffered. `setvbuf` selects
-unbuffered, full or line buffering; `setbuf` selects full/unbuffered mode.
+and leaves input pushback alone. Newly opened streams default to full buffering;
+the owned descriptor runtime selects line buffering when `isatty` identifies a
+terminal. Startup `stdin`, `stdout` and `stderr` remain unbuffered. `setvbuf`
+selects unbuffered, full or line buffering; `setbuf` selects full/unbuffered mode.
 The positioning behavior follows the
 [POSIX fseek specification](https://man7.org/linux/man-pages/man3/fseek.3p.html).
 
@@ -62,7 +64,8 @@ records from eight explicitly pinned CPUs.
 
 ## Buffered streams
 
-Configured buffers are heap owned even when the caller supplies storage. The
+Default buffers contain `BUFSIZ` (4096) bytes. Configured buffers are heap owned
+even when the caller supplies storage. The
 implementation does not retain that array, so later use from another thread
 cannot access a caller's expired stack. A null buffer and size zero select
 `BUFSIZ`; invalid modes, allocation failures and attempts to reconfigure after
@@ -75,7 +78,22 @@ report newly delivered bytes correctly, allowing a retry without duplication.
 Read-ahead and pushback are reflected in logical positions. Explicit input
 flushing reconciles the descriptor before discarding unread data; failed
 nonseekable reconciliation preserves it. Unbuffered/line input requests flush
-other line-buffered output before acquiring the input stream's mutex.
+other line-buffered output before acquiring the input stream's mutex; reading
+a fully buffered regular file does not trigger that interactive prompt flush.
+With an empty full buffer, requests at least as large as its capacity use direct
+I/O, avoiding a copy and extra small requests for bulk reads or writes.
+
+Streams opened by `fopen` keep private position metadata outside the public
+`FILE` layout. After a successful descriptor seek establishes seekability,
+reads and writes track that offset, `ftell` uses the known position, and
+`SEEK_SET`/`SEEK_CUR` within the read-ahead buffer adjust its cursor without
+another kernel request. Pushback and out-of-buffer seeks retain the ordinary
+positioning path. Errors and explicit `fflush(stream)` invalidate the cached
+offset; append output continues to query the current end of the file.
+`fdopen`, standard streams and any stream whose descriptor escapes through
+`fileno` use descriptor queries, so raw aliases cannot invalidate a private
+position assumption. The owned stream allocation retains the existing public
+`FILE` prefix and frees as before.
 
 An allocation-free registry walk pins each stream while global flushing runs.
 The registry lock is released before stream locking or I/O. `fclose` removes

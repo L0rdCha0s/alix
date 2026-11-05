@@ -13,6 +13,11 @@
 #include "lapic.h"
 #include "smp.h"
 #include "timer.h"
+#include "physmem.h"
+
+/* An IRQ is only a hint: a delayed prior interrupt can observe waiting=true
+ * before the new command's PxCI write. Count such hints for diagnostics. */
+static uint64_t g_ahci_early_completion_hints;
 
 #ifndef AHCI_TRACE_IRQ
 #define AHCI_TRACE_IRQ 0
@@ -166,6 +171,7 @@ typedef struct
     volatile bool busy;
     volatile bool waiting;
     volatile bool wait_success;
+    volatile bool wait_error;
     uint32_t wait_slot_mask;
 #if AHCI_TRACE_PERF
     uint64_t perf_commands;
@@ -612,6 +618,9 @@ static void ahci_handle_port_irq(uint32_t port_no)
     {
         return;
     }
+    /* Publish errors before acknowledging PxIS, so the command owner cannot
+     * observe both a cleared hardware error and an unset software latch. */
+    if (status & HBA_PxIS_TFES) ctx->wait_error = true;
     port->is = status;
 #if AHCI_TRACE_IRQ
     ahci_log_port_hex(port_no, "irq PxIS=", status);
@@ -739,7 +748,14 @@ static bool ahci_issue_cmd(ahci_port_ctx_t *ctx,
     {
         user_buffer = user_ptr_range_valid(buffer, (size_t)total_bytes);
         thread_t *stack_owner = process_find_stack_owner(buffer, (size_t)total_bytes);
-        if (user_buffer || stack_owner)
+        /* PRDT addresses are physical. PMM pages are reached through the
+         * high-half physmap, whereas heap buffers use the low identity map.
+         * Bounce direct-map payloads through owned DMA32 heap storage rather
+         * than programming their virtual address into the controller. */
+        uintptr_t supplied = (uintptr_t)buffer;
+        bool direct_map = supplied >= KERNEL_PHYSMAP_BASE && supplied < KERNEL_IOREMAP_BASE &&
+            total_bytes <= KERNEL_IOREMAP_BASE - supplied;
+        if (user_buffer || stack_owner || direct_map)
         {
             bounce_alloc = (uint8_t *)malloc((size_t)total_bytes);
             if (!bounce_alloc)
@@ -843,8 +859,10 @@ static bool ahci_issue_cmd(ahci_port_ctx_t *ctx,
     port->is = (uint32_t)~0U;
     ctx->wait_slot_mask = (uint32_t)(1U << slot);
     ctx->wait_success = false;
+    ctx->wait_error = false;
     bool use_irq = g_ahci_use_interrupts;
     ctx->waiting = use_irq;
+    __atomic_thread_fence(__ATOMIC_RELEASE);
     port->ci |= ctx->wait_slot_mask;
     if (use_irq)
     {
@@ -888,22 +906,29 @@ static bool ahci_issue_cmd(ahci_port_ctx_t *ctx,
             ahci_log_wait_timeout(ctx->port_no, "irq", command, lba, count, port);
             use_irq = false;
         }
-        if (ctx->wait_success)
+        if (ctx->wait_success && !(port->ci & ctx->wait_slot_mask) && !ctx->wait_error)
         {
             if (port->is & HBA_PxIS_TFES)
             {
                 port->is = HBA_PxIS_TFES;
                 goto cleanup;
             }
+            __atomic_thread_fence(__ATOMIC_ACQUIRE);
             result = true;
             goto cleanup;
         }
-        if (use_irq)
+        if (ctx->wait_success)
+        {
+            __atomic_add_fetch(&g_ahci_early_completion_hints, 1, __ATOMIC_RELAXED);
+        }
+        else if (use_irq)
         {
             ahci_log_wait_timeout(ctx->port_no, "irq_fail", command, lba, count, port);
         }
     }
 
+    /* Never retire a DMA buffer, reuse the command table, or drop port busy
+     * on an IRQ hint alone. PxCI is authoritative even after a successful IRQ. */
     uint32_t poll_timeout = AHCI_CMD_TIMEOUT;
     while (port->ci & ctx->wait_slot_mask)
     {
@@ -922,11 +947,12 @@ static bool ahci_issue_cmd(ahci_port_ctx_t *ctx,
 #endif
         process_yield();
     }
-    if (port->is & HBA_PxIS_TFES)
+    if ((port->is & HBA_PxIS_TFES) || ctx->wait_error)
     {
         port->is = HBA_PxIS_TFES;
         goto cleanup;
     }
+    __atomic_thread_fence(__ATOMIC_ACQUIRE);
     result = true;
 
 cleanup:

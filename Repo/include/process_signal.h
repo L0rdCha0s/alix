@@ -7,6 +7,7 @@
 typedef struct thread thread_t;
 typedef struct process process_t;
 bool process_signal_fault(exception_frame_t *, uintptr_t);
+void process_exit_signal(int number) __attribute__((noreturn));
 void process_signal_syscall_return(syscall_frame_t *, uint64_t);
 int process_signal_jump(syscall_frame_t *, uint32_t, uintptr_t, size_t, uint64_t);
 int process_signal_return(syscall_frame_t *, uintptr_t);

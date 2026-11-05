@@ -88,8 +88,11 @@ int main(int argc, char **argv)
     CHECK(stream && configure_owned_buffer(stream, _IOLBF, 16), "line buffer");
     CHECK(fwrite("abc", 1, 3, stream) == 3 && file_size(stream, 0), "line prefix queued");
     FILE *input = fopen(path, "r");
-    CHECK(input && fgetc(input) == 'a' && file_size(stream, 3) && fclose(input) == 0,
-          "input request flushes line output");
+    /* Prompt flushing is an interactive/unbuffered input rule. A regular
+     * file now defaults to full buffering and must not flush other streams. */
+    CHECK(input && setvbuf(input, NULL, _IONBF, 0) == 0 && fgetc(input) == 'a' &&
+          file_size(stream, 3) && fclose(input) == 0,
+          "unbuffered input request flushes line output");
     CHECK(fwrite("\ndef", 1, 4, stream) == 4 && file_size(stream, 4) && ftell(stream) == 7,
           "newline flush leaves suffix queued");
     CHECK(fclose(stream) == 0, "close flushes suffix");

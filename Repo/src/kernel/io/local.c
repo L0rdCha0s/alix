@@ -1,4 +1,5 @@
 #include "io_local.h"
+#include "io_event_service.h"
 #include "spinlock.h"
 #include "heap.h"
 #include "libc.h"
@@ -71,6 +72,7 @@ static int local_close(void *context)
     local_rights_t *discard = local_discard_lane(&pair->lanes[side]);
     bool last = !pair->active[side ^ 1];
     spinlock_unlock(&pair->lock);
+    io_event_service_notify();
     local_rights_release(discard);
     free(endpoint);
     if (last) free(pair);
@@ -130,6 +132,7 @@ int io_local_shutdown(fd_description_t *description, unsigned direction)
     }
     if (direction != 0) pair->write_closed[endpoint->side] = true;
     spinlock_unlock(&pair->lock);
+    io_event_service_notify();
     local_rights_release(discard);
     return 0;
 }
@@ -271,6 +274,7 @@ bool io_local_execute(io_request_t *request, io_service_result_t *result)
     io_local_control_t *control = io_request_cwd(request);
     local_rights_t *discard = NULL;
     bool complete = true;
+    bool readiness_changed = false;
     spinlock_lock(&pair->lock);
     local_lane_t *lane = &pair->lanes[writing ? peer : side];
     size_t bytes = operation->count;
@@ -295,6 +299,7 @@ bool io_local_execute(io_request_t *request, io_service_result_t *result)
             }
             size_t tail = (lane->head + lane->used) % LOCAL_CAPACITY;
             size_t first = bytes < LOCAL_CAPACITY - tail ? bytes : LOCAL_CAPACITY - tail;
+            readiness_changed = lane->used == 0;
             memcpy(lane->data + tail, operation->data, first);
             memcpy(lane->data, operation->data + first, bytes - first);
             lane->used += bytes; lane->sent += bytes;
@@ -336,6 +341,7 @@ bool io_local_execute(io_request_t *request, io_service_result_t *result)
         }
         if (!(operation->flags & LOCAL_PEEK))
         {
+            readiness_changed = lane->used == LOCAL_CAPACITY || lane->records == LOCAL_RECORDS;
             if (record && record->position == lane->received)
             {
                 lane->first = record->next; if (!lane->first) lane->last = NULL;
@@ -350,6 +356,7 @@ bool io_local_execute(io_request_t *request, io_service_result_t *result)
     }
 unlocked:
     spinlock_unlock(&pair->lock);
+    if (readiness_changed) io_event_service_notify();
     local_rights_release(discard);
     if (!complete && ((fd_description_status_flags(description) & FD_STATUS_NONBLOCK) || (operation->flags & LOCAL_DONTWAIT)))
     { result->result = -EAGAIN; complete = true; }

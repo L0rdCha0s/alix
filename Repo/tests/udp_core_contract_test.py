@@ -28,6 +28,7 @@ static uint64_t spinlock_lock_irqsave(spinlock_t *lock){
     while(atomic_exchange_explicit(&lock->value,true,memory_order_acquire))sched_yield();held[depth++]=lock;return 0;
 }
 static void spinlock_unlock_irqrestore(spinlock_t *lock,uint64_t flags){CHECK(!flags&&depth&&held[depth-1]==lock);--depth;atomic_store_explicit(&lock->value,false,memory_order_release);}
+static void io_event_service_notify(void){CHECK(!depth);}
 static spinlock_t config_lock;
 static atomic_int live,fail_allocation=-1;
 static void *checked_malloc(size_t n){int fail=atomic_load(&fail_allocation);if(!fail)return NULL;if(fail>0)atomic_fetch_sub(&fail_allocation,1);void*p=malloc(n);if(p)atomic_fetch_add(&live,1);return p;}

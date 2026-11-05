@@ -368,19 +368,35 @@ void atk_image_draw(const atk_state_t *state, const atk_widget_t *image)
     int origin_y = parent ? parent->y : 0;
     int draw_x = origin_x + image->x;
     int draw_y = origin_y + image->y;
+    int width = image->width, height = image->height;
+    int source_x = 0, source_y = 0;
+    if (parent)
+    {
+        if (draw_x < origin_x) { source_x = origin_x - draw_x; width -= source_x; draw_x = origin_x; }
+        if (draw_y < origin_y) { source_y = origin_y - draw_y; height -= source_y; draw_y = origin_y; }
+        if (width > origin_x + parent->width - draw_x) width = origin_x + parent->width - draw_x;
+        if (height > origin_y + parent->height - draw_y) height = origin_y + parent->height - draw_y;
+    }
+    if (width <= 0 || height <= 0) return;
 
     if (image->width > 0 && image->height > 0)
     {
-        video_draw_rect(draw_x, draw_y, image->width, image->height, state->theme.window_body);
+        video_draw_rect(draw_x, draw_y, width, height, state->theme.window_body);
     }
 
     if (priv->pixels && priv->img_width > 0 && priv->img_height > 0)
     {
+        if ((int64_t)priv->stride_bytes < (int64_t)priv->img_width * (int64_t)sizeof(video_color_t)) return;
+        if (width > priv->img_width - source_x) width = priv->img_width - source_x;
+        if (height > priv->img_height - source_y) height = priv->img_height - source_y;
+        if (width <= 0 || height <= 0) return;
+        const video_color_t *source = (const video_color_t *)((const uint8_t *)priv->pixels +
+            (size_t)source_y * priv->stride_bytes + (size_t)source_x * sizeof(video_color_t));
         video_blit_rgba32_untracked(draw_x,
                                     draw_y,
-                                    priv->img_width,
-                                    priv->img_height,
-                                    priv->pixels,
+                                    width,
+                                    height,
+                                    source,
                                     priv->stride_bytes,
                                     true);
     }

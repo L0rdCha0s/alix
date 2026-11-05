@@ -16,6 +16,17 @@ These names currently identify whole devices, not GPT/MBR partitions. FAT on
 the UEFI boot volume is read by firmware to load the kernel; the kernel does
 not gain a FAT filesystem implementation through the USB block driver.
 
+## AHCI DMA completion
+
+The interrupt handler only provides a completion hint. The command owner checks
+that its hardware `PxCI` bit has cleared before returning success or releasing
+its DMA buffer and port reservation. A delayed interrupt from the preceding
+command can otherwise observe the new waiter before the command-issue write,
+allowing DMA to continue into freed or reused heap storage. Hardware task-file
+errors remain latched until the owner observes them. Release/acquire compiler
+barriers surround descriptor publication and successful completion.
+`g_ahci_early_completion_hints` records hints rejected while `PxCI` remains set.
+
 ## USB host controllers
 
 `src/drivers/xhci.c` discovers PCI xHCI controllers across all 256 buses and

@@ -11,6 +11,7 @@ This folder documents how the kernel boots, schedules work, manages memory, expo
 - Native user child launch and waiting: `docs/kernel/child_processes.md`
 - Signal delivery, masks and synchronous waiting: `docs/kernel/signals.md`
 - Memory (heap, paging, user mappings): `docs/kernel/memory.md`
+- Disk swap, fault continuations and pageable backing: `docs/kernel/paging.md`
 - Native RLBox memory, minimum WASI and WABT trap integration: `docs/kernel/wasm_sandbox.md`
 - Shared file pages, private snapshots and msync: `docs/kernel/file_mappings.md`
 - Volatile named shared-memory objects: `docs/kernel/shared_memory.md`

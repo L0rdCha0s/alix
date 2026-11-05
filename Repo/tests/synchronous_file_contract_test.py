@@ -25,6 +25,9 @@ typedef struct {
     bool fail_write,fail_flush,short_write,oversized;
     atomic_uint block_flush,entered,release;
 } vfs_node_t;
+#define VFS_NODE_CHARACTER 5
+/* This ownership fixture supplies regular files; device dispatch is separate. */
+static unsigned vfs_node_type(vfs_node_t *node){CHECK(node);return 1;}
 typedef struct {vfs_node_t *node;uint64_t offset;bool writable;fd_description_t *description;pthread_mutex_t gate;} io_vfs_file_t;
 static _Thread_local unsigned offset_gates;
 static void io_vfs_offset_lock(io_vfs_file_t *file){CHECK(!pthread_mutex_lock(&file->gate));++offset_gates;}

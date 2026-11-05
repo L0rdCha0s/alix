@@ -15,6 +15,7 @@
 #include "procfs.h"
 #include "spinlock.h"
 #include "errno.h"
+#include "io_event_service.h"
 
 typedef struct thread thread_t;
 
@@ -1146,6 +1147,24 @@ int net_tcp_socket_put_owned(net_tcp_socket_t *socket)
     return result;
 }
 
+/* The existing transport retains at most one MSS, but that budget can hold
+ * several small writes. Report the actual room rather than requiring an ACK
+ * after every small TLS/HTTP record. The TCP lock protects all these fields. */
+static size_t tcp_write_capacity_locked(const net_tcp_socket_t *socket)
+{
+    if (socket->state != TCP_STATE_ESTABLISHED || socket->remote_closed || socket->error || !socket->mss)
+        return 0;
+    size_t limit = socket->mss < sizeof(socket->pending_payload) ? socket->mss : sizeof(socket->pending_payload);
+    size_t outstanding = socket->awaiting_ack ? socket->unacked_len : 0;
+    size_t pending = socket->awaiting_ack ? socket->pending_payload_len : 0;
+    /* ESTABLISHED can append only retained data, never a SYN/FIN sequence byte.
+     * Keep inconsistent state nonwritable instead of indexing past its data. */
+    if (pending != outstanding || pending >= limit || socket->remote_window <= outstanding) return 0;
+    size_t capacity = limit - pending;
+    size_t window = socket->remote_window - outstanding;
+    return capacity < window ? capacity : window;
+}
+
 int net_tcp_socket_owned_snapshot(net_tcp_socket_t *socket, net_tcp_owned_status_t *out)
 {
     if (!out || !tcp_socket_in_pool(socket)) return -EINVAL;
@@ -1159,8 +1178,8 @@ int net_tcp_socket_owned_snapshot(net_tcp_socket_t *socket, net_tcp_owned_status
     if (socket->remote_closed && !socket->rx_size) status |= NET_TCP_OWNED_EOF;
     if (socket->error || socket->state == TCP_STATE_ERROR) status |= NET_TCP_OWNED_ERROR;
     if (socket->state == TCP_STATE_ARP || socket->state == TCP_STATE_SYN_SENT) status |= NET_TCP_OWNED_CONNECTING;
-    if (socket->state == TCP_STATE_ESTABLISHED && !socket->remote_closed &&
-        !socket->awaiting_ack && socket->remote_window) status |= NET_TCP_OWNED_WRITABLE;
+    out->write_capacity = tcp_write_capacity_locked(socket);
+    if (out->write_capacity) status |= NET_TCP_OWNED_WRITABLE;
     out->references = socket->owned_references;
     out->flags = status;
     out->available = socket->rx_size;
@@ -1301,6 +1320,8 @@ done:
 }
 
 
+static uint64_t g_tcp_pending_send_accepts, g_tcp_pending_send_bytes;
+
 bool net_tcp_socket_send(net_tcp_socket_t *socket, const uint8_t *data, size_t len)
 {
     uint64_t lock_flags = tcp_lock();
@@ -1370,8 +1391,10 @@ bool net_tcp_socket_send(net_tcp_socket_t *socket, const uint8_t *data, size_t l
         socket->pending_payload_len += len;
         socket->unacked_len += len;
         socket->pending_flags |= (TCP_FLAG_ACK | TCP_FLAG_PSH);
-        socket->last_send_tick = timer_ticks();
-        socket->retry_count = 0;
+        /* Appending new bytes must not postpone recovery of the oldest
+         * outstanding bytes or reset their retransmission backoff. */
+        ++g_tcp_pending_send_accepts;
+        g_tcp_pending_send_bytes += len;
         tcp_unlock(lock_flags);
         return true;
     }
@@ -2128,6 +2151,7 @@ void net_tcp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
 {
     uint64_t lock_flags = tcp_lock();
     bool wake_waiters = false;
+    bool event_changed = false;
     if (!iface || !frame || length < 54)
     {
         goto out;
@@ -2262,6 +2286,7 @@ void net_tcp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
         goto out;
     }
 
+    bool was_writable = tcp_write_capacity_locked(socket) != 0;
     if ((flags & TCP_FLAG_SYN) != 0 || !socket->window_scaling_active)
     {
         socket->remote_window = window;
@@ -2325,6 +2350,7 @@ void net_tcp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
     {
         tcp_handle_ack(socket, ack_num);
     }
+    event_changed = !was_writable && tcp_write_capacity_locked(socket) != 0;
 
     if (socket->state == TCP_STATE_SYN_SENT &&
         (flags & (TCP_FLAG_SYN | TCP_FLAG_ACK)) == (TCP_FLAG_SYN | TCP_FLAG_ACK))
@@ -2398,6 +2424,7 @@ out:
     int transport_pin = wake_waiters ? tcp_owned_transport_pin_locked(socket) : 0;
     if (transport_pin < 0) wake_waiters = false;
     tcp_unlock(lock_flags);
+    if (wake_waiters || event_changed) io_event_service_notify();
     if (wake_waiters)
     {
         wait_queue_wake_all(&socket->wait_queue);

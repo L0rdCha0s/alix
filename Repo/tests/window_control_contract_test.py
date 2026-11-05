@@ -22,6 +22,8 @@ def main():
 #define CHECK(c) do {if(!(c)){fprintf(stderr,"window contract line %d: %s\n",__LINE__,#c);abort();}}while(0)
 #define USER_ATK_DEBUG 0
 #define ATK_WINDOW_TITLE_HEIGHT 30
+#define ATK_WINDOW_BORDER 2
+#define ATK_WINDOW_TITLE_MAX 4096
 typedef uint32_t video_color_t;
 typedef struct { pthread_mutex_t lock; } spinlock_t;
 typedef unsigned wait_queue_t;
@@ -42,7 +44,7 @@ typedef struct atk_widget {
  int layout_margin_left,layout_margin_top,layout_margin_right,layout_margin_bottom;
  void *priv,*context;uint32_t *pixels;
 } atk_widget_t;
-typedef struct {bool hidden,chrome_visible,shaded,surface_valid;int shade_restore_height;char title[32];} atk_window_priv_t;
+typedef struct {bool hidden,chrome_visible,shaded,surface_valid;int shade_restore_height;char title[ATK_WINDOW_TITLE_MAX];} atk_window_priv_t;
 typedef struct {
  atk_widget_t *dragging_window,*resizing_window,*pressed_window_button_window,*pressed_window_button,*mouse_capture_widget,*focus_widget;
  void *drag_window_surface;bool drag_active,drag_scene_valid;unsigned resize_edges;struct {bool active;}resize_band;
@@ -103,7 +105,7 @@ static bool atk_window_is_chrome_visible(const atk_widget_t *window){return wind
 bool atk_window_is_visible(const atk_widget_t *window);
 void atk_window_set_chrome_style(atk_widget_t *window,bool visible);
 static const char *atk_window_title(const atk_widget_t *window){return window_priv(window)->title;}
-static void atk_window_set_title_text(atk_widget_t *window,const char *title){CHECK(atk_depth);snprintf(window_priv_mut(window)->title,32,"%s",title);}
+static void atk_window_set_title_text(atk_widget_t *window,const char *title){CHECK(atk_depth);snprintf(window_priv_mut(window)->title,ATK_WINDOW_TITLE_MAX,"%s",title);}
 static bool atk_window_bring_to_front(atk_state_t*s,atk_widget_t*w){CHECK(s==&state&&w);return true;}
 static user_atk_window_t *user_atk_from_window(const atk_widget_t *window){return window?window->context:NULL;}
 static void user_atk_queue_event(user_atk_window_t *win,const user_atk_event_t *event){
@@ -129,6 +131,7 @@ static void atk_window_close(atk_state_t*s,atk_widget_t*w){
     for signature in ("bool atk_window_is_visible(", "static bool window_owns_widget(",
                       "void atk_window_set_visible(", "void atk_window_set_chrome_style("):
         code += function_definition(windows, signature) + "\n"
+    code += function_definition(source, "static int64_t user_atk_sys_set_title(") + "\n"
     code += function_definition(source, "int64_t user_atk_sys_control(") + r'''
 static unsigned next_handle=1;
 static user_atk_window_t *new_window(void){

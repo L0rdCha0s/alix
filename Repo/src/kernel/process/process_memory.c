@@ -15,6 +15,7 @@ bool process_set_elf_metadata(process_t *process, const void *headers, size_t co
     return true;
 }
 #include "physmem.h"
+#include "swap.h"
 
 /*
  * src/kernel/process/process_memory.c
@@ -512,6 +513,7 @@ static bool process_heap_lookup(const process_t *process, uintptr_t virt_page, p
     {
         return false;
     }
+    if (table->phys[entry_index] & (USER_PAGE_SWAPPED | USER_PAGE_BUSY)) return false;
     if (phys_out)
     {
         *phys_out = table->phys[entry_index];
@@ -1340,10 +1342,7 @@ static bool process_stack_translate(process_t *process,
     }
 
     paddr_t phys = process->user_stack_pages[page_index];
-    if (phys == 0)
-    {
-        return false;
-    }
+    if (phys == 0 || (phys & (USER_PAGE_SWAPPED | USER_PAGE_BUSY))) return false;
 
     size_t offset = (size_t)(addr - page_base);
     *host_out = (uint8_t *)phys_to_virt(phys) + offset;
@@ -1412,14 +1411,8 @@ bool process_memory_resolve_user_locked(process_t *process, uintptr_t address,
     return true;
 }
 
-bool process_memory_read_user_u32(process_t *process, uintptr_t address, uint32_t *value_out)
+static bool process_memory_read_user_u32_locked(process_t *process, uintptr_t address, uint32_t *value_out)
 {
-    if (!process || !value_out || (address & (sizeof(uint32_t) - 1)) != 0 ||
-        address < USER_ADDRESS_SPACE_BASE || address > USER_ADDRESS_SPACE_LIMIT - (sizeof(uint32_t) - 1))
-    {
-        return false;
-    }
-    uint64_t flags = process_memory_lock(process);
     uint8_t *host = NULL;
     size_t available = 0;
     bool valid = process_memory_resolve_user_locked(process, address, false, &host, &available) &&
@@ -1429,6 +1422,41 @@ bool process_memory_read_user_u32(process_t *process, uintptr_t address, uint32_
         /* memory_lock pins the physical backing and permission snapshot. */
         *value_out = __atomic_load_n((const uint32_t *)host, __ATOMIC_ACQUIRE);
     }
+    return valid;
+}
+
+bool process_memory_read_user_u32(process_t *process, uintptr_t address, uint32_t *value_out)
+{
+    if (!process || !value_out || (address & (sizeof(uint32_t) - 1)) != 0 ||
+        address < USER_ADDRESS_SPACE_BASE || address > USER_ADDRESS_SPACE_LIMIT - (sizeof(uint32_t) - 1))
+        return false;
+    uint64_t flags = process_memory_lock(process);
+    bool valid = process_memory_read_user_u32_locked(process, address, value_out);
+    process_memory_unlock(process, flags);
+    return valid;
+}
+
+bool process_memory_try_read_user_u32(process_t *process, uintptr_t address,
+                                      uint32_t *value_out, bool *busy_out)
+{
+    if (!busy_out) return false;
+    *busy_out = false;
+    if (!process || !value_out || (address & (sizeof(uint32_t) - 1)) != 0 ||
+        address < USER_ADDRESS_SPACE_BASE || address > USER_ADDRESS_SPACE_LIMIT - (sizeof(uint32_t) - 1))
+        return false;
+    uint64_t flags = cpu_save_flags();
+    cpu_cli();
+    spinlock_preempt_disable();
+    uint32_t unlocked = 0;
+    if (!__atomic_compare_exchange_n(&process->memory_lock.value, &unlocked, 1u, false,
+                                     __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
+    {
+        *busy_out = true;
+        spinlock_preempt_enable();
+        cpu_restore_flags(flags);
+        return false;
+    }
+    bool valid = process_memory_read_user_u32_locked(process, address, value_out);
     process_memory_unlock(process, flags);
     return valid;
 }
@@ -2019,4 +2047,138 @@ bool process_setup_dummy_user_space(process_t *process)
 
     process->user_entry_point = USER_STUB_CODE_BASE;
     return true;
+}
+
+/* Unpublished child only. The caller holds the source memory lock and owns
+ * both processes. Kernel stacks and scheduler records are never cloned. */
+bool process_clone_user_memory_locked(process_t *child, process_t *source)
+{
+    child->user_entry_point = source->user_entry_point;
+    child->user_stack_top = source->user_stack_top;
+    child->user_stack_size = source->user_stack_size;
+    child->user_stack_committed = source->user_stack_committed;
+    child->user_stack_page_count = source->user_stack_page_count;
+    child->user_thread_stack_next = source->user_thread_stack_next;
+    child->user_heap_base = source->user_heap_base;
+    child->user_heap_brk = source->user_heap_brk;
+    child->user_heap_limit = source->user_heap_limit;
+    child->user_heap_committed = source->user_heap_committed;
+    child->user_initial_stack = source->user_initial_stack;
+    child->user_argc = source->user_argc;
+    child->user_argv_ptr = source->user_argv_ptr;
+    child->user_envp_ptr = source->user_envp_ptr;
+    child->user_tls_filesz = source->user_tls_filesz;
+    child->user_tls_memsz = source->user_tls_memsz;
+    child->user_tls_align = source->user_tls_align;
+    child->user_tls_offset = source->user_tls_offset;
+    if (source->user_tls_filesz)
+    {
+        child->user_tls_image = malloc(source->user_tls_filesz);
+        if (!child->user_tls_image) return false;
+        memcpy(child->user_tls_image, source->user_tls_image, source->user_tls_filesz);
+    }
+    if (source->user_elf_metadata_size)
+    {
+        child->user_elf_metadata = malloc(source->user_elf_metadata_size);
+        if (!child->user_elf_metadata) return false;
+        child->user_elf_metadata_size = source->user_elf_metadata_size;
+        memcpy(child->user_elf_metadata, source->user_elf_metadata, source->user_elf_metadata_size);
+    }
+    if (!process_store_args(child, (const char *const *)source->arg_values, source->arg_count) ||
+        !process_store_environment(child, (const char *const *)source->env_values, source->env_count)) return false;
+    for (process_user_region_t *region = source->user_regions; region; region = region->next)
+    {
+        void *host = NULL;
+        if (!process_map_user_segment_locked(child, region->user_base, region->mapped_size,
+                region->writable, region->executable, true, &host)) return false;
+        memcpy(host, phys_to_virt(region->phys_base), region->mapped_size);
+    }
+    child->user_stack_pages = calloc(source->user_stack_page_count, sizeof(paddr_t));
+    if (source->user_stack_page_count && !child->user_stack_pages) return false;
+    uintptr_t bottom = source->user_stack_top - source->user_stack_size;
+    for (size_t i = 0; i < source->user_stack_page_count; ++i)
+    {
+        if (!source->user_stack_pages[i]) continue;
+        paddr_t page;
+        if (source->user_stack_pages[i] & USER_PAGE_SWAPPED)
+        {
+            if (!swap_retain(source->user_stack_pages[i])) return false;
+            child->user_stack_pages[i] = source->user_stack_pages[i];
+            ++child->vm_swapped_pages;
+            continue;
+        }
+        if (!user_memory_alloc_page(&page)) return false;
+        child->user_stack_pages[i] = page;
+        memcpy(phys_to_virt(page), phys_to_virt(source->user_stack_pages[i]), PAGE_SIZE_BYTES_LOCAL);
+        if (!paging_map_user_page(&child->address_space, bottom + i * PAGE_SIZE_BYTES_LOCAL, page, true, false)) return false;
+    }
+    child->heap_dir_count = source->heap_dir_count;
+    child->heap_page_dirs = calloc(source->heap_dir_count, sizeof(*child->heap_page_dirs));
+    if (source->heap_dir_count && !child->heap_page_dirs) return false;
+    for (size_t d = 0; d < source->heap_dir_count; ++d)
+    {
+        if (!source->heap_page_dirs[d]) continue;
+        process_heap_l2_t *table = process_heap_table(child, d, true);
+        if (!table) return false;
+        for (size_t i = 0; i < PROCESS_HEAP_L2_ENTRIES; ++i)
+        {
+            if (!process_heap_entry_present(source->heap_page_dirs[d], i)) continue;
+            paddr_t page;
+            if (source->heap_page_dirs[d]->phys[i] & USER_PAGE_SWAPPED)
+            {
+                page = source->heap_page_dirs[d]->phys[i];
+                if (!swap_retain(page)) return false;
+                process_heap_entry_set(table, i, page);
+                ++child->vm_swapped_pages;
+                continue;
+            }
+            if (!user_memory_alloc_page(&page)) return false;
+            process_heap_entry_set(table, i, page);
+            memcpy(phys_to_virt(page), phys_to_virt(source->heap_page_dirs[d]->phys[i]), PAGE_SIZE_BYTES_LOCAL);
+            uintptr_t address = child->user_heap_base + (d * PROCESS_HEAP_L2_ENTRIES + i) * PAGE_SIZE_BYTES_LOCAL;
+            if (!paging_map_user_page(&child->address_space, address, page, true, false)) return false;
+        }
+    }
+    return process_vm_clone_locked(child, source);
+}
+
+paddr_t *process_legacy_page_slot_locked(process_t *process, uintptr_t address)
+{
+    if (address >= process->user_heap_base && address < process->user_heap_brk)
+    {
+        size_t index = (address - process->user_heap_base) / PAGE_SIZE_BYTES_LOCAL;
+        size_t directory = index / PROCESS_HEAP_L2_ENTRIES;
+        if (directory < process->heap_dir_count && process->heap_page_dirs[directory])
+        {
+            process_heap_l2_t *table = process->heap_page_dirs[directory];
+            if (process_heap_entry_present(table, index % PROCESS_HEAP_L2_ENTRIES))
+                return &table->phys[index % PROCESS_HEAP_L2_ENTRIES];
+        }
+    }
+    uintptr_t bottom = process->user_stack_top - process->user_stack_size;
+    if (process->user_stack_pages && address >= bottom && address < process->user_stack_top)
+        return &process->user_stack_pages[(address - bottom) / PAGE_SIZE_BYTES_LOCAL];
+    return NULL;
+}
+
+paddr_t *process_legacy_swap_candidate_locked(process_t *process, uintptr_t *address, bool swapped)
+{
+    for (size_t d = 0; d < process->heap_dir_count; ++d)
+    {
+        process_heap_l2_t *table = process->heap_page_dirs[d];
+        if (!table) continue;
+        for (size_t i = 0; i < PROCESS_HEAP_L2_ENTRIES; ++i)
+            if (table->phys[i] && ((table->phys[i] & USER_PAGE_SWAPPED) != 0) == swapped)
+            {
+                *address = process->user_heap_base + (d * PROCESS_HEAP_L2_ENTRIES + i) * PAGE_SIZE_BYTES_LOCAL;
+                return &table->phys[i];
+            }
+    }
+    for (size_t i = 0; i < process->user_stack_page_count; ++i)
+        if (process->user_stack_pages[i] && ((process->user_stack_pages[i] & USER_PAGE_SWAPPED) != 0) == swapped)
+        {
+            *address = process->user_stack_top - process->user_stack_size + i * PAGE_SIZE_BYTES_LOCAL;
+            return &process->user_stack_pages[i];
+        }
+    return NULL;
 }

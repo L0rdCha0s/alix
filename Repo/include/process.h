@@ -25,6 +25,11 @@ typedef struct
 } process_creation_watch_t;
 typedef struct thread thread_t;
 typedef struct trap_frame trap_frame_t;
+bool process_vm_fault_enter(exception_frame_t *frame, uintptr_t address);
+bool process_vm_fault_access(process_t *process, uintptr_t address, bool write, bool execute);
+bool process_vm_fault_page(process_t *process, uintptr_t address, bool write, bool execute);
+int process_vm_syscall_enter(void);
+void process_vm_syscall_leave(void);
 
 typedef void (*thread_entry_t)(void *arg);
 typedef void (*process_wait_hook_t)(void *context);
@@ -224,6 +229,10 @@ ssize_t process_stdout_write(const char *data, size_t len);
 void process_detach_parent(process_t *process);
 
 void process_on_timer_tick(interrupt_frame_t *frame);
+/* TLB acknowledgements publish progress; lock-owning interrupts defer the
+ * scheduler wake until the next safe timer/schedule-IPI hook. */
+void process_vm_notify_tlb_completion(void);
+void process_vm_poll_tlb_completion(void);
 /* Capture immutable headers before publishing a newly loaded process. */
 bool process_set_elf_metadata(process_t *process, const void *headers, size_t count, uintptr_t entry);
 void process_preempt_hook(void);

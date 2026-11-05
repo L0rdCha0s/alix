@@ -72,6 +72,7 @@ for signature in ('static inline void tcp_signal_read_event(', 'static void tcp_
                   'net_tcp_socket_t *net_tcp_socket_open_owned(', 'static bool tcp_socket_in_pool(',
                   'bool net_tcp_socket_get_owned(', 'static bool tcp_owned_retire_poll_locked(',
                   'static int tcp_owned_transport_pin_locked(', 'static void tcp_owned_transport_unpin_locked(', 'int net_tcp_socket_put_owned(',
+                  'static size_t tcp_write_capacity_locked(',
                   'int net_tcp_socket_owned_snapshot(', 'int net_tcp_socket_info_owned(',
                   'int net_tcp_socket_error_claim_owned(', 'int net_tcp_socket_error_finish_owned(',
                   'ssize_t net_tcp_socket_peek_owned(', 'void net_tcp_socket_close(',
@@ -99,6 +100,16 @@ static void failures_and_modes(void) {
     CHECK(!net_tcp_socket_get_owned(socket));
     flags=tcp_lock();socket->owned_references=2;socket->state=TCP_STATE_ESTABLISHED;socket->remote_closed=false;socket->rx_size=7;tcp_unlock(flags);
     CHECK(!net_tcp_socket_owned_snapshot(socket,&status)&&status.available==7&&status.flags==(NET_TCP_OWNED_CONNECTED|NET_TCP_OWNED_READABLE|NET_TCP_OWNED_WRITABLE));
+    CHECK(status.write_capacity==1460);
+    flags=tcp_lock();socket->awaiting_ack=true;socket->pending_payload_len=socket->unacked_len=400;tcp_unlock(flags);
+    CHECK(!net_tcp_socket_owned_snapshot(socket,&status)&&status.write_capacity==1060&&(status.flags&NET_TCP_OWNED_WRITABLE));
+    flags=tcp_lock();socket->remote_window=450;tcp_unlock(flags);
+    CHECK(!net_tcp_socket_owned_snapshot(socket,&status)&&status.write_capacity==50&&(status.flags&NET_TCP_OWNED_WRITABLE));
+    flags=tcp_lock();socket->remote_window=400;tcp_unlock(flags);
+    CHECK(!net_tcp_socket_owned_snapshot(socket,&status)&&!status.write_capacity&&!(status.flags&NET_TCP_OWNED_WRITABLE));
+    flags=tcp_lock();socket->remote_window=4096;socket->pending_payload_len=socket->unacked_len=1460;tcp_unlock(flags);
+    CHECK(!net_tcp_socket_owned_snapshot(socket,&status)&&!status.write_capacity&&!(status.flags&NET_TCP_OWNED_WRITABLE));
+    flags=tcp_lock();socket->awaiting_ack=false;socket->pending_payload_len=socket->unacked_len=0;tcp_unlock(flags);
     unsigned char *peek=malloc(16);CHECK(peek);memset(peek,0x5a,16);
     flags=tcp_lock();socket->rx_head=3;memcpy(socket->rx_buffer+3,"payload",7);tcp_unlock(flags);
     CHECK(net_tcp_socket_peek_owned(socket,peek,4)==4&&!memcmp(peek,"payl",4)&&peek[4]==0x5a);

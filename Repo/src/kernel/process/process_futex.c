@@ -13,6 +13,56 @@
  * and deferred thread reclamation owns all of this metadata's lifetime.
  */
 
+uint64_t g_futex_wait_registrations;
+uint64_t g_futex_wake_calls;
+uint64_t g_futex_wake_candidates;
+uint64_t g_futex_woken;
+uint64_t g_futex_memory_busy_retries;
+
+static size_t futex_bucket(uintptr_t address)
+{
+    return ((address >> 2) ^ (address >> 12) ^ (address >> 20)) &
+           (PROCESS_FUTEX_BUCKET_COUNT - 1u);
+}
+
+/* Every bucket/link operation uses the scheduler lock. The process owns the
+ * bucket heads and the thread owns its intrusive links throughout a wait. */
+static void futex_unlink_locked(thread_t *thread)
+{
+    if (!thread->futex_indexed) return;
+    if (thread->futex_bucket_prev)
+        thread->futex_bucket_prev->futex_bucket_next = thread->futex_bucket_next;
+    else
+        thread->process->futex_buckets[futex_bucket(thread->futex_address)] = thread->futex_bucket_next;
+    if (thread->futex_bucket_next)
+        thread->futex_bucket_next->futex_bucket_prev = thread->futex_bucket_prev;
+    thread->futex_bucket_prev = NULL;
+    thread->futex_bucket_next = NULL;
+    thread->futex_indexed = false;
+}
+
+static void futex_register_locked(thread_t *thread, uintptr_t address)
+{
+    size_t bucket = futex_bucket(address);
+    thread->futex_address = address;
+    thread->futex_bucket_prev = NULL;
+    thread->futex_bucket_next = thread->process->futex_buckets[bucket];
+    if (thread->futex_bucket_next)
+        thread->futex_bucket_next->futex_bucket_prev = thread;
+    thread->process->futex_buckets[bucket] = thread;
+    thread->futex_indexed = true;
+    thread->futex_waiting = true;
+}
+
+void process_futex_cancel_wait_locked(thread_t *thread)
+{
+    if (!thread) return;
+    futex_unlink_locked(thread);
+    thread->futex_waiting = false;
+    thread->futex_address = 0;
+    thread->futex_interrupted = false;
+}
+
 static bool futex_address_valid(uintptr_t address)
 {
     return (address & (sizeof(uint32_t) - 1u)) == 0 &&
@@ -35,12 +85,32 @@ int process_futex_wait(uintptr_t address, uint32_t expected, uint32_t timeout_ms
         return SYSCALL_FUTEX_INVALID;
     }
 
-    uint64_t flags = scheduler_lock_acquire("futex_wait_register");
+    uint64_t flags;
     uint32_t value = 0;
-    if (!process_memory_read_user_u32(process, address, &value))
+    for (;;)
     {
+        flags = scheduler_lock_acquire("futex_wait_register");
+        if (thread->exited || thread->pending_destroy || !thread_lifetime_active(thread))
+        {
+            scheduler_lock_release(flags);
+            return SYSCALL_FUTEX_INTERRUPTED;
+        }
+        bool busy = false;
+        if (process_memory_try_read_user_u32(process, address, &value, &busy)) break;
+        if (!busy)
+        {
+            scheduler_lock_release(flags);
+            return SYSCALL_FUTEX_FAULT;
+        }
+        ++g_futex_memory_busy_retries;
         scheduler_lock_release(flags);
-        return SYSCALL_FUTEX_FAULT;
+        /* A large VM operation may own memory_lock. Wait outside the global
+         * scheduler, retaining no physical alias. This read's value is not a
+         * futex comparison: re-read under scheduler serialization on retry so
+         * a wake/value change in this interval cannot be lost. The timeout
+         * still starts after expected-value validation, as on the fast path. */
+        uint32_t ignored = 0;
+        (void)process_memory_read_user_u32(process, address, &ignored);
     }
     if (value != expected)
     {
@@ -59,10 +129,10 @@ int process_futex_wait(uintptr_t address, uint32_t expected, uint32_t timeout_ms
     }
 
     wait_queue_init(&thread->futex_queue);
-    thread->futex_address = address;
     __atomic_store_n(&thread->futex_notified, false, __ATOMIC_RELEASE);
     thread->futex_interrupted = false;
-    thread->futex_waiting = true;
+    futex_register_locked(thread, address);
+    ++g_futex_wait_registrations;
     scheduler_lock_release(flags);
 
     if (timeout_ms == SYSCALL_FUTEX_WAIT_FOREVER)
@@ -84,9 +154,7 @@ int process_futex_wait(uintptr_t address, uint32_t expected, uint32_t timeout_ms
     flags = scheduler_lock_acquire("futex_wait_finish");
     bool notified = futex_notified(thread);
     bool interrupted = thread->futex_interrupted;
-    thread->futex_interrupted = false;
-    thread->futex_waiting = false;
-    thread->futex_address = 0;
+    process_futex_cancel_wait_locked(thread);
     scheduler_lock_release(flags);
     return interrupted ? SYSCALL_FUTEX_INTERRUPTED : notified ? SYSCALL_FUTEX_OK : SYSCALL_FUTEX_TIMED_OUT;
 }
@@ -102,23 +170,30 @@ int process_futex_wake(uintptr_t address, uint32_t max_waiters)
     }
 
     uint64_t flags = scheduler_lock_acquire("futex_wake");
-    spinlock_lock(&process->threads_lock);
+    ++g_futex_wake_calls;
     uint32_t count = 0;
-    for (thread_t *thread = process->threads;
+    for (thread_t *thread = process->futex_buckets[futex_bucket(address)];
          thread && count < max_waiters && count < 0x7FFFFFFFu;
-         thread = thread->process_next)
+         )
     {
-        if (!thread->futex_waiting || thread->futex_address != address ||
-            thread->pending_destroy || thread->exited ||
+        thread_t *next = thread->futex_bucket_next;
+        ++g_futex_wake_candidates;
+        if (thread->pending_destroy || thread->exited ||
             !thread_lifetime_active(thread) || futex_notified(thread))
         {
-            continue;
+            /* A terminating waiter may never return through wait_finish. */
+            futex_unlink_locked(thread);
         }
-        __atomic_store_n(&thread->futex_notified, true, __ATOMIC_RELEASE);
-        wait_queue_wake_all_locked(&thread->futex_queue);
-        ++count;
+        else if (thread->futex_address == address)
+        {
+            futex_unlink_locked(thread);
+            __atomic_store_n(&thread->futex_notified, true, __ATOMIC_RELEASE);
+            wait_queue_wake_all_locked(&thread->futex_queue);
+            ++count;
+        }
+        thread = next;
     }
-    spinlock_unlock(&process->threads_lock);
+    g_futex_woken += count;
     scheduler_lock_release(flags);
     return (int)count;
 }

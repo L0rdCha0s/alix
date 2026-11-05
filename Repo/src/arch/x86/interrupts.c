@@ -610,6 +610,7 @@ static void page_fault_handler(exception_frame_t *saved)
     {
         return;
     }
+    if (process_vm_fault_enter(saved, fault_address)) return;
     if (process_handle_user_page_fault(frame, error_code, fault_address))
     {
         return;

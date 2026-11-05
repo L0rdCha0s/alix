@@ -13,8 +13,27 @@ struct io_event_service
     io_service_result_t result;
     process_t *worker_process, *cleanup_process;
     size_t capacity, pending, cursor;
+    uint64_t observed_event;
     bool worker_alive, stopping, joining, stopped;
 };
+
+/* Services may be created/destroyed independently. A permanent readiness hub
+ * avoids callback lists retaining a service or a caller's transient storage. */
+static wait_queue_t g_io_event_changed;
+static spinlock_t g_io_event_init_lock;
+static bool g_io_event_initialized;
+static uint64_t g_io_event_sequence, g_io_event_waiters;
+static uint64_t g_io_event_notifications, g_io_event_waits, g_io_event_wakes, g_io_event_timeouts;
+static uint64_t g_io_event_empty_takes_avoided;
+
+void io_event_service_notify(void)
+{
+    if (!__atomic_load_n(&g_io_event_initialized, __ATOMIC_ACQUIRE)) return;
+    __atomic_add_fetch(&g_io_event_sequence, 1, __ATOMIC_SEQ_CST);
+    __atomic_add_fetch(&g_io_event_notifications, 1, __ATOMIC_RELAXED);
+    if (__atomic_load_n(&g_io_event_waiters, __ATOMIC_SEQ_CST))
+        wait_queue_wake_all(&g_io_event_changed);
+}
 
 static bool io_event_ready(void *context)
 {
@@ -24,22 +43,38 @@ static bool io_event_ready(void *context)
     return status.queued != 0 || __atomic_load_n(&service->stopping, __ATOMIC_ACQUIRE);
 }
 
+static bool io_event_changed(void *context)
+{
+    io_event_service_t *service = context;
+    return __atomic_load_n(&g_io_event_sequence, __ATOMIC_SEQ_CST) != service->observed_event ||
+           io_event_ready(context);
+}
+
 static void io_event_entry(void *context)
 {
     io_event_service_t *service = context;
     for (;;)
     {
+        /* Observe before scanning so an event between the check and sleep is
+         * seen by the wait predicate even when no waiter needed waking yet. */
+        service->observed_event = __atomic_load_n(&g_io_event_sequence, __ATOMIC_SEQ_CST);
         /* Each admitted request gets one step per scan. An indefinitely
          * unready socket cannot occupy this worker or starve a fresh request. */
-        size_t pending = 0;
+        size_t pending = 0, empty_takes_avoided = 0;
+        bool queue_empty = false;
         for (size_t count = 0; count < service->capacity; ++count)
         {
             size_t index = (service->cursor + count) % service->capacity;
             io_request_t *request = service->requests[index];
             if (!request)
             {
-                request = io_queue_take(service->queue);
-                service->requests[index] = request;
+                if (queue_empty) ++empty_takes_avoided;
+                else
+                {
+                    request = io_queue_take(service->queue);
+                    service->requests[index] = request;
+                    if (!request) queue_empty = true;
+                }
             }
             if (!request) continue;
             io_request_status_t status;
@@ -67,9 +102,19 @@ static void io_event_entry(void *context)
             else ++pending;
         }
         service->cursor = (service->cursor + 1u) % service->capacity;
+        /* A later submission changes the observed event/queue predicate and
+         * starts another scan immediately; repeated empty takes need no lock. */
+        __atomic_add_fetch(&g_io_event_empty_takes_avoided, empty_takes_avoided, __ATOMIC_RELAXED);
         __atomic_store_n(&service->pending, pending, __ATOMIC_RELEASE);
         if (__atomic_load_n(&service->stopping, __ATOMIC_ACQUIRE) && !pending) break;
-        if (pending) process_sleep_ms(1);
+        if (pending)
+        {
+            __atomic_add_fetch(&g_io_event_waiters, 1, __ATOMIC_SEQ_CST);
+            __atomic_add_fetch(&g_io_event_waits, 1, __ATOMIC_RELAXED);
+            bool ready = wait_queue_wait_timeout(&g_io_event_changed, io_event_changed, service, 1);
+            __atomic_sub_fetch(&g_io_event_waiters, 1, __ATOMIC_SEQ_CST);
+            __atomic_add_fetch(ready ? &g_io_event_wakes : &g_io_event_timeouts, 1, __ATOMIC_RELAXED);
+        }
         else wait_queue_wait(&service->available, io_event_ready, service);
     }
     __atomic_store_n(&service->worker_alive, false, __ATOMIC_RELEASE);
@@ -112,6 +157,13 @@ static bool io_event_is_worker(io_event_service_t *service)
 io_event_service_t *io_event_service_create(size_t capacity, io_event_handler_t handler)
 {
     if (spinlock_preempt_disabled() || !handler || !capacity || capacity > IO_QUEUE_MAX_REQUESTS) return NULL;
+    spinlock_lock(&g_io_event_init_lock);
+    if (!__atomic_load_n(&g_io_event_initialized, __ATOMIC_RELAXED))
+    {
+        wait_queue_init(&g_io_event_changed);
+        __atomic_store_n(&g_io_event_initialized, true, __ATOMIC_RELEASE);
+    }
+    spinlock_unlock(&g_io_event_init_lock);
     io_event_service_t *service = calloc(1, sizeof(*service));
     if (!service) return NULL;
     service->queue = io_queue_create(capacity);
@@ -169,7 +221,11 @@ int io_event_service_submit(io_event_service_t *service, io_request_t *request)
         !io_request_uses_queue(request, service->queue)) return -EINVAL;
     if (__atomic_load_n(&service->stopping, __ATOMIC_ACQUIRE)) return -ECANCELED;
     int result = io_request_submit(request);
-    if (!result) wait_queue_wake_all(&service->available);
+    if (!result)
+    {
+        io_event_service_notify();
+        wait_queue_wake_all(&service->available);
+    }
     return result;
 }
 
@@ -184,6 +240,7 @@ int io_event_service_shutdown(io_event_service_t *service)
     __atomic_store_n(&service->stopping, true, __ATOMIC_RELEASE);
     io_queue_shutdown(service->queue);
     process_io_notify_completion();
+    io_event_service_notify();
     wait_queue_wake_all(&service->available);
     process_t *worker = __atomic_load_n(&service->worker_process, __ATOMIC_ACQUIRE);
     if (worker)

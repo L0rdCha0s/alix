@@ -29,6 +29,8 @@ normal exit 141 is `141 << 8`, while SIGPIPE termination is 13. Default raises,
 self/remote signal kills and synchronous faults record their signal cause;
 later termination attempts cannot overwrite the first terminal transition.
 Existing kernel join callers retain their original numeric exit status.
+The shell's ELF runner returns failure when that status is nonzero, so scripts
+and remote shell sessions observe failed applications and archive extraction.
 `process_wait_status_snapshot` requires retained process ownership and returns
 EAGAIN without changing output until the process is terminal and actually
 quiescent on CPUs/queues/transitions. Retained ownership before publication,
@@ -51,8 +53,8 @@ sum across every thread of the process. The current 100Hz clock gives 10ms
 accounting granularity; sleeping/off-CPU time is excluded. Successful user
 demand-zero, heap and stack faults increment the minor-fault counter. Fatal
 protection faults do not. Safe-copy backing resolution which does not generate
-a hardware user fault is not counted. There is currently no disk-backed page
-fault/swap path, so the major-fault counter remains zero.
+a hardware user fault is not counted. Successful disk-backed swap-ins now increment the major-fault counter,
+including conservative syscall preflight restores. See [paging](paging.md).
 
 An IRQ-safe per-process lock protects the four saturating counters and coherent
 snapshots. No usage lock spans allocation or safe user copying. The user wrapper
@@ -210,6 +212,24 @@ The timer tick counter advances even when the interrupted context has a generic 
 - Process teardown uses the lock order scheduler → process thread list → subsidiary queues. Thread resources are deferred until no CPU or queue references them. During a context switch, `g_switch_out_threads[cpu]` remains published as a hazard pointer until outgoing-thread bookkeeping, join wakeups, and scheduler-locked deferred reclamation have completed. Final process teardown severs every `thread->process` link under the same scheduler lock before freeing the address space.
 - Sleeping uses a global sleep list and a periodic wake check: `sleep_queue_wake_due(timer_ticks())`.
 
+Process-private futex waits use 64 address-keyed buckets owned by the process.
+Wake examines only the matching bucket, rather than every process thread.
+Scheduler locking still serializes the expected-value check, registration and
+notification, including wake before the thread enters its wait queue. Hash
+collisions require an exact address match; processes have separate buckets.
+The heap-owned thread supplies intrusive links and removes them on wake,
+timeout or signal completion. Individual thread reclamation and final process
+detach remove any registration abandoned by termination before releasing its
+thread/process storage. `tests/futex_contract_test.py` exercises collisions,
+isolation, wake-before-sleep and cancellation of all list positions.
+
+The expected-value check attempts the process memory lock without spinning
+under the global scheduler lock. If a VM operation owns it, the futex caller
+releases scheduler ownership before waiting for memory access, then repeats the
+value check and waiter publication under scheduler serialization. No physical
+pointer or earlier value is reused across that retry. Thread termination,
+changed/unmapped words and pending signals are rechecked before registration.
+
 ## SMP Safety Notes
 
 Thread stacks are per-thread and must never be shared across CPUs/threads. This repo includes explicit stack-owner diagnostics to catch cases where data from one thread’s stack is used for DMA or async work on another CPU.
@@ -236,13 +256,20 @@ permissions; that repair runs only with the optional page-protection diagnostics
 Global orphan maintenance is coalesced to one sweep per timer tick instead of
 scanning the process list on every CPU's context switch.
 
-Focused UI threads, compositor and USB input pollers receive at most one timer
+UI-priority threads, including the compositor and USB input pollers, receive at most one timer
 tick per quantum (10 ms at 100 Hz), including when the normal quantum is raised
 at runtime. Initialization selects a 20 ms normal quantum; the two-tick constant
 is the fallback when timer frequency is unavailable. The empty-pending-signal syscall-return path
 uses acquire loads; signal producers publish pending bits with release ordering.
 It avoids the global scheduler lock when no signal is queued while retaining
 the locked selection/delivery path and I/O deferral.
+
+`start_video` applies the UI override to its compositor thread for the event-loop
+lifetime, outside video/ATK locks, and restores its inherited policy on exit.
+This uses the reserved UI CPU instead of leaving composition beside browser and
+storage work on the initial normal CPU. A valid explicit affinity still wins
+over UI placement, including in the actual enqueue path; it must not recurse
+between the affinity target and the reserved CPU.
 
 `process_system_init` precedes PIT setup. It uses a boot fallback, and
 `process_configure_timer` runs immediately after `timer_init` to apply the real

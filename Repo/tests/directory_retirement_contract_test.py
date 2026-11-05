@@ -29,8 +29,9 @@ typedef struct vfs_node vfs_node_t;
 typedef struct { void *backend; vfs_node_t *mount_point; } vfs_mount_t;
 struct vfs_node {
     unsigned type; char *name; vfs_node_t *parent,*first_child,*next_sibling;
-    uint64_t object_id; uint32_t refcount,lock; vfs_mount_t *mount;
+    uint64_t object_id; size_t refcount; uint32_t lock; vfs_mount_t *mount;
     char *data; size_t size,capacity;
+    void *fifo;
 };
 static pthread_mutex_t tree=PTHREAD_MUTEX_INITIALIZER;
 static _Thread_local bool tree_held;
@@ -40,9 +41,11 @@ static void vfs_tree_lock_acquire(void) { CHECK(!tree_held); CHECK(!pthread_mute
 static void vfs_tree_lock_release(void) { CHECK(tree_held&&!data_locks); tree_held=false; CHECK(!pthread_mutex_unlock(&tree)); }
 static void vfs_lock_node_data(vfs_node_t *node) { while(__atomic_exchange_n(&node->lock,1,__ATOMIC_ACQUIRE)) sched_yield(); ++data_locks; }
 static void vfs_unlock_node_data(vfs_node_t *node) { CHECK(data_locks); --data_locks; __atomic_store_n(&node->lock,0,__ATOMIC_RELEASE); }
-static void alixfs_mount_release_node(void *backend,vfs_node_t *node) { (void)backend; (void)node; CHECK(false); }
 static void free_tree_storage(void *pointer) { CHECK(tree_held&&!data_locks); free(pointer); }
 static void vfs_free_subtree(vfs_node_t *node);
+static bool vfs_retire_disk_node(vfs_node_t *node) { CHECK(!node->mount); return false; }
+static void vfs_mapping_destroy_locked(vfs_node_t *node) { (void)node; }
+static void io_pipe_named_destroy(void *fifo) { (void)fifo; CHECK(false); }
 '''+header[start:end]+'\nstatic uint64_t g_vfs_next_object_id=1;\n'
 for signature in ('void vfs_node_release(', 'static void vfs_free_subtree(',
                   'void vfs_node_release_owned(', 'static uint64_t vfs_directory_object_id_locked(',

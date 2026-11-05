@@ -45,6 +45,7 @@ struct vfs_node
     size_t mapped_writers;
     struct vfs_node *mapped_writer_next;
     struct vfs_node *writeback_next;
+    struct vfs_node *retired_next;
     bool writeback_queued;
     struct vfs_file_mapping *mappings;
     struct io_pipe *fifo;
@@ -70,11 +71,13 @@ struct vfs_mount
     struct vfs_mount *next;
     bool dirty;
     bool needs_full_sync;
+    bool shutdown_frozen;
     bool supports_times;
     size_t dirty_bytes;
     size_t mapped_files; /* Shared page caches scanned for CPU stores by flushd. */
     struct vfs_node *mapped_writer_head;
     struct vfs_node *writeback_head;
+    struct vfs_node *retired_head; /* Zero-reference nodes; backend gate owns reclamation. */
     size_t dirty_bytes_limit;
     uint64_t dirty_seq;
     spinlock_t dirty_lock;

@@ -228,7 +228,7 @@
     },
     {
       "file": "0015-native-alix-widget-backend.patch",
-      "sha256": "a96d32404e5e9fc32dfd17273312bcb0204bd5f6c7c0e826141c28447feac3ba",
+      "sha256": "d81664945a36939a8bfaf1afbd1f101e3f5bf16bb6566bcf67acc1afd9548fb6",
       "files": [
         {
           "path": "widget/moz.build",
@@ -283,7 +283,7 @@
         {
           "path": "widget/alix/nsLookAndFeel.cpp",
           "before": null,
-          "after": "7aff71946bffcf823d3a963ea9dbc7fe06d3f1fc276d02daf02597d4b9511388"
+          "after": "ad64d7e3b5b1a2e2fa0e5e7b6e2c75da0f486925c78c0c168b300b7b45bab431"
         },
         {
           "path": "widget/alix/nsLookAndFeel.h",
@@ -308,7 +308,7 @@
         {
           "path": "widget/alix/nsWindow.cpp",
           "before": null,
-          "after": "87696f104827fe1bf1406f4f3ca9a791c4256a739abf0442c47345f41ac9fd74"
+          "after": "fd864d4d41cac8387efe497b3fd71a7ce43f46358ed6c0d3ea3dcde6984eee9c"
         },
         {
           "path": "widget/alix/nsWindow.h",

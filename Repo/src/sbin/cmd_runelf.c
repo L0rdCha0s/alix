@@ -200,9 +200,9 @@ bool shell_execute_binary(shell_state_t *shell,
         return shell_exec_error(out, label ? label : exec_path, "failed to start process");
     }
 
-    process_join(proc, NULL);
+    int status = process_join(proc, NULL);
     process_destroy(proc);
-    return true;
+    return status == 0;
 }
 
 bool shell_cmd_runelf(shell_state_t *shell, shell_output_t *out, const char *args)

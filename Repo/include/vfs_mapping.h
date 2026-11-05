@@ -12,6 +12,7 @@ int vfs_mapping_create_access(vfs_node_t *node, uint64_t offset, size_t length,
                        bool shared, bool writable, fd_description_t *owner, vfs_file_mapping_t **out);
 void vfs_mapping_release(vfs_file_mapping_t *mapping);
 paddr_t vfs_mapping_page(const vfs_file_mapping_t *mapping, size_t index);
+bool vfs_mapping_private(const vfs_file_mapping_t *mapping);
 int vfs_mapping_sync(vfs_file_mapping_t *mapping);
 /* Node data lock held. CPU stores and VFS I/O use the same shared pages. */
 void vfs_mapping_pull_locked(vfs_node_t *node);

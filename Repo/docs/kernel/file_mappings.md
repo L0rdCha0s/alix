@@ -12,16 +12,23 @@ Shared mappings of the same VFS node and file page use the same physical page,
 including mappings in independently spawned processes. VFS reads observe mapped
 stores, and VFS writes update the affected shared bytes. Closing, duplicating or
 reusing the source FD does not change a mapping. Rename preserves the retained
-node identity. Private mappings are eager isolated snapshots; their stores are
-never written back to the file. Shared mappings from read-only descriptors allocate/cache physical pages on
+node identity. Private mappings initially share read-only file-cache pages.
+A first write fault allocates and copies just that process page; private stores are never
+written back to the file. Protection changes and VMA splits preserve private
+page ownership, and fork copies already dirty private pages into the child.
+Shared mappings from read-only descriptors allocate/cache physical pages on
 first use. Splits preserve their original backing offsets. The per-file page
 index avoids repeated linked-list searches while constructing large mappings.
-Private snapshots remain eager, without copy-on-write or disk demand paging;
-the VFS still holds the source file contents in memory.
+Private mappings now use copy-on-write. Clean source file contents remain
+resident in the VFS; dirty private pages can use the [swap pager](paging.md).
+This does not introduce a disk-backed, evictable AlixFS file cache.
+Hardware COW faults complete their TLB barrier before resuming. COW performed
+by a checked kernel copy records a completion ticket under the memory lock;
+syscall exit awaits that ticket outside locks before returning to user space.
 
 The descriptor must be open for reading. A writable shared mapping also requires
 write access and a mutable node. Read-only shared descriptions cannot gain write
-access through `mprotect`; private snapshots can be writable from a read-only FD.
+access through `mprotect`; private mappings can be writable from a read-only FD.
 Page offsets are signed 64-bit values and must be page-aligned. A partial final
 page is zero-filled, and bytes beyond the file size do not extend the file or
 reach disk. The configured NSPR map helper preserves the full native file offset.

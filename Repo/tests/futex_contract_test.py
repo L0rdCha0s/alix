@@ -30,6 +30,7 @@ def kernel_test():
 #define SYSCALL_FUTEX_INVALID (-22)
 #define SYSCALL_FUTEX_TIMED_OUT (-110)
 #define ADDRESS ((uintptr_t)0x100001000ULL)
+#define PROCESS_FUTEX_BUCKET_COUNT 64u
 typedef unsigned spinlock_t;
 typedef struct { unsigned wakes; } wait_queue_t;
 typedef struct process process_t;
@@ -39,9 +40,12 @@ typedef struct thread {
     bool is_user, pending_destroy, exited, live;
     wait_queue_t futex_queue;
     uintptr_t futex_address;
+    struct thread *futex_bucket_prev, *futex_bucket_next;
+    bool futex_indexed;
     bool futex_waiting, futex_notified, futex_interrupted, signal_pending;
 } thread_t;
-struct process { bool is_user; spinlock_t threads_lock; thread_t *threads; };
+struct process { bool is_user; spinlock_t threads_lock; thread_t *threads;
+                 thread_t *futex_buckets[PROCESS_FUTEX_BUCKET_COUNT]; };
 static process_t process, other;
 static thread_t threads[5], outsider;
 static thread_t *current;
@@ -50,6 +54,8 @@ static bool process_signal_pending_locked(thread_t *thread) { CHECK(scheduler_lo
 static unsigned waits;
 static uint32_t word;
 static uint64_t waited_ticks;
+static unsigned memory_busy_attempts, memory_slow_reads;
+static bool slow_change_value, slow_fault, slow_signal, slow_kill, memory_fault;
 static thread_t *current_thread_local(void) { return current; }
 static bool user_ptr_range_valid(const void *p, size_t bytes)
 { return (uintptr_t)p >= ADDRESS && (uintptr_t)p + bytes <= ADDRESS + 8192; }
@@ -57,10 +63,21 @@ static uint64_t scheduler_lock_acquire(const char *where)
 { (void)where; CHECK(!scheduler_locked); scheduler_locked = true; return 512; }
 static void scheduler_lock_release(uint64_t flags)
 { CHECK(scheduler_locked && flags == 512); scheduler_locked = false; }
-static void spinlock_lock(spinlock_t *lock) { CHECK(scheduler_locked && !*lock); *lock = 1; }
-static void spinlock_unlock(spinlock_t *lock) { CHECK(scheduler_locked && *lock); *lock = 0; }
+static bool process_memory_try_read_user_u32(process_t *p, uintptr_t address, uint32_t *value, bool *busy)
+{
+    CHECK(scheduler_locked && p==current->process);*busy=false;
+    if(memory_busy_attempts) { --memory_busy_attempts;*busy=true;return false; }
+    if(address!=ADDRESS || memory_fault)return false;*value=word;return true;
+}
 static bool process_memory_read_user_u32(process_t *p, uintptr_t address, uint32_t *value)
-{ CHECK(scheduler_locked && p == current->process); if (address != ADDRESS) return false; *value = word; return true; }
+{
+    CHECK(!scheduler_locked && p==current->process);++memory_slow_reads;
+    if(slow_change_value)word=8;
+    if(slow_fault)memory_fault=true;
+    if(slow_signal)current->signal_pending=true;
+    if(slow_kill)current->exited=true;
+    if(address!=ADDRESS || memory_fault)return false;*value=word;return true;
+}
 static void wait_queue_init(wait_queue_t *queue) { queue->wakes = 0; }
 static bool thread_lifetime_active(thread_t *thread) { return thread->live; }
 static uint32_t timer_frequency(void) { return 100; }
@@ -99,6 +116,24 @@ static void reset(void)
     }
     outsider.process = &other; outsider.is_user = outsider.live = true; other.threads = &outsider;
     current = &threads[1]; scheduler_locked = inject_wake = inject_interrupt = false; waits = 0; word = 7; waited_ticks = 0;
+    memory_busy_attempts=memory_slow_reads=0;
+    slow_change_value=slow_fault=slow_signal=slow_kill=memory_fault=false;
+}
+static void register_waiter(thread_t *thread, uintptr_t address)
+{
+    uint64_t flags=scheduler_lock_acquire("fixture_register");
+    CHECK(!thread->futex_indexed);
+    thread->futex_notified=false;
+    futex_register_locked(thread,address);
+    scheduler_lock_release(flags);
+}
+static void cancel_waiter(thread_t *thread)
+{
+    uint64_t flags=scheduler_lock_acquire("fixture_cancel");
+    process_futex_cancel_wait_locked(thread);
+    scheduler_lock_release(flags);
+    CHECK(!thread->futex_indexed && !thread->futex_waiting && !thread->futex_address);
+    CHECK(!thread->futex_bucket_next && !thread->futex_bucket_prev);
 }
 int main(void)
 {
@@ -110,34 +145,82 @@ int main(void)
     CHECK(process_futex_wait(ADDRESS, 7, 0) == SYSCALL_FUTEX_TIMED_OUT);
     CHECK(waits == 0 && !current->futex_waiting);
 
+    /* The blocking memory wait must never retain scheduler ownership. Retry
+     * the expected value, mapping and signal state after that unlocked gap. */
+    uint64_t retries=g_futex_memory_busy_retries;
+    memory_busy_attempts=1;slow_change_value=true;
+    CHECK(process_futex_wait(ADDRESS,7,UINT32_MAX)==SYSCALL_FUTEX_AGAIN);
+    CHECK(memory_slow_reads==1 && g_futex_memory_busy_retries==retries+1 && !current->futex_indexed);
+    reset();memory_busy_attempts=1;slow_fault=true;
+    CHECK(process_futex_wait(ADDRESS,7,UINT32_MAX)==SYSCALL_FUTEX_FAULT && !current->futex_indexed);
+    reset();memory_busy_attempts=1;slow_signal=true;
+    CHECK(process_futex_wait(ADDRESS,7,UINT32_MAX)==SYSCALL_FUTEX_INTERRUPTED && !current->futex_indexed);
+    reset();memory_busy_attempts=1;slow_kill=true;
+    CHECK(process_futex_wait(ADDRESS,7,UINT32_MAX)==SYSCALL_FUTEX_INTERRUPTED && !current->futex_indexed);
+    reset();memory_busy_attempts=1;
+    CHECK(process_futex_wait(ADDRESS,7,0)==SYSCALL_FUTEX_TIMED_OUT && !waits);
+    reset();memory_busy_attempts=1;
+    CHECK(process_futex_wait(ADDRESS,7,11)==SYSCALL_FUTEX_TIMED_OUT && waited_ticks==2);
+    reset();memory_busy_attempts=2;inject_wake=true;
+    CHECK(process_futex_wait(ADDRESS,7,UINT32_MAX)==SYSCALL_FUTEX_OK);
+    CHECK(memory_slow_reads==2 && waits==1 && !current->futex_indexed);
+    reset();
+
     inject_wake = true;
     CHECK(process_futex_wait(ADDRESS, 7, UINT32_MAX) == 0);
     CHECK(waits == 1 && !current->futex_waiting && current->futex_address == 0);
-    CHECK(current->futex_queue.wakes == 1);
+    CHECK(current->futex_queue.wakes == 1 && !current->futex_indexed);
     CHECK(process_futex_wake(ADDRESS, 1) == 0);
 
     inject_wake = false;
     CHECK(process_futex_wait(ADDRESS, 7, 11) == SYSCALL_FUTEX_TIMED_OUT);
-    CHECK(waited_ticks == 2 && !current->futex_waiting);
+    CHECK(waited_ticks == 2 && !current->futex_waiting && !current->futex_indexed);
     CHECK(process_futex_wait(ADDRESS, 7, 1) == SYSCALL_FUTEX_TIMED_OUT && waited_ticks == 1);
 
     current->signal_pending = true;
     CHECK(process_futex_wait(ADDRESS, 7, UINT32_MAX) == SYSCALL_FUTEX_INTERRUPTED);
     current->signal_pending = false; inject_interrupt = true;
     CHECK(process_futex_wait(ADDRESS, 7, UINT32_MAX) == SYSCALL_FUTEX_INTERRUPTED);
-    CHECK(!current->futex_waiting && !current->futex_interrupted);
+    CHECK(!current->futex_waiting && !current->futex_interrupted && !current->futex_indexed);
     reset(); current = &threads[0];
-    for (unsigned i = 1; i < 5; ++i) { threads[i].futex_waiting = true; threads[i].futex_address = ADDRESS; }
+    for (unsigned i = 4; i > 0; --i) register_waiter(&threads[i],ADDRESS);
     threads[3].exited = true; threads[4].pending_destroy = true;
     CHECK(process_futex_wake(ADDRESS, 0) == 0);
     CHECK(process_futex_wake(ADDRESS, 1) == 1);
     CHECK(threads[1].futex_notified && !threads[2].futex_notified);
     CHECK(process_futex_wake(ADDRESS, UINT32_MAX) == 1);
     CHECK(process_futex_wake(ADDRESS, UINT32_MAX) == 0);
-    threads[2].futex_notified = false;
+    CHECK(!threads[3].futex_indexed && !threads[4].futex_indexed);
+    register_waiter(&threads[2],ADDRESS);
     current = &outsider;
     CHECK(process_futex_wake(ADDRESS, UINT32_MAX) == 0 && !threads[2].futex_notified);
     CHECK(process_futex_wake(ADDRESS + 1, 1) == SYSCALL_FUTEX_INVALID);
+
+    /* Colliding keys remain isolated; unrelated process threads and buckets
+     * are not examined on a wake. Unlink head/middle/tail before reclaim. */
+    reset();current=&threads[0];
+    uintptr_t collision=ADDRESS+4;
+    while(futex_bucket(collision)!=futex_bucket(ADDRESS))collision+=4;
+    CHECK(collision<ADDRESS+8192 && futex_bucket(ADDRESS+4)!=futex_bucket(ADDRESS));
+    register_waiter(&threads[1],ADDRESS);
+    register_waiter(&threads[2],collision);
+    register_waiter(&threads[3],ADDRESS+4);
+    uint64_t inspected=g_futex_wake_candidates;
+    CHECK(process_futex_wake(ADDRESS,UINT32_MAX)==1);
+    CHECK(g_futex_wake_candidates-inspected==2);
+    CHECK(threads[2].futex_indexed && !threads[2].futex_notified);
+    CHECK(threads[3].futex_indexed && !threads[3].futex_notified);
+    cancel_waiter(&threads[2]);cancel_waiter(&threads[3]);
+    CHECK(process_futex_wake(collision,UINT32_MAX)==0);
+    register_waiter(&threads[1],ADDRESS);register_waiter(&threads[2],ADDRESS);
+    register_waiter(&threads[3],ADDRESS);register_waiter(&threads[4],ADDRESS);
+    cancel_waiter(&threads[2]); /* middle */
+    cancel_waiter(&threads[4]); /* head */
+    cancel_waiter(&threads[1]); /* tail */
+    threads[2].process=NULL;threads[4].process=NULL;threads[1].process=NULL;
+    CHECK(process_futex_wake(ADDRESS,UINT32_MAX)==1 && threads[3].futex_notified);
+    CHECK(!process.futex_buckets[futex_bucket(ADDRESS)]);
+    cancel_waiter(&threads[3]); /* repeated completion cleanup is harmless */
     CHECK(!scheduler_locked);
     puts("futex registration/wake/timeout/isolation tests passed");
 }

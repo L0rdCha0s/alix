@@ -1297,11 +1297,11 @@ void enqueue_thread_on_cpu_locked(thread_t *thread, uint32_t cpu_index)
         return;
     }
 
-    uint32_t target_cpu = cpu_index;
-    if (thread->priority == THREAD_PRIORITY_UI && g_ui_cpu_index != RUN_QUEUE_CPU_INVALID)
-    {
-        target_cpu = g_ui_cpu_index;
-    }
+    /* Use the same constraint order as selection: explicit online affinity
+     * wins over UI placement. Forcing UI first made the affinity retry below
+     * recursively choose the UI CPU again instead of ever enqueueing. */
+    uint32_t required_cpu = scheduler_required_cpu(thread);
+    uint32_t target_cpu = required_cpu != RUN_QUEUE_CPU_INVALID ? required_cpu : cpu_index;
     uint32_t limit = scheduler_cpu_limit();
     if (target_cpu >= limit || !scheduler_cpu_online(target_cpu))
     {

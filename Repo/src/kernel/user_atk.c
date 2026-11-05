@@ -845,6 +845,18 @@ static int64_t user_atk_create_impl(const user_atk_window_desc_t *desc_user)
     }
     desc.title[USER_ATK_TITLE_MAX - 1] = '\0';
 
+    /* Creation's window clamp and its surfaces must agree. In particular a
+     * screen-sized client also needs room for the host frame and system bar. */
+    bool borderless = (desc.flags & USER_ATK_WINDOW_FLAG_BORDERLESS) != 0;
+    int margin = borderless ? 0 : 8;
+    int top = (borderless ? 0 : ATK_WINDOW_TITLE_HEIGHT) + margin;
+    int border = borderless ? 0 : ATK_WINDOW_BORDER;
+    int available_w = video_screen_width() - 2 * margin - 2 * border;
+    int available_h = video_screen_height() - atk_menu_bar_height(atk_state_get()) - top - margin - 2 * border;
+    if (available_w < 1 || available_h < 1) return -1;
+    if (desc.width > (unsigned)available_w) desc.width = (unsigned)available_w;
+    if (desc.height > (unsigned)available_h) desc.height = (unsigned)available_h;
+
     size_t pixel_bytes = (size_t)desc.width * (size_t)desc.height * sizeof(video_color_t);
     video_color_t *front = (video_color_t *)malloc(pixel_bytes);
     if (!front)
@@ -883,8 +895,6 @@ static int64_t user_atk_create_impl(const user_atk_window_desc_t *desc_user)
         return -1;
     }
 
-    bool borderless = (desc.flags & USER_ATK_WINDOW_FLAG_BORDERLESS) != 0;
-    const int margin = borderless ? 0 : 8;
     int content_offset_x = margin;
     int content_offset_y = (borderless ? 0 : ATK_WINDOW_TITLE_HEIGHT) + margin;
     window->width = desc.width + margin * 2;
@@ -987,6 +997,7 @@ int64_t user_atk_sys_present(uint32_t handle, const video_color_t *pixels, size_
         video_color_t *destination = win->back_pixels;
         uint64_t generation = win->surface_generation;
         bool copied = false;
+        bool changed = true;
         if (destination && win->pixels)
         {
             size_t bytes = byte_len < win->pixel_bytes ? byte_len : win->pixel_bytes;
@@ -995,9 +1006,17 @@ int64_t user_atk_sys_present(uint32_t handle, const video_color_t *pixels, size_
                 if (bytes < win->pixel_bytes)
                     memset((uint8_t *)destination + bytes, 0, win->pixel_bytes - bytes);
                 copied = true;
+                changed = memcmp(destination, win->pixels, win->pixel_bytes) != 0;
             }
         }
         spinlock_unlock(&win->pixel_lock);
+        if (copied && !changed)
+        {
+            spinlock_unlock(&win->presentation_lock);
+            user_atk_window_release(win);
+            spinlock_preempt_enable();
+            return 0;
+        }
         /* Publish only under the established state -> pixel lock order. A
          * resized surface supersedes the frame copied for the old geometry. */
         uint64_t irq_state = atk_state_lock_acquire();
@@ -1517,8 +1536,10 @@ static void user_atk_snapshot_window(user_atk_window_t *win, user_atk_window_con
     if (g_focus_window == win) control->flags |= USER_ATK_STATE_FOCUSED;
     user_atk_windows_unlock();
     const char *title = atk_window_title(win->window);
-    for (size_t index = 0; index + 1 < sizeof(control->title) && title[index]; ++index)
-        control->title[index] = title[index];
+    size_t length = 0;
+    while (length + 1 < sizeof(control->title) && title[length]) ++length;
+    while (length && ((unsigned char)title[length] & 0xC0u) == 0x80u) --length;
+    memcpy(control->title, title, length);
 }
 
 /* Caller owns the ATK state lock and a retained window. No state becomes
@@ -1533,6 +1554,13 @@ static int user_atk_configure_window(user_atk_window_t *win, int x, int y,
     int old_image_x = image->x, old_image_y = image->y;
     int client_x = old_x + win->content_offset_x, client_y = old_y + win->content_offset_y;
     int margin = chrome ? 8 : 0, top = chrome ? ATK_WINDOW_TITLE_HEIGHT + margin : 0;
+    int min_y = atk_menu_bar_height(atk_state_get()) + (chrome ? ATK_WINDOW_BORDER : 0) + top;
+    if (y < min_y) y = min_y;
+    unsigned border = chrome ? ATK_WINDOW_BORDER : 0;
+    unsigned available_w = (unsigned)video_screen_width() - 2 * margin - 2 * border;
+    unsigned available_h = (unsigned)video_screen_height() - atk_menu_bar_height(atk_state_get()) - top - margin - 2 * border;
+    if (width > available_w) width = available_w;
+    if (height > available_h) height = available_h;
     atk_window_mark_dirty(window);
     window->x = x - margin; window->y = y - top;
     window->width = (int)width + margin * 2; window->height = (int)height + top + margin;
@@ -1556,9 +1584,40 @@ static int user_atk_configure_window(user_atk_window_t *win, int x, int y,
     return 0;
 }
 
+static int64_t user_atk_sys_set_title(uint32_t handle, const char *source, size_t length)
+{
+    _Static_assert(USER_ATK_TITLE_TEXT_MAX <= ATK_WINDOW_TITLE_MAX, "title transport must fit window storage");
+    if (length >= USER_ATK_TITLE_TEXT_MAX) return -ENAMETOOLONG;
+    spinlock_preempt_disable();
+    user_atk_window_t *win = user_atk_find(handle, process_current());
+    int result = win ? 0 : -EBADF;
+    char *text = win ? malloc(length + 1) : NULL;
+    if (win && !text) result = -ENOMEM;
+    if (!result && length && !user_copy_from_user(text, source, length)) result = -EFAULT;
+    if (!result && memchr(text, 0, length)) result = -EINVAL;
+    if (!result)
+    {
+        text[length] = 0;
+        uint64_t irq_state = atk_state_lock_acquire();
+        if (win->closed || !win->window) result = -EBADF;
+        else
+        {
+            atk_window_set_title_text(win->window, text);
+            video_request_refresh_window(win->window);
+        }
+        atk_state_lock_release(irq_state);
+    }
+    free(text);
+    user_atk_window_release(win);
+    spinlock_preempt_enable();
+    return result;
+}
+
 int64_t user_atk_sys_control(uint32_t handle, uint32_t operation,
                               user_atk_window_control_t *output, size_t bytes)
 {
+    if (operation == USER_ATK_CONTROL_TITLE_TEXT)
+        return user_atk_sys_set_title(handle, (const char *)output, bytes);
     if (bytes != sizeof(*output)) return -EINVAL;
     if (operation > USER_ATK_CONTROL_INPUT_IDLE) return -EINVAL;
     bool display_query = operation == USER_ATK_CONTROL_DISPLAY || operation == USER_ATK_CONTROL_WORK_AREA;
@@ -1660,11 +1719,11 @@ int64_t user_atk_sys_control(uint32_t handle, uint32_t operation,
                 control->height -= top;
                 if (work_area_chrome)
                 {
-                    uint32_t margin = 8, title = ATK_WINDOW_TITLE_HEIGHT + margin;
-                    control->x = (int32_t)margin;
-                    control->y += (int32_t)title;
-                    control->width = control->width > 2 * margin ? control->width - 2 * margin : 0;
-                    control->height = control->height > title + margin ? control->height - title - margin : 0;
+                    uint32_t margin = 8, title = ATK_WINDOW_TITLE_HEIGHT + margin, border = ATK_WINDOW_BORDER;
+                    control->x = (int32_t)(margin + border);
+                    control->y += (int32_t)(title + border);
+                    control->width = control->width > 2 * (margin + border) ? control->width - 2 * (margin + border) : 0;
+                    control->height = control->height > title + margin + 2 * border ? control->height - title - margin - 2 * border : 0;
                     control->flags = USER_ATK_STATE_CHROME;
                 }
             }

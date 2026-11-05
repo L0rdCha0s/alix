@@ -131,7 +131,7 @@ int vfs_mapping_create_access(vfs_node_t *node, uint64_t offset, size_t length,
     vfs_mapping_pull_locked(node);
     int error = node->type != VFS_NODE_FILE || node->read_cb || node->write_cb ? -ENOTSUP :
         offset >= node->size || length - FILE_PAGE >= node->size - offset ? -ENXIO : 0;
-    if (!error && shared) {
+    if (!error) {
         size_t required = ((size_t)offset + length) / FILE_PAGE;
         if (required > node->mapped_page_capacity) {
             size_t capacity = node->mapped_page_capacity ? node->mapped_page_capacity : 16;
@@ -158,13 +158,8 @@ int vfs_mapping_create_access(vfs_node_t *node, uint64_t offset, size_t length,
             if (!m->pages[i]) error = -ENOMEM;
             continue;
         }
-        paddr_t physical = 0;
-        if (!user_memory_alloc_page(&physical)) { error = -ENOMEM; break; }
-        size_t n = node->size - at;
-        if (n > FILE_PAGE) n = FILE_PAGE;
-        memset(phys_to_virt(physical), 0, FILE_PAGE);
-        memcpy(phys_to_virt(physical), node->data + at, n);
-        m->pages[i] = physical;
+        /* Private mappings initially borrow the file cache, read-only. The
+         * process VM owns each private page allocated by a first write. */
     }
     if (!error) {
         m->next = node->mappings; node->mappings = m;
@@ -178,8 +173,6 @@ int vfs_mapping_create_access(vfs_node_t *node, uint64_t offset, size_t length,
     else if (!node->mappings) vfs_mapping_destroy_locked(node);
     spinlock_unlock(&node->data_lock);
     if (error) {
-        if (!shared) for (size_t i = 0; i < m->count; ++i)
-            if (m->pages[i]) user_memory_free_page(m->pages[i]);
         vfs_node_release_owned(node); free(m->pages); free(m);
     } else *out = m;
     return error;
@@ -208,13 +201,11 @@ void vfs_mapping_release(vfs_file_mapping_t *m)
     if (*link) *link = m->next;
     if (!node->mappings) vfs_mapping_destroy_locked(node);
     spinlock_unlock(&node->data_lock);
-    if (!m->shared) for (size_t i = 0; i < m->count; ++i) user_memory_free_page(m->pages[i]);
     vfs_node_release_owned(node); free(m->pages); free(m);
 }
 paddr_t vfs_mapping_page(const vfs_file_mapping_t *m, size_t index)
 {
     if (!m || index >= m->count) return 0;
-    if (!m->shared) return m->pages[index];
     spinlock_lock(&m->node->data_lock);
     paddr_t page = m->pages[index];
     if (!page) {
@@ -224,6 +215,8 @@ paddr_t vfs_mapping_page(const vfs_file_mapping_t *m, size_t index)
     spinlock_unlock(&m->node->data_lock);
     return page;
 }
+bool vfs_mapping_private(const vfs_file_mapping_t *m)
+{ return m && !m->shared; }
 int vfs_mapping_sync(vfs_file_mapping_t *m)
 {
     if (!m || !m->shared) return 0;

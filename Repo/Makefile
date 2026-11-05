@@ -25,6 +25,9 @@ DL_SCRIPT_SRC := $(GENERATED_DIR)/dl_script_data.c
 DL_SCRIPT_OBJ := $(GENERATED_DIR)/dl_script_data.o
 DL_ZEN_SCRIPT_SRC := $(GENERATED_DIR)/dl_zen_script_data.c
 DL_ZEN_SCRIPT_OBJ := $(GENERATED_DIR)/dl_zen_script_data.o
+ZEN_DESKTOP_ICON := vendor/zen-icon/logo48.png
+ZEN_DESKTOP_ICON_SRC := $(GENERATED_DIR)/zen_desktop_icon_data.c
+ZEN_DESKTOP_ICON_OBJ := $(GENERATED_DIR)/zen_desktop_icon_data.o
 JS_DEMO := $(OBJDIR)/wasm-demo.js
 FONT_DIR := vendor/fonts
 FONT_ARCHIVE := $(OBJDIR)/fonts.zip
@@ -87,6 +90,7 @@ C_SOURCES += $(KERNEL_DIR)/io/process.c
 C_OBJECTS := $(patsubst $(SRC_DIR)/%.c,$(OBJDIR)/%.o,$(C_SOURCES))
 C_OBJECTS += $(DL_SCRIPT_OBJ)
 C_OBJECTS += $(DL_ZEN_SCRIPT_OBJ)
+C_OBJECTS += $(ZEN_DESKTOP_ICON_OBJ)
 HARDWARE_SELFTEST ?= 0
 ifeq ($(HARDWARE_SELFTEST),1)
 C_OBJECTS += $(OBJDIR)/tests/hardware_boot_test.o
@@ -273,6 +277,7 @@ USER_QUAKE_APP_SOURCES := $(wildcard $(USER_DIR)/apps/quake/*.c)
 USER_QUAKE_APP_OBJECTS := $(patsubst $(USER_DIR)/%.c,$(USER_OBJDIR)/%.o,$(USER_QUAKE_APP_SOURCES))
 USER_QUAKE_OBJECTS := $(USER_QUAKE_REF_OBJECTS) $(USER_QUAKE_APP_OBJECTS)
 USER_ELFS := $(USER_OBJDIR)/atk_demo.elf \
+             $(USER_OBJDIR)/time.elf \
              $(USER_OBJDIR)/ttf_demo.elf \
              $(USER_OBJDIR)/wolf3d.elf \
              $(USER_OBJDIR)/doom.elf \
@@ -299,6 +304,7 @@ USER_RUNTIME_DIR := $(USER_OBJDIR)/runtime
 USER_RUNTIME_ELFS := $(patsubst $(USER_OBJDIR)/%.elf,$(USER_RUNTIME_DIR)/%.elf,$(USER_ELFS))
 USER_BIN_DIR := build/bin
 USER_BINS := $(USER_BIN_DIR)/atk_demo \
+             $(USER_BIN_DIR)/time \
              $(USER_BIN_DIR)/ttf_demo \
              $(USER_BIN_DIR)/wolf3d \
              $(USER_BIN_DIR)/doom \
@@ -358,6 +364,15 @@ BOOT_DIR   ?= $(OBJDIR)/boot
 BOOT_KERNEL := $(BOOT_DIR)/alix.elf
 BOOT_EFI    := $(BOOT_DIR)/EFI/BOOT/BOOTX64.EFI
 DATA_IMG   := data.img
+SWAP_IMG ?= $(if $(QEMU_SWAP_IMG),$(QEMU_SWAP_IMG),swap.img)
+# Swap contents are volatile. Each VM gets a private overlay, including native
+# acceptance guests, so concurrent boots cannot share live swap slots.
+QEMU_SWAP_DISK = $(if $(wildcard $(SWAP_IMG)),-drive if=none$(comma)id=swap$(comma)file=$(SWAP_IMG)$(comma)format=raw$(comma)snapshot=on -device ide-hd$(comma)drive=swap$(comma)bus=ahci0.2)
+comma := ,
+
+.PHONY: swap-image
+swap-image:
+	python3 scripts/mkswap.py $(SWAP_IMG)
 LOADER_SRC := $(LOADER_DIR)/uefi_loader.c
 LOADER_CC  ?= x86_64-w64-mingw32-gcc
 LOADER_CFLAGS := -std=c11 -ffreestanding -fno-stack-protector -fno-builtin -fno-pic \
@@ -657,6 +672,11 @@ $(DL_ZEN_SCRIPT_SRC): dl-zen.sh Makefile
 	@python3 -c 'import json, pathlib; content = pathlib.Path("$<").read_text(); print("#include \"types.h\"\n\nconst char g_dl_zen_script_content[] = " + json.dumps(content) + ";\nconst size_t g_dl_zen_script_content_len = sizeof(g_dl_zen_script_content) - 1;")' > $@.tmp
 	@mv -f $@.tmp $@
 
+$(ZEN_DESKTOP_ICON_SRC): $(ZEN_DESKTOP_ICON) Makefile
+	@mkdir -p $(GENERATED_DIR)
+	@python3 -c 'from pathlib import Path; data = Path("$<").read_bytes(); print("#include \"types.h\"\n\nconst unsigned char g_zen_desktop_icon_png[] = {" + ",".join("0x%02x" % byte for byte in data) + "};\nconst size_t g_zen_desktop_icon_png_size = sizeof(g_zen_desktop_icon_png);")' > $@.tmp
+	@mv -f $@.tmp $@
+
 $(USER_BIN_DIR)/atk_demo: $(USER_OBJDIR)/atk_demo.elf
 	@mkdir -p $(USER_BIN_DIR)
 	cp $< $@
@@ -794,7 +814,7 @@ $(HTML_VIEW_TEST_BIN): tests/html_view_host_test.c \
                        src/atk/util/jpeg.c \
                        src/atk/util/png.c \
                        src/atk/util/svg.c \
-                       src/atk/atk_font.c \
+                       src/atk/atk_font.c src/kernel/font.c \
                        user/lib/atk/html_view/font.c \
                        user/lib/atk/html_view/style.c \
                        user/lib/atk/html_view/measure_cache.c \
@@ -818,7 +838,7 @@ $(HTML_VIEW_TEST_BIN): tests/html_view_host_test.c \
 	    src/atk/util/jpeg.c \
 	    src/atk/util/png.c \
 	    src/atk/util/svg.c \
-	    src/atk/atk_font.c \
+	    src/atk/atk_font.c src/kernel/font.c \
 	    user/lib/atk/html_view/font.c \
 	    user/lib/atk/html_view/style.c \
 	    user/lib/atk/html_view/measure_cache.c \
@@ -841,7 +861,7 @@ $(HTML_VIEW_TEST_LIBC_BIN): tests/html_view_host_test.c \
                        src/atk/util/jpeg.c \
                        src/atk/util/png.c \
                        src/atk/util/svg.c \
-                       src/atk/atk_font.c \
+                       src/atk/atk_font.c src/kernel/font.c \
                        user/lib/atk/html_view/font.c \
                        user/lib/atk/html_view/style.c \
                        user/lib/atk/html_view/measure_cache.c \
@@ -867,7 +887,7 @@ $(HTML_VIEW_TEST_LIBC_BIN): tests/html_view_host_test.c \
 	    src/atk/util/jpeg.c \
 	    src/atk/util/png.c \
 	    src/atk/util/svg.c \
-	    src/atk/atk_font.c \
+	    src/atk/atk_font.c src/kernel/font.c \
 	    user/lib/atk/html_view/font.c \
 	    user/lib/atk/html_view/style.c \
 	    user/lib/atk/html_view/measure_cache.c \
@@ -892,7 +912,7 @@ $(WEB_RENDER_HARNESS_BIN): tests/web_render_harness.c tests/html_view_host_test.
                        src/atk/util/jpeg.c \
                        src/atk/util/png.c \
                        src/atk/util/svg.c \
-                       src/atk/atk_font.c \
+                       src/atk/atk_font.c src/kernel/font.c \
                        user/lib/atk/html_view/font.c \
                        user/lib/atk/html_view/style.c \
                        user/lib/atk/html_view/measure_cache.c \
@@ -916,7 +936,7 @@ $(WEB_RENDER_HARNESS_BIN): tests/web_render_harness.c tests/html_view_host_test.
 	    src/atk/util/jpeg.c \
 	    src/atk/util/png.c \
 	    src/atk/util/svg.c \
-	    src/atk/atk_font.c \
+	    src/atk/atk_font.c src/kernel/font.c \
 	    user/lib/atk/html_view/font.c \
 	    user/lib/atk/html_view/style.c \
 	    user/lib/atk/html_view/measure_cache.c \
@@ -1167,6 +1187,7 @@ run: boot-volume $(DATA_IMG) $(USER_ELFS) $(USER_BINS)
 		-device ide-hd,drive=fsdisk,bus=ahci0.0 \
 		-drive if=none,id=data,file=$(DATA_IMG),format=raw,media=disk \
 		-device ide-hd,drive=data,bus=ahci0.1 \
+		$(QEMU_SWAP_DISK) \
 		-no-reboot -monitor vc:1920x1080 -serial $(QEMU_SERIAL) -vga std \
 		$(QEMU_AUDIO) \
 		$(QEMU_DEBUG_FLAGS) $(NETDEV) $(NETDUMP) $(NIC)
@@ -1185,6 +1206,7 @@ run-hdd: boot-volume $(DATA_IMG) $(USER_ELFS) $(USER_BINS)
 		-device ide-hd,drive=fsdisk,bus=ahci0.0 \
 		-drive if=none,id=data,file=$(DATA_IMG),format=raw,media=disk \
 		-device ide-hd,drive=data,bus=ahci0.1 \
+		$(QEMU_SWAP_DISK) \
 		-no-reboot -monitor vc:1920x1080 -serial $(QEMU_SERIAL) -vga std \
 		$(QEMU_AUDIO) \
 		$(QEMU_DEBUG_FLAGS) $(NETDEV) $(NETDUMP) $(NIC)
@@ -1203,6 +1225,7 @@ run-hdd-rtl: boot-volume $(DATA_IMG) $(USER_ELFS) $(USER_BINS)
 		-device ide-hd,drive=fsdisk,bus=ahci0.0 \
 		-drive if=none,id=data,file=$(DATA_IMG),format=raw,media=disk \
 		-device ide-hd,drive=data,bus=ahci0.1 \
+		$(QEMU_SWAP_DISK) \
 		-no-reboot -monitor vc:1920x1080 -serial $(QEMU_SERIAL) -vga std \
 		$(QEMU_AUDIO) \
 		$(QEMU_DEBUG_FLAGS) $(NETDEV) $(NETDUMP) $(NIC_RTL)
@@ -1220,6 +1243,7 @@ run-ps2-hdd: boot-volume $(DATA_IMG) $(USER_ELFS) $(USER_BINS)
 		-device ide-hd,drive=fsdisk,bus=ahci0.0 \
 		-drive if=none,id=data,file=$(DATA_IMG),format=raw,media=disk \
 		-device ide-hd,drive=data,bus=ahci0.1 \
+		$(QEMU_SWAP_DISK) \
 		-no-reboot -monitor vc:1920x1080 -serial $(QEMU_SERIAL) -vga std \
 		$(QEMU_AUDIO) \
 		$(QEMU_DEBUG_FLAGS) $(NETDEV) $(NETDUMP) $(NIC)

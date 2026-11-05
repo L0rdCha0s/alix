@@ -174,6 +174,11 @@ void atk_menu_bar_poll_clock(void)
         return;
     }
     g_clock_next_refresh_ms = now_ms + ATK_MENU_BAR_CLOCK_REFRESH_INTERVAL_MS;
+    static char last_clock[16];
+    char clock[16];
+    timekeeping_format_time(clock, sizeof(clock));
+    if (strcmp(clock, last_clock) == 0) return;
+    memcpy(last_clock, clock, sizeof(last_clock));
 
     atk_state_lock_init();
     uint64_t irq_state = atk_state_lock_acquire();

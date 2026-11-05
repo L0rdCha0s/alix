@@ -545,6 +545,8 @@ static void free_locked(void *ptr)
     coalesce(block);
 }
 
+/* Enters and returns with the heap lock held. A moving resize drops it only
+ * while copying between two live allocations exclusively owned by this call. */
 static void *realloc_locked(void *ptr, size_t size)
 {
     if (!ptr)
@@ -575,6 +577,21 @@ static void *realloc_locked(void *ptr, size_t size)
         return ptr;
     }
 
+    size_t growth = size - block->size;
+    heap_block_t *next = block->next;
+    if (next && next->free &&
+        (uintptr_t)next == (uintptr_t)block + sizeof(*block) + block->size &&
+        (growth <= sizeof(*block) || next->size >= growth - sizeof(*block)))
+    {
+        free_bin_remove(next);
+        block->size += sizeof(*block) + next->size;
+        block->next = next->next;
+        if (block->next) block->next->prev = block;
+        else g_heap_tail = block;
+        split_block(block, size);
+        return ptr;
+    }
+
     void *new_ptr = malloc_locked(size);
     if (!new_ptr)
     {
@@ -585,9 +602,13 @@ static void *realloc_locked(void *ptr, size_t size)
     {
         copy_size = size;
     }
+    /* Neither block can be reused while unlocked; other threads may allocate
+     * and free their own blocks without waiting for this potentially large
+     * copy. Re-read neighboring metadata through free_locked afterward. */
+    user_heap_lock_release();
     memcpy(new_ptr, ptr, copy_size);
-    block->free = true;
-    coalesce(block);
+    user_heap_lock_acquire();
+    free_locked(ptr);
     return new_ptr;
 }
 
@@ -2823,16 +2844,61 @@ static FILE g_stdout_obj;
 static FILE g_stdin_obj;
 static FILE g_stderr_obj;
 static FILE g_stdout_obj = { .fd = 1, .access_flags = SYSCALL_OPEN_WRITE,
+                            .buffering = _IONBF,
                             .registry_id = 1, .registry_next = &g_stderr_obj };
 static FILE g_stderr_obj = { .fd = 2, .access_flags = SYSCALL_OPEN_WRITE,
+                            .buffering = _IONBF,
                             .registry_id = 2, .registry_next = &g_stdin_obj };
-static FILE g_stdin_obj = { .fd = 0, .access_flags = SYSCALL_OPEN_READ, .registry_id = 3 };
+static FILE g_stdin_obj = { .fd = 0, .access_flags = SYSCALL_OPEN_READ,
+                           .buffering = _IONBF, .registry_id = 3 };
 FILE *stdout = &g_stdout_obj;
 FILE *stderr = &g_stderr_obj;
 FILE *stdin = &g_stdin_obj;
 static FILE *g_file_registry = &g_stdout_obj;
 static alix_mutex_t g_file_registry_lock;
 static uint64_t g_file_registry_id = 3;
+
+typedef struct
+{
+    int64_t descriptor_offset;
+    bool private_descriptor;
+    bool valid;
+} file_position_state_t;
+
+/* Keep the public FILE layout unchanged. Only file_alloc creates these
+ * wrappers; standard streams and externally supplied descriptors do not use
+ * cached positions. The FILE prefix remains the allocation's freeable base. */
+typedef struct
+{
+    FILE stream;
+    file_position_state_t position;
+} file_allocation_t;
+_Static_assert(offsetof(file_allocation_t, stream) == 0, "FILE allocation prefix");
+
+uint64_t __alix_stdio_cached_tells;
+uint64_t __alix_stdio_buffered_seeks;
+
+static file_position_state_t *file_position_unlocked(FILE *stream)
+{
+    if (stream == &g_stdout_obj || stream == &g_stderr_obj || stream == &g_stdin_obj ||
+        stream->registry_id <= 3) return NULL;
+    return &((file_allocation_t *)stream)->position;
+}
+
+static void file_position_forget_unlocked(FILE *stream)
+{
+    file_position_state_t *position = file_position_unlocked(stream);
+    if (position) position->valid = false;
+}
+
+static void file_position_advance_unlocked(FILE *stream, size_t bytes)
+{
+    file_position_state_t *position = file_position_unlocked(stream);
+    if (!position || !position->valid) return;
+    if (bytes > INT64_MAX ||
+        __builtin_add_overflow(position->descriptor_offset, (int64_t)bytes,
+                               &position->descriptor_offset)) position->valid = false;
+}
 
 static void file_io_errno(int64_t result);
 static int file_flush_output_unlocked(FILE *stream);
@@ -2916,20 +2982,34 @@ void __alix_stdio_before_read(FILE *stream)
     if (flush_lines) (void)file_flush_all(true, stream);
 }
 
-static FILE *file_alloc(int fd, uint64_t flags, bool append)
+static FILE *file_alloc(int fd, uint64_t flags, bool append, bool private_descriptor)
 {
-    FILE *stream = (FILE *)malloc(sizeof(FILE));
-    if (!stream)
+    file_allocation_t *allocation = malloc(sizeof(*allocation));
+    if (!allocation)
     {
         errno = ENOMEM;
         return NULL;
     }
-    memset(stream, 0, sizeof(*stream));
+    memset(allocation, 0, sizeof(*allocation));
+    FILE *stream = &allocation->stream;
+    allocation->position.private_descriptor = private_descriptor;
     stream->fd = fd;
     stream->access_flags = flags;
     stream->append = append;
+    /* A stream opened on a file should refill once per buffer, not once per
+     * character. The standard streams retain their explicit startup policy;
+     * all dynamically opened streams own their storage across thread use. */
+    stream->buffer = malloc(BUFSIZ);
+    if (!stream->buffer) { free(stream); errno = ENOMEM; return NULL; }
+    stream->buffer_capacity = BUFSIZ;
+    stream->buffering = _IOFBF;
+#ifdef ALIX_OWNED_FDS
+    int saved_errno = errno;
+    if (isatty(fd)) stream->buffering = _IOLBF;
+    errno = saved_errno;
+#endif
     alix_mutex_init(&stream->mutex);
-    if (!file_register(stream)) { free(stream); return NULL; }
+    if (!file_register(stream)) { free(stream->buffer); free(stream); return NULL; }
     return stream;
 }
 
@@ -3008,7 +3088,7 @@ FILE *fopen(const char *path, const char *mode)
     }
     int saved_errno = errno;
     errno = 0;
-    int fd = open(path, flags);
+    int fd = open(path, flags, 0666u);
     if (fd < 0)
     {
         file_io_errno(fd);
@@ -3021,7 +3101,7 @@ FILE *fopen(const char *path, const char *mode)
         errno = saved_errno;
     }
 
-    FILE *stream = file_alloc(fd, flags, append);
+    FILE *stream = file_alloc(fd, flags, append, true);
     if (!stream)
     {
         int saved_errno = errno;
@@ -3054,7 +3134,7 @@ FILE *fdopen(int descriptor, const char *mode)
     if (fstat(descriptor, metadata)) { free(metadata); return NULL; }
     bool seek_append = append && S_ISREG(metadata->st_mode);
     free(metadata);
-    FILE *stream = file_alloc(descriptor, flags, seek_append);
+    FILE *stream = file_alloc(descriptor, flags, seek_append, false);
     if (!stream) { if (!errno) errno = ENOMEM; return NULL; }
     if (append && !((uint64_t)status & SYSCALL_OPEN_APPEND))
     {
@@ -3087,7 +3167,8 @@ FILE *freopen(const char *path, const char *mode, FILE *stream)
     stream->read_position = stream->read_end = stream->write_length = 0;
     stream->error = stream->eof = stream->orientation = 0;
     stream->io_started = false;
-    int fd = path && flags ? open(path, flags) : -EINVAL;
+    file_position_forget_unlocked(stream);
+    int fd = path && flags ? open(path, flags, 0666u) : -EINVAL;
     if (fd < 0)
     {
         file_io_errno(fd);
@@ -3154,12 +3235,25 @@ static void file_io_errno(int64_t result)
 
 static int64_t file_lseek_unlocked(FILE *stream, int64_t offset, int whence)
 {
-    if (stream->fd < 0) { errno = EBADF; return -1; }
+    if (stream->fd < 0) { file_position_forget_unlocked(stream); errno = EBADF; return -1; }
     int saved_errno = errno;
     errno = 0;
     int64_t result = lseek(stream->fd, offset, whence);
-    if (result < 0) file_io_errno(result);
-    else errno = saved_errno;
+    file_position_state_t *position = file_position_unlocked(stream);
+    if (result < 0)
+    {
+        if (position) position->valid = false;
+        file_io_errno(result);
+    }
+    else
+    {
+        if (position && position->private_descriptor)
+        {
+            position->descriptor_offset = result;
+            position->valid = true;
+        }
+        errno = saved_errno;
+    }
     return result;
 }
 
@@ -3227,7 +3321,10 @@ size_t __alix_stdio_read_unlocked(FILE *stream, void *ptr, size_t total, bool *f
         }
         if (stream->eof || *failed) break;
         stream->read_position = stream->read_end = 0;
-        bool buffered = stream->buffering != _IONBF;
+        /* Large full-buffered reads can go straight into caller storage once
+         * read-ahead is exhausted. Keep line-buffered refill semantics. */
+        bool buffered = stream->buffering == _IOLBF ||
+                        (stream->buffering == _IOFBF && total - done < stream->buffer_capacity);
         do
         {
             size_t want = buffered ? stream->buffer_capacity - stream->read_end : total - done;
@@ -3239,12 +3336,13 @@ size_t __alix_stdio_read_unlocked(FILE *stream, void *ptr, size_t total, bool *f
             if (got <= 0)
             {
                 if (!got) { stream->eof = 1; errno = saved_errno; }
-                else { file_io_errno(got); stream->error = 1; *failed = true; }
+                else { file_position_forget_unlocked(stream); file_io_errno(got); stream->error = 1; *failed = true; }
                 break;
             }
             errno = saved_errno;
             if ((size_t)got > want)
-            { errno = EIO; stream->error = 1; *failed = true; break; }
+            { file_position_forget_unlocked(stream); errno = EIO; stream->error = 1; *failed = true; break; }
+            file_position_advance_unlocked(stream, (size_t)got);
             if (!buffered) { done += (size_t)got; break; }
             stream->read_end += (size_t)got;
             if (stream->buffering != _IOLBF || target[got - 1] == '\n') break;
@@ -3269,10 +3367,14 @@ static size_t file_write_raw_unlocked(FILE *stream, const void *ptr, size_t tota
         int saved_errno = errno;
         errno = 0;
         ssize_t count = write(stream->fd, (const unsigned char *)ptr + written, total - written);
-        if (count <= 0) { file_io_errno(count); stream->error = 1; break; }
+        if (count <= 0) { file_position_forget_unlocked(stream); file_io_errno(count); stream->error = 1; break; }
         errno = saved_errno;
         if ((size_t)count > total - written)
-        { errno = EIO; stream->error = 1; break; }
+        { file_position_forget_unlocked(stream); errno = EIO; stream->error = 1; break; }
+        /* Other appenders can extend EOF between our seek and atomic append.
+         * Only a subsequent real seek can establish that resulting offset. */
+        if (stream->append) file_position_forget_unlocked(stream);
+        else file_position_advance_unlocked(stream, (size_t)count);
         written += (size_t)count;
     }
     return written;
@@ -3306,6 +3408,15 @@ size_t __alix_stdio_write_unlocked(FILE *stream, const void *ptr, size_t total)
     size_t accepted = 0;
     while (accepted < total)
     {
+        if (stream->buffering == _IOFBF && !stream->write_length &&
+            total - accepted >= stream->buffer_capacity)
+        {
+            size_t remaining = total - accepted;
+            size_t written = file_write_raw_unlocked(stream, bytes + accepted, remaining);
+            accepted += written;
+            if (written < remaining) break;
+            continue;
+        }
         if (stream->write_length == stream->buffer_capacity && file_flush_output_unlocked(stream) != 0) break;
         size_t count = stream->buffer_capacity - stream->write_length;
         if (count > total - accepted) count = total - accepted;
@@ -3379,6 +3490,8 @@ int fflush(FILE *stream)
     if (stream->fd < 0) { errno = EBADF; stream->error = 1; result = EOF; }
     else if (file_flush_output_unlocked(stream) != 0) result = EOF;
     else result = file_sync_pushback_unlocked(stream);
+    /* Explicit flushing is also a stream/descriptor handoff boundary. */
+    file_position_forget_unlocked(stream);
     alix_mutex_unlock(&stream->mutex);
     return result;
 }
@@ -3389,6 +3502,28 @@ static int file_seek_unlocked(FILE *stream, int64_t offset, int whence)
     if (whence != SEEK_SET && whence != SEEK_CUR && whence != SEEK_END)
     { errno = EINVAL; return -1; }
     if (file_flush_output_unlocked(stream) != 0) return -1;
+    file_position_state_t *position = file_position_unlocked(stream);
+    if (!stream->append && !stream->pushback_pending && stream->read_end &&
+        position && position->private_descriptor && position->valid &&
+        stream->read_end <= INT64_MAX && position->descriptor_offset >= (int64_t)stream->read_end)
+    {
+        int64_t start = position->descriptor_offset - (int64_t)stream->read_end;
+        int64_t target = offset;
+        bool known = whence == SEEK_SET;
+        if (whence == SEEK_CUR)
+        {
+            int64_t current = start + (int64_t)stream->read_position;
+            known = !__builtin_add_overflow(current, offset, &target);
+        }
+        if (known && target >= start && target <= position->descriptor_offset)
+        {
+            stream->read_position = (size_t)(target - start);
+            stream->eof = 0;
+            stream->pushback_length = 0;
+            __atomic_add_fetch(&__alix_stdio_buffered_seeks, 1, __ATOMIC_RELAXED);
+            return 0;
+        }
+    }
     if (whence == SEEK_CUR)
     {
         size_t unread = stream->read_end - stream->read_position;
@@ -3409,7 +3544,15 @@ static int file_seek_unlocked(FILE *stream, int64_t offset, int whence)
 static int64_t file_tell_unlocked(FILE *stream)
 {
     stream->io_started = true;
-    int64_t position = file_lseek_unlocked(stream, 0, stream->append && stream->write_length ? SEEK_END : SEEK_CUR);
+    file_position_state_t *cached = file_position_unlocked(stream);
+    int64_t position;
+    if (stream->fd >= 0 && cached && cached->private_descriptor && cached->valid &&
+        !(stream->append && stream->write_length))
+    {
+        position = cached->descriptor_offset;
+        __atomic_add_fetch(&__alix_stdio_cached_tells, 1, __ATOMIC_RELAXED);
+    }
+    else position = file_lseek_unlocked(stream, 0, stream->append && stream->write_length ? SEEK_END : SEEK_CUR);
     if (position < 0) return -1;
     size_t unread = stream->read_end - stream->read_position;
     if ((stream->pushback_pending &&
@@ -3636,6 +3779,10 @@ int fileno(FILE *stream)
     if (!stream) { errno = EBADF; return -1; }
     alix_mutex_lock(&stream->mutex);
     int result = stream->fd;
+    /* Once a raw handle escapes, aliases may change its offset independently
+     * of this FILE. Keep all later position queries synchronized with the FD. */
+    file_position_state_t *position = file_position_unlocked(stream);
+    if (position) position->private_descriptor = position->valid = false;
     if (result < 0) errno = EBADF;
     alix_mutex_unlock(&stream->mutex);
     return result;
@@ -5031,3 +5178,30 @@ long sysconf(int name)
 #else
 void alix_run_exit_handlers(void) { }
 #endif
+
+/* Internal fork boundary: environment operations may allocate, so retain the
+ * existing environment -> heap lock order. The child starts with no waiters. */
+void __alix_fork_prepare(void)
+{
+    alix_mutex_lock(&g_env_mutex);
+    alix_mutex_lock(&g_heap_lock);
+}
+void __alix_fork_parent(void)
+{
+    alix_mutex_unlock(&g_heap_lock);
+    alix_mutex_unlock(&g_env_mutex);
+}
+void __alix_fork_child(void)
+{
+    alix_mutex_init(&g_heap_lock);
+    alix_mutex_init(&g_env_mutex);
+}
+
+int __alix_owned_process_runtime(void)
+{
+#if defined(ALIX_OWNED_FDS) && ALIX_OWNED_FDS
+    return 1;
+#else
+    return 0;
+#endif
+}

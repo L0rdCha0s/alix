@@ -222,6 +222,12 @@ int sys_ui_control(uint32_t handle, uint32_t operation, user_atk_window_control_
     return (int)syscall4(SYSCALL_UI_CONTROL, handle, operation, (long)control, sizeof(*control));
 }
 
+int sys_ui_set_title(uint32_t handle, const char *title, size_t length)
+{
+    return (int)syscall4(SYSCALL_UI_CONTROL, handle, USER_ATK_CONTROL_TITLE_TEXT,
+                        (long)title, (long)length);
+}
+
 int sys_yield(void)
 {
     return (int)syscall0(SYSCALL_YIELD);

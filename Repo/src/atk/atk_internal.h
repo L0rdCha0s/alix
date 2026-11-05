@@ -28,6 +28,7 @@ typedef struct atk_rect
 #define ATK_WINDOW_MIN_HEIGHT (ATK_WINDOW_TITLE_HEIGHT + 96)
 #define ATK_WINDOW_RESIZE_MARGIN 6
 #define ATK_BUTTON_TITLE_MAX 32
+#define ATK_WINDOW_TITLE_MAX 4096
 #define ATK_MAX_WINDOWS 16
 #define ATK_MAX_WINDOW_BUTTONS 8
 #define ATK_MAX_DESKTOP_BUTTONS 16
@@ -145,7 +146,7 @@ typedef struct
 
 typedef struct
 {
-    char title[32];
+    char title[ATK_WINDOW_TITLE_MAX];
     atk_list_t buttons;
     atk_widget_t *close_button;
     atk_list_node_t *list_node;
