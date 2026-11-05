@@ -6,6 +6,7 @@
  * global: requests never store a pointer to a thread, process or stack queue. */
 static wait_queue_t g_io_completion_queue;
 static wait_queue_t g_io_cleanup_queue;
+static uint64_t g_io_cleanup_sequence;
 /* Static lifetime avoids retaining a service/thread/stack pointer in a late
  * completion. Only an opaque queue address is hashed; collisions just wake an
  * extra cleanup worker, whose own predicate rechecks actual readiness. */
@@ -19,6 +20,75 @@ static bool process_io_thread_terminal(const thread_t *thread)
     return !thread || !thread_lifetime_active(thread) || thread->pending_destroy ||
            thread->exited || thread->state == THREAD_STATE_ZOMBIE ||
            (thread->process && thread->process->state == PROCESS_STATE_ZOMBIE);
+}
+
+uint64_t process_io_admission_sequence(void)
+{
+    return __atomic_load_n(&g_io_cleanup_sequence, __ATOMIC_ACQUIRE);
+}
+
+void process_io_record_admission(uint64_t sequence)
+{
+    thread_t *thread = current_thread_local();
+    if (thread && spinlock_preempt_disabled())
+    {
+        thread->io_admission_sequence = sequence;
+        thread->io_admission_pending = true;
+    }
+}
+
+bool process_io_wait_admission(void)
+{
+    thread_t *thread = current_thread_local();
+    if (!thread || !thread->io_admission_pending || spinlock_preempt_disabled()) return false;
+    thread->io_admission_pending = false;
+    uint64_t now = timer_ticks(), deadline = now + 1;
+    uint64_t flags = scheduler_lock_acquire("io_admission");
+    for (;;)
+    {
+        /* Like registered I/O waits, never revive a killed caller. The heap
+         * thread owns its token; no request, service or stack context waits. */
+        if (process_io_thread_terminal(thread))
+        {
+            if (thread->waiting_queue == &g_io_cleanup_queue) thread_remove_from_wait_queue(thread);
+            if (thread->sleeping) sleep_queue_remove(thread);
+            scheduler_lock_release(flags);
+            return true;
+        }
+        now = timer_ticks();
+        if (process_io_admission_sequence() != thread->io_admission_sequence || now >= deadline)
+        {
+            if (thread->waiting_queue == &g_io_cleanup_queue) thread_remove_from_wait_queue(thread);
+            if (thread->sleeping) sleep_queue_remove(thread);
+            thread->state = THREAD_STATE_RUNNING;
+            scheduler_lock_release(flags);
+            return true;
+        }
+        if (thread->waiting_queue && thread->waiting_queue != &g_io_cleanup_queue)
+        {
+            scheduler_lock_release(flags);
+            return false;
+        }
+        if (thread_in_run_queue_load(thread)) remove_from_run_queue_locked(thread);
+        spinlock_lock(&g_io_cleanup_queue.lock);
+        if (!thread->waiting_queue)
+        {
+            thread->waiting_queue = &g_io_cleanup_queue;
+            thread->wait_queue_next = NULL;
+            if (g_io_cleanup_queue.tail) g_io_cleanup_queue.tail->wait_queue_next = thread;
+            else g_io_cleanup_queue.head = thread;
+            g_io_cleanup_queue.tail = thread;
+        }
+        thread->state = THREAD_STATE_BLOCKED;
+        thread->sleep_until_tick = deadline;
+        if (!thread->sleeping) sleep_queue_insert(thread);
+        spinlock_unlock(&g_io_cleanup_queue.lock);
+        /* A cleanup publication cannot pass scheduler_lock between checking
+         * its sequence and making this queue membership visible. */
+        scheduler_lock_release(flags);
+        scheduler_schedule(false);
+        flags = scheduler_lock_acquire("io_admission");
+    }
 }
 
 int process_io_register_current(io_request_t *request)
@@ -217,6 +287,7 @@ void process_io_notify_cleanup_for(uintptr_t key)
 
 void process_io_notify_cleanup(void)
 {
+    __atomic_add_fetch(&g_io_cleanup_sequence, 1, __ATOMIC_RELEASE);
     wait_queue_wake_all(&g_io_cleanup_queue);
 }
 

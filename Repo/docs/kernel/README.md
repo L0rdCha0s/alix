@@ -9,6 +9,10 @@ This folder documents how the kernel boots, schedules work, manages memory, expo
 - Native C11 libc, math and threads: `docs/kernel/libc.md`
 - Native performance workloads and UI latency: `docs/performance.md`
 - Measured kernel performance fixes: `docs/performance-pass-2026-11-05.md`
+- Continued thread, comparison and presentation investigation: `docs/performance-pass2-2026-11-05.md`
+- Filesystem snapshots, admission waits and sampling: `docs/performance-pass3-2026-11-05.md`
+- GUI scheduling and framebuffer copy work: `docs/performance-pass4-2026-11-05.md`
+- Scheduler phase costs and current stack-debug configuration: `docs/performance-pass5-2026-11-05.md`
 - Processes/threads + scheduler: `docs/kernel/process.md`
 - Native user child launch and waiting: `docs/kernel/child_processes.md`
 - Signal delivery, masks and synchronous waiting: `docs/kernel/signals.md`

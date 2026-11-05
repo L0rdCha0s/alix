@@ -210,9 +210,15 @@ int io_event_service_request_create(io_event_service_t *service, size_t bytes,
     *out = NULL;
     if (!service || !spinlock_preempt_disabled()) return -EINVAL;
     if (__atomic_load_n(&service->stopping, __ATOMIC_ACQUIRE)) return -ECANCELED;
+    uint64_t admission_sequence = process_io_admission_sequence();
     int result = io_request_create(service->queue, bytes, uid, gid, out);
     process_t *caller = process_current();
-    return result == -EAGAIN && caller && caller->is_user ? IO_REQUEST_ADMISSION_RETRY : result;
+    if (result == -EAGAIN && caller && caller->is_user)
+    {
+        process_io_record_admission(admission_sequence);
+        return IO_REQUEST_ADMISSION_RETRY;
+    }
+    return result;
 }
 
 int io_event_service_submit(io_event_service_t *service, io_request_t *request)

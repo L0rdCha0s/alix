@@ -38,6 +38,7 @@ typedef struct thread {
     uint32_t running_cpu, time_slice_remaining; uint64_t last_scheduled_tick; spinlock_t context_lock;
     bool affinity_enabled; uint32_t affinity_cpu, priority;
     bool pending_destroy, exited; process_t *process;
+    struct { uint64_t pick_calls, pick_tsc; } scheduler_cost;
 } thread_t;
 typedef struct { uint32_t total, cpu_index; } run_queue_t;
 static thread_t current, selected[2], idle;
@@ -58,6 +59,10 @@ static uint32_t expected_enqueue_cpu, enqueued_cpu;
 static uint32_t __attribute__((unused)) scheduler_cpu_limit(void) { return 2; }
 static bool __attribute__((unused)) scheduler_cpu_online(uint32_t cpu) { return cpu < 2 && cpu_online[cpu]; }
 static uint64_t timer_ticks(void) { return 20; }
+/* This ownership fixture runs the ordinary, unprofiled scheduler path. */
+static const struct { unsigned enabled; } g_sched_cost_control = {0};
+static uint64_t scheduler_cost_begin(void) { return 0; }
+static uint64_t scheduler_cost_clock(void) { return 0; }
 static uint32_t current_cpu_index(void) { return current_cpu; }
 static thread_t *current_thread_local(void) { return &current; }
 static bool thread_assert_stack_current(thread_t *t, const char *where) { (void)t; (void)where; return true; }

@@ -348,6 +348,11 @@ bool process_io_wait_cleanup(bool (*predicate)(void *), void *context, uint64_t 
 bool process_io_wait_cleanup_for(uintptr_t key, bool (*predicate)(void *), void *context, uint64_t timeout_ticks);
 void process_io_notify_cleanup_for(uintptr_t key);
 void process_io_notify_cleanup(void);
+/* Capture before admission, record only on full user admission. Preparation
+ * must unwind all owners before the syscall waits and restarts its inputs. */
+uint64_t process_io_admission_sequence(void);
+void process_io_record_admission(uint64_t sequence);
+bool process_io_wait_admission(void);
 
 thread_t *process_find_stack_owner(const void *ptr, size_t len);
 bool process_pointer_on_stack(const void *ptr, size_t len);

@@ -143,6 +143,8 @@ static inline run_queue_t *scheduler_run_queue(uint32_t cpu_index)
 }
 
 static uint32_t g_ui_cpu_index = RUN_QUEUE_CPU_INVALID;
+const uint32_t g_scheduler_stack_protection_modes =
+    (ENABLE_STACK_WRITE_DEBUG ? 1u : 0u) | ((ENABLE_CONTEXT_GUARD && ENABLE_STACK_GUARD_PROTECT) ? 2u : 0u);
 
 /* A required CPU is a placement constraint, unlike the default TID-based
  * distribution policy. Explicit affinity takes precedence over the UI pin. */
@@ -1451,7 +1453,7 @@ static void __attribute__((unused)) thread_freeze_for_stack_watch(thread_t *thre
 #endif
 }
 
-static void stack_watch_remove_frozen(thread_t *thread)
+static void __attribute__((unused)) stack_watch_remove_frozen(thread_t *thread)
 {
 #if ENABLE_STACK_WRITE_DEBUG
     if (!thread)
@@ -2278,6 +2280,7 @@ static void scheduler_finish_switch(void)
     process_t *outgoing_process = outgoing ? outgoing->process : NULL;
 
     uint64_t sched_flags = scheduler_lock_acquire("finish_switch");
+    uint64_t finish_started = scheduler_cost_begin();
     bool resumed_terminal = resumed &&
                             (resumed->exited ||
                              resumed->state == THREAD_STATE_ZOMBIE ||
@@ -2338,7 +2341,18 @@ static void scheduler_finish_switch(void)
     }
 
     deferred_free_stats_t deferred_stats = { 0 };
+    uint64_t deferred_started = scheduler_cost_begin();
     (void)thread_process_deferred_frees_locked(cpu, &deferred_stats);
+    if (resumed && deferred_started && __atomic_load_n(&g_sched_cost_control.enabled, __ATOMIC_RELAXED))
+    {
+        ++resumed->scheduler_cost.deferred_calls;
+        resumed->scheduler_cost.deferred_tsc += scheduler_cost_clock() - deferred_started;
+    }
+    if (resumed && finish_started && __atomic_load_n(&g_sched_cost_control.enabled, __ATOMIC_RELAXED))
+    {
+        ++resumed->scheduler_cost.finish_calls;
+        resumed->scheduler_cost.finish_tsc += scheduler_cost_clock() - finish_started;
+    }
     scheduler_lock_release(sched_flags);
     if (resumed_terminal)
     {
@@ -2358,6 +2372,7 @@ static void scheduler_finish_switch(void)
  * already claimed and must stay protected until the assembly stack handoff. */
 static bool switch_to_thread(thread_t *next, uint64_t sched_lock_enter)
 {
+    uint64_t prepare_started = scheduler_cost_begin();
     thread_t *prev = current_thread_local();
     if (prev && !thread_pointer_valid(prev))
     {
@@ -2479,12 +2494,30 @@ static bool switch_to_thread(thread_t *next, uint64_t sched_lock_enter)
         fatal("switch_to_bad_cr3");
     }
 
+    uint64_t validation_ended = scheduler_cost_begin();
+    if (prev && prepare_started && validation_ended)
+    {
+        ++prev->scheduler_cost.validation_calls;
+        prev->scheduler_cost.validation_tsc += validation_ended - prepare_started;
+    }
     if (prev)
     {
         prev->last_cpu_index = cpu_idx;
+        uint64_t fp_started = scheduler_cost_begin();
         fpu_save_state(&prev->fpu_state);
+        if (fp_started && __atomic_load_n(&g_sched_cost_control.enabled, __ATOMIC_RELAXED))
+        {
+            ++prev->scheduler_cost.fpu_calls;
+            prev->scheduler_cost.fpu_tsc += scheduler_cost_clock() - fp_started;
+        }
+        uint64_t msr_started = scheduler_cost_begin();
         prev->fs_base = rdmsr(MSR_FS_BASE);
         prev->gs_base = rdmsr(MSR_GS_BASE);
+        if (msr_started && __atomic_load_n(&g_sched_cost_control.enabled, __ATOMIC_RELAXED))
+        {
+            ++prev->scheduler_cost.msr_calls;
+            prev->scheduler_cost.msr_tsc += scheduler_cost_clock() - msr_started;
+        }
         if (prev_process)
         {
             prev_process->current_thread = prev;
@@ -2517,15 +2550,26 @@ static bool switch_to_thread(thread_t *next, uint64_t sched_lock_enter)
 
     thread_context_guard_release_pages(next);
     thread_stack_watch_deactivate(next);
+    uint64_t stack_started = scheduler_cost_begin();
     if (!scheduler_stack_make_writable(next, "switch_to"))
     {
         scheduler_lock_release(sched_lock_enter);
         fatal("next stack not writable");
     }
+    if (prev && stack_started && __atomic_load_n(&g_sched_cost_control.enabled, __ATOMIC_RELAXED))
+    {
+        ++prev->scheduler_cost.stack_calls;
+#if ENABLE_STACK_WRITE_DEBUG || (ENABLE_CONTEXT_GUARD && ENABLE_STACK_GUARD_PROTECT)
+        ++prev->scheduler_cost.stack_walks;
+#endif
+        prev->scheduler_cost.stack_tsc += scheduler_cost_clock() - stack_started;
+    }
     spinlock_lock(&next->context_lock);
     next->context_valid = true;
     spinlock_unlock(&next->context_lock);
 
+    uint64_t mmu_started = scheduler_cost_begin();
+    bool cr3_written = false;
     if (next_process && next_process != prev_process)
     {
         paging_space_mark_active_cpu(&next_process->address_space, cpu_idx);
@@ -2533,21 +2577,40 @@ static bool switch_to_thread(thread_t *next, uint64_t sched_lock_enter)
     if (desired_cr3 && desired_cr3 != read_cr3())
     {
         write_cr3(desired_cr3);
+        cr3_written = true;
     }
     if (prev_process && prev_process != next_process)
     {
         paging_space_clear_active_cpu(&prev_process->address_space, cpu_idx);
     }
 
+    if (prev && mmu_started && __atomic_load_n(&g_sched_cost_control.enabled, __ATOMIC_RELAXED))
+    {
+        ++prev->scheduler_cost.mmu_calls;
+        prev->scheduler_cost.mmu_tsc += scheduler_cost_clock() - mmu_started;
+        if (cr3_written) ++prev->scheduler_cost.cr3_writes;
+    }
+    uint64_t msr_started = scheduler_cost_begin();
     arch_cpu_set_kernel_stack(cpu_idx, next->kernel_stack_top);
     wrmsr(MSR_FS_BASE, next->fs_base);
     wrmsr(MSR_GS_BASE, sanitize_gs_base(next));
+    if (prev && msr_started && __atomic_load_n(&g_sched_cost_control.enabled, __ATOMIC_RELAXED))
+    {
+        ++prev->scheduler_cost.msr_calls;
+        prev->scheduler_cost.msr_tsc += scheduler_cost_clock() - msr_started;
+    }
     if (!thread_fpu_region_valid(next))
     {
         scheduler_lock_release(sched_lock_enter);
         fatal("switch_to_bad_fpu_region");
     }
+    uint64_t fp_started = scheduler_cost_begin();
     fpu_restore_state(&next->fpu_state);
+    if (prev && fp_started && __atomic_load_n(&g_sched_cost_control.enabled, __ATOMIC_RELAXED))
+    {
+        ++prev->scheduler_cost.fpu_calls;
+        prev->scheduler_cost.fpu_tsc += scheduler_cost_clock() - fp_started;
+    }
 
     /* Log upcoming context pointer and stack info. */
     uint64_t rsp_now = 0;
@@ -2584,6 +2647,11 @@ static bool switch_to_thread(thread_t *next, uint64_t sched_lock_enter)
     set_current_process_local(next_process);
 
     scheduler_log_state_event("context_switch_enter", next, "switch_to_thread");
+    if (prev && prepare_started && __atomic_load_n(&g_sched_cost_control.enabled, __ATOMIC_RELAXED))
+    {
+        ++prev->scheduler_cost.prepare_calls;
+        prev->scheduler_cost.prepare_tsc += scheduler_cost_clock() - prepare_started;
+    }
     context_switch(prev_ctx,
                    next_ctx,
                    prev_transition_flag,
@@ -2717,11 +2785,17 @@ __attribute__((visibility("default"))) void scheduler_schedule(bool requeue_curr
         }
 
         thread_t *skip_thread = just_requeued_current ? current : NULL;
+        uint64_t pick_started = scheduler_cost_begin();
         thread_t *next = dequeue_thread_for_cpu(cpu_index, skip_thread);
         if (!next && skip_thread)
         {
             /* If nothing else is runnable, allow the just-enqueued thread. */
             next = dequeue_thread_for_cpu(cpu_index, NULL);
+        }
+        if (current && pick_started && __atomic_load_n(&g_sched_cost_control.enabled, __ATOMIC_RELAXED))
+        {
+            ++current->scheduler_cost.pick_calls;
+            current->scheduler_cost.pick_tsc += scheduler_cost_clock() - pick_started;
         }
         uint32_t current_required_cpu = current ? scheduler_required_cpu(current) : RUN_QUEUE_CPU_INVALID;
         bool can_continue_current = have_current || (just_requeued_current &&

@@ -26,7 +26,7 @@ typedef struct
     atk_widget_t *window;
     atk_widget_t *start, *stop, *export, *previous, *next, *group;
     pthread_t worker;
-    bool worker_valid, close, dirty, checkpoint;
+    bool worker_valid, close, dirty, checkpoint, ui_error;
     unsigned scroll, group_index, result_count;
     uint64_t frames, last_frame, next_frame, done_at, clicks, dropped;
     histogram_t workload_metrics[6];
@@ -41,6 +41,11 @@ static const char *groups[] = {NULL,         "memory",  "vm",  "syscall",    "th
                                "scheduling", "process", "ipc", "filesystem", "network"};
 static const char *metric_names[] = {"frame_interval", "timer_lateness", "render",
                                      "present_call",   "input_queue",    "input_to_present_return"};
+static const char *metric_name(gui_t *g, unsigned metric)
+{
+    return metric == 3 && g->config->present_batch > 1 ? "present_batch_average"
+                                                       : metric_names[metric];
+}
 static void hist_add(histogram_t *h, uint64_t ns)
 {
     uint64_t ms = ns / 1000000;
@@ -122,10 +127,10 @@ static void ui_workload_report(gui_t *g)
         histogram_t *h = &g->workload_metrics[i];
         if (!h->count)
             continue;
-        perf_log("PERF_UI_WORKLOAD,%s,%s,%llu,%llu,%llu,%llu,%llu\n", g->workload, metric_names[i],
-                 (unsigned long long)h->count, (unsigned long long)(h->sum / h->count),
-                 (unsigned long long)percentile(h, 50), (unsigned long long)percentile(h, 95),
-                 (unsigned long long)h->max);
+        perf_log("PERF_UI_WORKLOAD,%s,%s,%llu,%llu,%llu,%llu,%llu\n", g->workload,
+                 metric_name(g, i), (unsigned long long)h->count,
+                 (unsigned long long)(h->sum / h->count), (unsigned long long)percentile(h, 50),
+                 (unsigned long long)percentile(h, 95), (unsigned long long)h->max);
     }
 }
 static void ui_rotate_workload(gui_t *g, unsigned phase)
@@ -160,7 +165,7 @@ static void ui_reports(gui_t *g, FILE *file)
                 continue;
             char output[256];
             snprintf(output, sizeof(output), "PERF_UI,%s,%s,%llu,%llu,%llu,%llu,%llu\n",
-                     phase ? "load" : "idle", metric_names[metric], (unsigned long long)h->count,
+                     phase ? "load" : "idle", metric_name(g, metric), (unsigned long long)h->count,
                      (unsigned long long)(h->sum / h->count), (unsigned long long)percentile(h, 50),
                      (unsigned long long)percentile(h, 95), (unsigned long long)h->max);
             if (file == stdout)
@@ -348,9 +353,11 @@ static void draw(gui_t *g, unsigned phase)
         text(24, 170 + (int)i * 22, buf, r->error ? muted : fg, width - 48);
     }
     int y = 404;
-    text(24, y, "UI LATENCY / milliseconds / 0 = below clock resolution", accent, width - 48);
-    const char *labels[] = {"Frame interval", "Timer lateness", "Render",
-                            "Present call",   "Input queue",    "Input to present"};
+    text(24, y, "UI LATENCY / milliseconds / p95 uses whole-ms buckets", accent, width - 48);
+    const char *labels[] = {
+        "Frame interval", "Timer lateness",
+        "Render",         g->config->present_batch > 1 ? "Present avg/call" : "Present call",
+        "Input queue",    "Input to present"};
     for (unsigned i = 0; i < 6; i++)
     {
         histogram_t *idle = &g->metrics[0][i], *load = &g->metrics[1][i];
@@ -423,6 +430,7 @@ int perf_gui(perf_config_t *c)
             if (rc < 0)
             {
                 snprintf(g->notice, sizeof(g->notice), "Event poll failed: %d", rc);
+                g->ui_error = true;
                 g->close = true;
                 break;
             }
@@ -504,28 +512,42 @@ int perf_gui(perf_config_t *c)
             uint64_t begin = perf_now_ns();
             if (!c->present_mode || g->dirty || !g->frames)
                 draw(g, phase);
-            if (c->present_mode == 2 && g->remote.buffer && g->remote.width && g->remote.height)
-                g->remote.buffer[(size_t)g->remote.width * g->remote.height - 1] ^= 1u;
             uint64_t rendered = perf_now_ns();
-            bool presented = atk_user_present_force(&g->remote);
+            bool presented = true;
+            unsigned uploads = 0;
+            for (; uploads < c->present_batch; uploads++)
+            {
+                if (c->present_mode == 2 && g->remote.buffer && g->remote.width && g->remote.height)
+                    g->remote.buffer[(size_t)g->remote.width * g->remote.height - 1] ^= 1u;
+                if (!atk_user_present_force(&g->remote))
+                {
+                    presented = false;
+                    break;
+                }
+            }
             uint64_t end = perf_now_ns();
+            if (c->present_batch > 1)
+                perf_log("PERF_UI_PRESENT_BATCH,%s,%llu,%u,%llu\n", phase ? "load" : "idle",
+                         (unsigned long long)g->frames, uploads,
+                         (unsigned long long)(end - rendered));
             if (!presented)
             {
                 snprintf(g->notice, sizeof(g->notice), "Present failed");
+                g->ui_error = true;
                 g->close = true;
             }
             ui_sample(g, phase, 2, rendered - begin);
-            ui_sample(g, phase, 3, end - rendered);
+            ui_sample(g, phase, 3, (end - rendered) / (uploads ? uploads : 1));
             if (input_stamp && end >= input_stamp)
                 ui_sample(g, phase, 5, end - input_stamp);
             g->frames++;
             g->dirty = false;
             bool capture_ready = phase && g->result_count >= (c->group ? 1u : 12u);
-            if (c->case_name && phase && g->frames >= 90)
+            if (c->case_name && phase && g->frames >= (c->present_batch > 1 ? 3u : 90u))
                 capture_ready = true;
             if (__atomic_load_n(&c->state->done, __ATOMIC_ACQUIRE) && g->result_count)
                 capture_ready = true;
-            if (!g->checkpoint && g->frames >= 60 && capture_ready)
+            if (!g->checkpoint && g->frames >= (c->present_batch > 1 ? 3u : 60u) && capture_ready)
             {
                 g->checkpoint = true;
                 perf_gui_visual_checkpoint();
@@ -550,9 +572,11 @@ int perf_gui(perf_config_t *c)
     ui_workload_report(g);
     ui_reports(g, stdout);
     unsigned failed = c->state->failed;
-    perf_log("PERF_GUI_DONE,frames=%llu,probes=%llu,dropped=%llu\n", (unsigned long long)g->frames,
-             (unsigned long long)g->clicks, (unsigned long long)g->dropped);
+    perf_log("PERF_GUI_DONE,frames=%llu,probes=%llu,dropped=%llu,error=%u\n",
+             (unsigned long long)g->frames, (unsigned long long)g->clicks,
+             (unsigned long long)g->dropped, g->ui_error);
+    bool ui_error = g->ui_error;
     atk_user_close(&g->remote);
     free(g);
-    return failed ? 1 : 0;
+    return failed || ui_error ? 1 : 0;
 }

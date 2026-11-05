@@ -31,6 +31,9 @@ def kernel_test():
 #define SYSCALL_FUTEX_TIMED_OUT (-110)
 #define ADDRESS ((uintptr_t)0x100001000ULL)
 #define PROCESS_FUTEX_BUCKET_COUNT 64u
+#define SMP_MAX_CPUS 32u
+static uint32_t current_cpu_index(void){return 0;}
+static uint64_t timer_ticks(void){return 123;}
 typedef unsigned spinlock_t;
 typedef struct { unsigned wakes; } wait_queue_t;
 typedef struct process process_t;
@@ -43,9 +46,11 @@ typedef struct thread {
     struct thread *futex_bucket_prev, *futex_bucket_next;
     bool futex_indexed;
     bool futex_waiting, futex_notified, futex_interrupted, signal_pending;
+    uint64_t futex_woken_tick;
+    bool futex_wake_stamped;
 } thread_t;
 struct process { bool is_user; spinlock_t threads_lock; thread_t *threads;
-                 thread_t *futex_buckets[PROCESS_FUTEX_BUCKET_COUNT]; };
+                 thread_t *futex_buckets[PROCESS_FUTEX_BUCKET_COUNT]; uint64_t futex_wake_sequence; };
 static process_t process, other;
 static thread_t threads[5], outsider;
 static thread_t *current;
@@ -55,7 +60,8 @@ static unsigned waits;
 static uint32_t word;
 static uint64_t waited_ticks;
 static unsigned memory_busy_attempts, memory_slow_reads;
-static bool slow_change_value, slow_fault, slow_signal, slow_kill, memory_fault;
+static bool slow_change_value, slow_fault, slow_signal, slow_kill, memory_fault, slow_wake;
+int process_futex_wake(uintptr_t, uint32_t);
 static thread_t *current_thread_local(void) { return current; }
 static bool user_ptr_range_valid(const void *p, size_t bytes)
 { return (uintptr_t)p >= ADDRESS && (uintptr_t)p + bytes <= ADDRESS + 8192; }
@@ -76,7 +82,9 @@ static bool process_memory_read_user_u32(process_t *p, uintptr_t address, uint32
     if(slow_fault)memory_fault=true;
     if(slow_signal)current->signal_pending=true;
     if(slow_kill)current->exited=true;
-    if(address!=ADDRESS || memory_fault)return false;*value=word;return true;
+    if(address!=ADDRESS || memory_fault)return false;*value=word;
+    if(slow_wake) { slow_wake=false; CHECK(process_futex_wake(ADDRESS,1)==0); }
+    return true;
 }
 static void wait_queue_init(wait_queue_t *queue) { queue->wakes = 0; }
 static bool thread_lifetime_active(thread_t *thread) { return thread->live; }
@@ -117,7 +125,7 @@ static void reset(void)
     outsider.process = &other; outsider.is_user = outsider.live = true; other.threads = &outsider;
     current = &threads[1]; scheduler_locked = inject_wake = inject_interrupt = false; waits = 0; word = 7; waited_ticks = 0;
     memory_busy_attempts=memory_slow_reads=0;
-    slow_change_value=slow_fault=slow_signal=slow_kill=memory_fault=false;
+    slow_change_value=slow_fault=slow_signal=slow_kill=memory_fault=slow_wake=false;
 }
 static void register_waiter(thread_t *thread, uintptr_t address)
 {
@@ -145,8 +153,8 @@ int main(void)
     CHECK(process_futex_wait(ADDRESS, 7, 0) == SYSCALL_FUTEX_TIMED_OUT);
     CHECK(waits == 0 && !current->futex_waiting);
 
-    /* The blocking memory wait must never retain scheduler ownership. Retry
-     * the expected value, mapping and signal state after that unlocked gap. */
+    /* The checked read never holds scheduler ownership. A wake during its
+     * unlocked gap invalidates reuse; faults, signals and death still win. */
     uint64_t retries=g_futex_memory_busy_retries;
     memory_busy_attempts=1;slow_change_value=true;
     CHECK(process_futex_wait(ADDRESS,7,UINT32_MAX)==SYSCALL_FUTEX_AGAIN);
@@ -161,9 +169,10 @@ int main(void)
     CHECK(process_futex_wait(ADDRESS,7,0)==SYSCALL_FUTEX_TIMED_OUT && !waits);
     reset();memory_busy_attempts=1;
     CHECK(process_futex_wait(ADDRESS,7,11)==SYSCALL_FUTEX_TIMED_OUT && waited_ticks==2);
-    reset();memory_busy_attempts=2;inject_wake=true;
+    reset();memory_busy_attempts=2;slow_wake=true;inject_wake=true;
+    uint64_t epochs=g_futex_epoch_retries;
     CHECK(process_futex_wait(ADDRESS,7,UINT32_MAX)==SYSCALL_FUTEX_OK);
-    CHECK(memory_slow_reads==2 && waits==1 && !current->futex_indexed);
+    CHECK(memory_slow_reads==2 && waits==1 && !current->futex_indexed && g_futex_epoch_retries==epochs+1);
     reset();
 
     inject_wake = true;

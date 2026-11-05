@@ -51,7 +51,7 @@ static int vfs_directory_snapshot(vfs_node_t *node, vfs_directory_snapshot_t *ou
     out->bytes=directory->snapshot.bytes; out->count=directory->snapshot.count; return 0;
 }
 '''
-for signature in ('static bool io_vfs_directory_ready(', 'static int io_vfs_directory_close(', 'static int io_vfs_directory_next('):
+for signature in ('static bool io_vfs_directory_ready(', 'static int io_vfs_directory_close(', 'static int io_vfs_directory_read_locked(', 'static int io_vfs_directory_next('):
     code += function_definition(source, signature) + '\n'
 code += r'''
 #define ENTRIES 2048u

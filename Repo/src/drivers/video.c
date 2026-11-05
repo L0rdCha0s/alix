@@ -15,6 +15,11 @@
 #include "font.h"
 #include "console.h"
 #include "spinlock.h"
+#include "timer.h"
+
+/* Published-row diagnostic totals; clock units remain native timer ticks. */
+static uint64_t g_video_flush_calls, g_video_flush_bytes, g_video_flush_ticks;
+static uint64_t g_video_flush_max_ticks;
 
 typedef struct atk_state atk_state_t;
 typedef struct atk_widget atk_widget_t;
@@ -1158,6 +1163,13 @@ static int video_dirty_snapshot(video_dirty_rect_t *out, int max_rects)
     return count;
 }
 
+/* Packed aliasable reads permit any source alignment without per-word libc
+ * calls. Destination stores stay aligned and volatile for the framebuffer. */
+typedef struct __attribute__((packed, may_alias))
+{
+    uint64_t value;
+} framebuffer_copy_word_t;
+
 /* Copy with wide stores; helps WC coalesce */
 static inline void fb_memcpy_wc(volatile void *dst_mmio, const void *src, size_t bytes)
 {
@@ -1175,12 +1187,16 @@ static inline void fb_memcpy_wc(volatile void *dst_mmio, const void *src, size_t
     size_t i = 0;
     /* align to 8 */
     for (; ((uintptr_t)(d + i) & 7) && i < bytes; ++i) d[i] = s[i];
-    for (; i + 8 <= bytes; i += 8)
+    for (; bytes - i >= 32; i += 32)
     {
-        uint64_t word;
-        memcpy(&word, s + i, sizeof(word));
-        *(volatile uint64_t *)(d + i) = word;
+        const framebuffer_copy_word_t *words = (const void *)(s + i);
+        *(volatile uint64_t *)(d + i) = words[0].value;
+        *(volatile uint64_t *)(d + i + 8) = words[1].value;
+        *(volatile uint64_t *)(d + i + 16) = words[2].value;
+        *(volatile uint64_t *)(d + i + 24) = words[3].value;
     }
+    for (; bytes - i >= 8; i += 8)
+        *(volatile uint64_t *)(d + i) = ((const framebuffer_copy_word_t *)(const void *)(s + i))->value;
     for (; i < bytes; ++i) d[i] = s[i];
 }
 
@@ -1191,12 +1207,14 @@ static void video_flush_rects_to_fb(const video_dirty_rect_t *rects, int count, 
         return;
     }
 
+    uint64_t started = timer_ticks(), copied = 0;
     for (int i = 0; i < count; ++i)
     {
         const video_dirty_rect_t *r = &rects[i];
         int w = r->x1 - r->x0;
         if (w <= 0) continue;
         size_t row_bytes = (size_t)w * sizeof(video_color_t);
+        if (r->y1 > r->y0) copied += row_bytes * (uint64_t)(r->y1 - r->y0);
 
         for (int y = r->y0; y < r->y1; ++y)
         {
@@ -1228,6 +1246,13 @@ static void video_flush_rects_to_fb(const video_dirty_rect_t *rects, int count, 
                          (size_t)(r->x1 - right) * sizeof(*src));
         }
     }
+    uint64_t elapsed = timer_ticks() - started;
+    __atomic_add_fetch(&g_video_flush_calls, 1, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&g_video_flush_bytes, copied, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&g_video_flush_ticks, elapsed, __ATOMIC_RELAXED);
+    uint64_t previous = __atomic_load_n(&g_video_flush_max_ticks, __ATOMIC_RELAXED);
+    while (elapsed > previous && !__atomic_compare_exchange_n(&g_video_flush_max_ticks,
+        &previous, elapsed, false, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) { }
 }
 
 static void video_flush_dirty(void)

@@ -186,3 +186,16 @@ The native libc acceptance fixture covers eight pinned CPUs, once, TSS
 isolation/destructors, signed returns and explicit exit, condition handoff,
 recursive/try/timed locks, detach, sleep and FP-state isolation. See
 [libc.md](libc.md) for the required runtime markers and test scope.
+
+## Current-thread identity fast path
+
+`pthread_self` keeps the immutable native TID in a per-thread atomic TLS slot
+after its first query. Lock-free relaxed accesses permit same-thread signal
+handler queries without a lock or allocation. The libc fork-child boundary
+clears this copied slot before user child callbacks. Compiler TLS initialization
+provides a fresh zero slot for each new thread. The raw `sys_thread_self` API
+continues to query the kernel and remains usable by raw-TLS clients.
+
+The native performance tool evaluates identity against self-info through thread
+creation, CPU migration and fork callbacks; see
+[the continued performance report](../performance-pass2-2026-11-05.md).

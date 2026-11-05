@@ -69,7 +69,9 @@ typedef struct
 void io_vfs_execute(io_request_t *request, io_service_result_t *result,
                      fd_retirement_queue_t *retirement);
 /* Registered request, bounded preparation guard. Only resident regular-file
- * reads, seeks and metadata snapshots can complete here. False means no
+ * reads, seeks, metadata and immutable directory-next steps complete here.
+ * Directory cursor contention falls back; snapshot open/refresh stay workers.
+ * False means no
  * operation occurred and the same request must go to the protected worker. */
 bool io_vfs_try_execute(io_request_t *request, io_service_result_t *result);
 /* Caller holds a description reference; regular-file backend identity only. */

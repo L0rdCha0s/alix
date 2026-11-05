@@ -40,6 +40,10 @@ static uint32_t g_user_file_start;
 /* Monotonic diagnostic counters, readable by the browser harness through GDB. */
 static uint64_t g_user_file_inline_socket, g_user_file_inline_poll;
 static uint64_t g_user_file_inline_pipe;
+/* Submitted native TCP data requests, indexed read/write. Payload bytes are
+ * reserved/zeroed for reads and also captured from userspace for writes. */
+static uint64_t g_user_tcp_capture_calls[2], g_user_tcp_capture_bytes[2];
+static uint64_t g_user_tcp_request_bytes[2];
 static uint64_t g_user_message_prepare_saved_bytes, g_user_message_empty_control_skips;
 static uint64_t g_user_storage_operations[64];
 static uint64_t g_user_file_inline_storage[64];
@@ -233,6 +237,18 @@ static int user_file_submit(user_file_service_t kind, io_request_t *request)
                 else __atomic_add_fetch(&g_user_file_inline_pipe, 1, __ATOMIC_RELAXED);
                 return result;
             }
+        }
+    }
+    if (kind == USER_TCP && io_tcp_description_valid(description) &&
+        io_request_buffer_size(request) >= sizeof(io_tcp_operation_t))
+    {
+        io_tcp_operation_t *operation = io_request_buffer(request);
+        if (operation->opcode == IO_TCP_READ || operation->opcode == IO_TCP_WRITE)
+        {
+            unsigned index = operation->opcode == IO_TCP_WRITE;
+            __atomic_add_fetch(&g_user_tcp_capture_calls[index], 1, __ATOMIC_RELAXED);
+            __atomic_add_fetch(&g_user_tcp_capture_bytes[index], operation->count, __ATOMIC_RELAXED);
+            __atomic_add_fetch(&g_user_tcp_request_bytes[index], io_request_buffer_size(request), __ATOMIC_RELAXED);
         }
     }
     if (kind == USER_TCP && (io_local_description_valid(description) ||
@@ -1079,6 +1095,7 @@ static int64_t user_file_writev(uint64_t fd,const void *input,uint64_t count)
                   audio?sizeof(io_audio_operation_t):sizeof(io_vfs_operation_t);
     size_t bytes=total<IO_REQUEST_BUFFER_MAX-header?(size_t)total:IO_REQUEST_BUFFER_MAX-header;
     if(!result && audio && total%4)result=-EINVAL;
+    if(!result && tcp)bytes=io_tcp_capture_limit(description,true,bytes);
     io_request_t *request=NULL;
     if(!result)result=user_file_create(kind,header+(udp?((bytes+7)&~(size_t)7)+sizeof(io_udp_state_t):bytes),description,NULL,&request);
     else fd_description_put(description);
@@ -1245,6 +1262,7 @@ static int64_t user_file_message(uint32_t operation, uint64_t fd, const void *he
     size_t capacity = (IO_REQUEST_BUFFER_MAX - sizeof(io_tcp_operation_t) - metadata_bytes - (udp ? sizeof(io_udp_state_t) : 0)) & ~(size_t)7;
     if (udp && capacity > NET_UDP_MAX_PAYLOAD) capacity = NET_UDP_MAX_PAYLOAD;
     size_t bytes = total < capacity ? (size_t)total : capacity;
+    if (!result) bytes = io_tcp_capture_limit(description, !reading, bytes);
     size_t metadata_offset = sizeof(io_tcp_operation_t) + ((bytes + 7) & ~(size_t)7);
     fd_description_t *control_owner = NULL;
     if (!result && local && (reading || prepare->message.control_length))
@@ -1330,6 +1348,8 @@ static int64_t user_file_data(uint32_t operation, uint64_t fd, void *buffer, siz
     if (!result && operation == SYSCALL_FILE_STAT &&
         (!buffer || !user_ptr_range_valid(buffer, sizeof(syscall_stat_t)))) result = -EFAULT;
     io_request_t *request = NULL;
+    if (!result && tcp && (reading || writing))
+        bytes = io_tcp_capture_limit(description, writing, bytes);
     if (!result) result = user_file_create(kind, header + (udp ? ((bytes + 7) & ~(size_t)7) + sizeof(io_udp_state_t) : bytes), description, NULL, &request);
     else fd_description_put(description);
     if (!result)

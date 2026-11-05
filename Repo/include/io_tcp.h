@@ -52,5 +52,10 @@ bool io_tcp_execute(io_request_t *request, io_service_result_t *result,
                       fd_retirement_queue_t *retirement);
 /* Caller holds a description reference; immutable backend identity only. */
 bool io_tcp_description_valid(const fd_description_t *description);
+/* Bound a captured stream prefix to one negotiated segment for writes, or
+ * queued data for reads (one segment when empty). Caller retains description
+ * under its preparation guard. This is an allocation hint, never a readiness
+ * decision: positive requests stay positive, and execute rechecks all state. */
+size_t io_tcp_capture_limit(fd_description_t *description, bool writing, size_t count);
 
 #endif

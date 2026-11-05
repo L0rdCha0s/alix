@@ -30,7 +30,7 @@
 /* Error-only counters for runtime diagnosis. Inspect after a measurement with
  * the CPUs stopped; successful file calls pay no atomic accounting cost. */
 uint64_t g_file_io_errors[128][128];
-uint64_t g_io_admission_restarts;
+uint64_t g_io_admission_restarts, g_io_admission_restart_ticks;
 
 /*
  * src/kernel/syscall.c
@@ -1706,7 +1706,9 @@ static uint64_t syscall_dispatch_inner(syscall_frame_t *frame, uint64_t vector, 
         if ((frame->cs & 3u) == 3u && frame->rip >= 2)
         {
             __atomic_add_fetch(&g_io_admission_restarts, 1, __ATOMIC_RELAXED);
-            process_sleep_ms(1);
+            uint64_t admission_start = timer_ticks();
+            if (!process_io_wait_admission()) process_sleep_ms(1);
+            __atomic_add_fetch(&g_io_admission_restart_ticks, timer_ticks() - admission_start, __ATOMIC_RELAXED);
             frame->rip -= 2;
             result = (int64_t)syscall_id;
         }

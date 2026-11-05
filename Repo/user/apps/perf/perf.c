@@ -22,6 +22,7 @@
 #include "sys/socket.h"
 #include "sys/stat.h"
 #include "sys/utsname.h"
+#include "sys/uio.h"
 #include "sys/wait.h"
 #include "time.h"
 #include "unistd.h"
@@ -71,6 +72,18 @@ static void current(perf_config_t *c, const char *name)
     snprintf(c->state->current, sizeof(c->state->current), "%s", name);
     pthread_mutex_unlock(&c->state->lock);
     perf_log("PERF_BEGIN,%s\n", name);
+}
+static uint64_t sample_target_ns(const perf_config_t *c, unsigned scale)
+{
+    struct timespec resolution = {0};
+    uint64_t quantum = UINT64_C(10000000);
+    if (!clock_getres(CLOCK_MONOTONIC, &resolution))
+    {
+        uint64_t reported = (uint64_t)resolution.tv_sec * UINT64_C(1000000000) + resolution.tv_nsec;
+        if (reported) quantum = reported;
+    }
+    uint64_t requested = (uint64_t)c->duration_ms * UINT64_C(1000000) * scale;
+    return requested < quantum * 5 ? quantum * 5 : requested;
 }
 static int compare_u64(const void *a, const void *b)
 {
@@ -133,8 +146,12 @@ typedef enum
     REALLOC,
     FRAGMENT,
     MEMCPY,
+    MEMCPY_UNALIGNED,
     MEMSET,
     MEMMOVE,
+    MEMMOVE_BACK1,
+    MEMMOVE_FWD1,
+    MEMCOPY_GUARD,
     MEMCMP_EQUAL,
     MEMCMP_UNALIGNED,
     MEMCMP_EARLY,
@@ -159,12 +176,17 @@ typedef enum
     LOCAL,
     POLL_IDLE,
     POLL_READY,
+    POLL_DISTINCT_IDLE,
+    POLL_DISTINCT_READY,
+    POLL_LOCAL_REPEAT,
     STAT,
     OPEN,
     DUP,
     DIRECTORY,
     CREATE,
     FILE_READ,
+    FILE_READ_API,
+    FILE_READ_CHECKED,
     FILE_WRITE,
     FILE_RANDOM,
     FILE_SYNC,
@@ -174,6 +196,7 @@ typedef enum
     TCP_CONNECT,
     TCP_ECHO,
     TCP_STREAM,
+    TCP_VECTOR,
     UDP_ECHO,
     DNS,
     SLEEP
@@ -203,8 +226,13 @@ static const bench_t benches[] = {
     {"memory", "fragment_64_allocations", FRAGMENT, 0, 1024},
     {"memory", "memcpy_4k", MEMCPY, 4 * KB, 1048576},
     {"memory", "memcpy_1m", MEMCPY, MB, 4096},
+    {"memory", "memcpy_unaligned_4k", MEMCPY_UNALIGNED, 4 * KB, 65536},
+    {"memory", "memcpy_unaligned_1m", MEMCPY_UNALIGNED, MB, 4096},
+    {"memory", "memory_copy_guard_pages", MEMCOPY_GUARD, 0, 1},
     {"memory", "memset_1m", MEMSET, MB, 4096},
     {"memory", "memmove_overlap_64k", MEMMOVE, 64 * KB, 65536},
+    {"memory", "memmove_backward_1_64k", MEMMOVE_BACK1, 64 * KB, 65536},
+    {"memory", "memmove_forward_1_64k", MEMMOVE_FWD1, 64 * KB, 65536},
     {"memory", "memcmp_equal_4k", MEMCMP_EQUAL, 4 * KB, 1048576},
     {"memory", "memcmp_equal_1m", MEMCMP_EQUAL, MB, 4096},
     {"memory", "memcmp_unaligned_4k", MEMCMP_UNALIGNED, 4 * KB, 1048576},
@@ -237,12 +265,20 @@ static const bench_t benches[] = {
     {"ipc", "poll_idle_32", POLL_IDLE, 32, 65536},
     {"ipc", "poll_idle_128", POLL_IDLE, 128, 65536},
     {"ipc", "poll_ready_32", POLL_READY, 32, 65536},
+    {"ipc", "poll_idle_distinct_128", POLL_DISTINCT_IDLE, 128, 65536},
+    {"ipc", "poll_ready_distinct_128", POLL_DISTINCT_READY, 128, 65536},
+    {"ipc", "poll_idle_local_repeated_128", POLL_LOCAL_REPEAT, 128, 65536},
     {"filesystem", "stat", STAT, 0, 65536},
     {"filesystem", "open_close", OPEN, 0, 4096},
     {"filesystem", "dup_close", DUP, 0, 4096},
     {"filesystem", "directory_scan", DIRECTORY, 0, 4096},
+    {"filesystem", "directory_scan_128", DIRECTORY, 128, 128},
     {"filesystem", "create_unlink", CREATE, 0, 1024},
     {"filesystem", "cached_read_64k", FILE_READ, 64 * KB, 4096},
+    {"filesystem", "cached_read_4k_api", FILE_READ_API, 4 * KB, 4096},
+    {"filesystem", "cached_read_60k_api", FILE_READ_API, 60 * KB, 4096},
+    {"filesystem", "cached_read_64k_api", FILE_READ_API, 64 * KB, 4096},
+    {"filesystem", "cached_read_60k_checked", FILE_READ_CHECKED, 60 * KB, 4096},
     {"filesystem", "overwrite_64k", FILE_WRITE, 64 * KB, 4096},
     {"filesystem", "random_pread_4k", FILE_RANDOM, 4 * KB, 4096},
     {"filesystem", "write_fsync_4k", FILE_SYNC, 4 * KB, 32},
@@ -253,6 +289,7 @@ static const bench_t benches[] = {
     {"network", "tcp_echo_64", TCP_ECHO, 64, 256},
     {"network", "tcp_echo_serial_64k", TCP_ECHO, 64 * KB, 64},
     {"network", "tcp_echo_stream_1m", TCP_STREAM, MB, 8},
+    {"network", "tcp_vector_stream_1m", TCP_VECTOR, MB, 8},
     {"network", "udp_echo_64", UDP_ECHO, 64, 256},
     {"network", "udp_echo_1200", UDP_ECHO, 1200, 256},
     {"network", "dns_lookup", DNS, 0, 8},
@@ -266,9 +303,18 @@ typedef struct
     int fd, pair[2];
     int fd_batch[128], socket_receive_capacity;
     socklen_t socket_option_size;
+    struct iovec send_vectors[2], receive_vectors[2];
+    struct msghdr send_message, receive_message;
+    uint64_t vector_sends, vector_writes, vector_receives;
+    uint64_t file_read_calls, file_read_bytes, directory_calls, directory_entries;
+    uint64_t directory_seen[2];
+    unsigned directory_files;
     struct pollfd *polls;
+    int *poll_fds;
     void *mapping;
     unsigned char *guard_a, *guard_b;
+    size_t guard_length;
+    uint64_t move_calls;
     char directory[4096], path[4096], temporary[4096];
     bool directory_created;
     pthread_mutex_t mutex;
@@ -407,8 +453,22 @@ static int prepare(context_t *x)
         if (b->op == MEMCMP_LATE)
             x->b[b->size - 1] ^= 0x80;
     }
+    if (b->op == MEMMOVE || b->op == MEMMOVE_BACK1 || b->op == MEMMOVE_FWD1)
+        memcpy(x->b, x->a, b->size + 16);
+    if (b->op == MEMCOPY_GUARD)
+    {
+        x->guard_length = 12288;
+        x->guard_a = mmap(NULL, x->guard_length, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        x->guard_b = mmap(NULL, x->guard_length, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        REQUIRE(x->guard_a != MAP_FAILED && x->guard_b != MAP_FAILED);
+        REQUIRE(!mprotect(x->guard_a, 4096, PROT_NONE) && !mprotect(x->guard_a + 8192, 4096, PROT_NONE) &&
+                !mprotect(x->guard_b, 4096, PROT_NONE) && !mprotect(x->guard_b + 8192, 4096, PROT_NONE));
+        for (unsigned i = 0; i < 4096; i++) x->guard_a[4096+i] = x->a[i];
+        REQUIRE(!mprotect(x->guard_a + 4096, 4096, PROT_READ));
+    }
     if (b->op == MEMCMP_GUARD)
     {
+        x->guard_length = 8192;
         x->guard_a = mmap(NULL, 8192, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         x->guard_b = mmap(NULL, 8192, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         REQUIRE(x->guard_a != MAP_FAILED && x->guard_b != MAP_FAILED);
@@ -471,6 +531,31 @@ static int prepare(context_t *x)
                 REQUIRE(write(x->pair[1], x->a, 1) == 1);
         }
     }
+    if (b->op == POLL_DISTINCT_IDLE || b->op == POLL_DISTINCT_READY || b->op == POLL_LOCAL_REPEAT)
+    {
+        x->polls = calloc(b->size, sizeof(*x->polls));
+        REQUIRE(x->polls);
+        if (b->op == POLL_LOCAL_REPEAT)
+        {
+            REQUIRE(!socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, x->pair));
+            for (size_t i = 0; i < b->size; i++)
+                x->polls[i] = (struct pollfd){x->pair[0], POLLIN, 0};
+        }
+        else
+        {
+            x->poll_fds = malloc(b->size * sizeof(*x->poll_fds));
+            REQUIRE(x->poll_fds);
+            for (size_t i = 0; i < b->size; i++) x->poll_fds[i] = -1;
+            for (size_t i = 0; i < b->size; i += 2)
+                REQUIRE(!socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, x->poll_fds + i));
+            for (size_t i = 0; i < b->size; i++)
+            {
+                x->polls[i] = (struct pollfd){x->poll_fds[i], POLLIN, 0};
+                if (b->op == POLL_DISTINCT_READY)
+                    REQUIRE(send(x->poll_fds[i], x->a, 1, MSG_DONTWAIT | MSG_NOSIGNAL) == 1);
+            }
+        }
+    }
     if (b->op == LOCAL)
         REQUIRE(socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, x->pair) == 0);
     if (!strcmp(b->group, "filesystem"))
@@ -483,15 +568,28 @@ static int prepare(context_t *x)
         x->fd = open(x->path, O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0600);
         REQUIRE(x->fd >= 0);
         REQUIRE(transfer(x->fd, x->a, MB, true, false) == 0);
+        if (b->op == DIRECTORY && b->size)
+        {
+            REQUIRE(b->size <= 128);
+            for (unsigned i = 1; i < b->size; i++)
+            {
+                snprintf(x->temporary, sizeof(x->temporary), "%s/entry-%03u", x->directory, i);
+                int child = open(x->temporary, O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0600);
+                REQUIRE(child >= 0);
+                x->directory_files = i;
+                REQUIRE(close(child) == 0);
+            }
+            snprintf(x->temporary, sizeof(x->temporary), "%s/churn", x->directory);
+        }
     }
-    if (b->op == TCP_CONNECT || b->op == TCP_ECHO || b->op == TCP_STREAM || b->op == UDP_ECHO)
+    if (b->op == TCP_CONNECT || b->op == TCP_ECHO || (b->op == TCP_STREAM || b->op == TCP_VECTOR) || b->op == UDP_ECHO)
     {
         if (!x->config->net_host || !x->config->port)
             return -1;
         x->endpoint.sin_family = AF_INET;
         x->endpoint.sin_port = htons(x->config->port);
         REQUIRE(inet_pton(AF_INET, x->config->net_host, &x->endpoint.sin_addr) == 1);
-        if (b->op == TCP_ECHO || b->op == TCP_STREAM)
+        if (b->op == TCP_ECHO || (b->op == TCP_STREAM || b->op == TCP_VECTOR))
         {
             x->fd = tcp_open(x);
             REQUIRE(x->fd >= 0);
@@ -518,12 +616,15 @@ static void cleanup(context_t *x)
         close(x->pair[0]);
     if (x->pair[1] >= 0)
         close(x->pair[1]);
+    if (x->poll_fds)
+        for (size_t i = 0; i < x->bench->size; i++)
+            if (x->poll_fds[i] >= 0) close(x->poll_fds[i]);
     if (x->mapping != MAP_FAILED)
         munmap(x->mapping, x->bench->size);
     if (x->guard_a && x->guard_a != MAP_FAILED)
-        munmap(x->guard_a, 8192);
+        munmap(x->guard_a, x->guard_length);
     if (x->guard_b && x->guard_b != MAP_FAILED)
-        munmap(x->guard_b, 8192);
+        munmap(x->guard_b, x->guard_length);
     if (x->slots)
         for (unsigned i = 0; i < 64; i++)
             free(x->slots[i]);
@@ -531,6 +632,11 @@ static void cleanup(context_t *x)
         unlink(x->path);
     if (x->temporary[0])
         unlink(x->temporary);
+    for (unsigned i = 1; i <= x->directory_files; i++)
+    {
+        snprintf(x->temporary, sizeof(x->temporary), "%s/entry-%03u", x->directory, i);
+        unlink(x->temporary);
+    }
     if (x->directory_created)
         rmdir(x->directory);
     pthread_mutex_destroy(&x->mutex);
@@ -541,6 +647,7 @@ static void cleanup(context_t *x)
     free(x->b);
     free(x->slots);
     free(x->polls);
+    free(x->poll_fds);
     free(x);
 }
 static void *empty_thread(void *arg) { return arg; }
@@ -552,6 +659,69 @@ static int child_wait(pid_t pid)
         r = waitpid(pid, &status, 0);
     while (r < 0 && errno == EINTR);
     return r == pid && WIFEXITED(status) && !WEXITSTATUS(status) ? 0 : ECHILD;
+}
+/* Correctness diagnostic. Source is read-only and both sides of each usable
+ * page are protected. The oracle uses bytes, independent of the wide copies. */
+static int guarded_copy(context_t *x)
+{
+    unsigned char *source_page = x->guard_a + 4096, *page = x->guard_b + 4096;
+    for (unsigned ni = 0; ni < 260; ni++)
+    {
+        size_t n = ni < 258 ? ni : ni == 258 ? 4095 : 4096;
+        for (unsigned edge = 0; edge < 2; edge++)
+            for (size_t a = 0; a < 8 && n + a <= 4096; a++)
+                for (size_t b = 0; b < 8 && n + b <= 4096; b++)
+                    for (unsigned kind = 0; kind < 2; kind++)
+                    {
+                        size_t from = edge ? 4096 - n - a : a;
+                        size_t to = edge ? 4096 - n - b : b;
+                        memset(page, 0xA5, 4096);
+                        void *result = kind ? memmove(page + to, source_page + from, n)
+                                            : memcpy(page + to, source_page + from, n);
+                        if (result != page + to) return EIO;
+                        size_t low = to > 32 ? to - 32 : 0, high = to + n;
+                        high = 4096 - high < 32 ? 4096 : high + 32;
+                        for (size_t i = low; i < high; i++)
+                        {
+                            unsigned char expected = i >= to && i - to < n ? x->a[from + i - to] : 0xA5;
+                            if (page[i] != expected)
+                            {
+                                perf_log("PERF_COPY_FAIL,kind=%u,size=%u,edge=%u,source=%u,target=%u,index=%u\n",
+                                         kind, (unsigned)n, edge, (unsigned)a, (unsigned)b, (unsigned)i);
+                                return EIO;
+                            }
+                        }
+                    }
+        for (size_t gap = 1; gap <= 33; gap++)
+            for (size_t alignment = 0; alignment < 8 && n + gap + alignment <= 4096; alignment++)
+                for (unsigned edge = 0; edge < 2; edge++)
+                    for (unsigned backward = 0; backward < 2; backward++)
+                    {
+                        size_t first = edge ? 4096 - n - gap - alignment : alignment;
+                        size_t from = first + (backward ? 0 : gap), to = first + (backward ? gap : 0);
+                        size_t low = first > 32 ? first - 32 : 0, high = first + n + gap;
+                        high = 4096 - high < 32 ? 4096 : high + 32;
+                        memcpy(page, x->a, 4096);
+                        for (size_t i = low; i < high; i++) x->b[i] = x->a[i];
+                        if (backward)
+                            for (size_t i = n; i > 0; i--) x->b[to + i - 1] = x->b[from + i - 1];
+                        else
+                            for (size_t i = 0; i < n; i++) x->b[to + i] = x->b[from + i];
+                        if (memmove(page + to, page + from, n) != page + to) return EIO;
+                        for (size_t i = low; i < high; i++)
+                            if (page[i] != x->b[i])
+                            {
+                                perf_log("PERF_MOVE_FAIL,size=%u,gap=%u,edge=%u,backward=%u,index=%u\n",
+                                         (unsigned)n, (unsigned)gap, edge, backward, (unsigned)i);
+                                return EIO;
+                            }
+                    }
+    }
+    memcpy(page, x->a, 4096);
+    if (memmove(page, page, 4096) != page || memmove(page + 4096, page + 4096, 0) != page + 4096)
+        return EIO;
+    for (size_t i = 0; i < 4096; i++) if (page[i] != x->a[i]) return EIO;
+    return 0;
 }
 static int operation(context_t *x)
 {
@@ -651,6 +821,12 @@ static int operation(context_t *x)
         sink = x->b[z - 1];
         REQUIRE(x->b[z - 1] == x->a[z - 1]);
         break;
+    case MEMCPY_UNALIGNED:
+        REQUIRE(memcpy(x->b + 2, x->a + 1, z) == x->b + 2);
+        sink = x->b[z + 1];
+        break;
+    case MEMCOPY_GUARD:
+        return guarded_copy(x);
     case MEMSET:
         memset(x->b, 41, z);
         sink = x->b[z - 1];
@@ -659,6 +835,14 @@ static int operation(context_t *x)
     case MEMMOVE:
         memmove(x->b + 16, x->b, z);
         sink = x->b[z];
+        break;
+    case MEMMOVE_BACK1:
+        REQUIRE(memmove(x->b + 1, x->b, z) == x->b + 1);
+        sink = x->b[z];
+        break;
+    case MEMMOVE_FWD1:
+        REQUIRE(memmove(x->b, x->b + 1, z) == x->b);
+        sink = x->b[0];
         break;
     case MEMCMP_EQUAL:
     case MEMCMP_UNALIGNED:
@@ -827,8 +1011,11 @@ static int operation(context_t *x)
         break;
     case POLL_IDLE:
     case POLL_READY:
+    case POLL_DISTINCT_IDLE:
+    case POLL_DISTINCT_READY:
+    case POLL_LOCAL_REPEAT:
         e = poll(x->polls, z, 0);
-        REQUIRE(e == (b->op == POLL_READY ? (int)z : 0));
+        REQUIRE(e == (b->op == POLL_READY || b->op == POLL_DISTINCT_READY ? (int)z : 0));
         break;
     case STAT:
     {
@@ -850,15 +1037,53 @@ static int operation(context_t *x)
     {
         DIR *d = opendir(x->directory);
         REQUIRE(d);
-        unsigned found = 0;
+        unsigned found = 0, dot = 0, parent = 0;
+        int invalid = 0;
+        x->directory_seen[0] = x->directory_seen[1] = 0;
         struct dirent *entry;
         errno = 0;
-        while ((entry = readdir(d)))
-            if (!strcmp(entry->d_name, "data"))
+        for (;;)
+        {
+            ++x->directory_calls;
+            entry = readdir(d);
+            if (!entry)
+                break;
+            ++x->directory_entries;
+            if (!entry->d_ino)
+                invalid = 1;
+            if (!strcmp(entry->d_name, "."))
+                dot++;
+            else if (!strcmp(entry->d_name, ".."))
+                parent++;
+            else if (!strcmp(entry->d_name, "data"))
+            {
+                if (x->directory_seen[0] & 1)
+                    invalid = 1;
+                x->directory_seen[0] |= 1;
                 found++;
+            }
+            else if (z && !strncmp(entry->d_name, "entry-", 6))
+            {
+                char *end;
+                unsigned long index = strtoul(entry->d_name + 6, &end, 10);
+                if (*end || !index || index >= z)
+                    invalid = 1;
+                else
+                {
+                    uint64_t mask = UINT64_C(1) << (index % 64);
+                    if (x->directory_seen[index / 64] & mask)
+                        invalid = 1;
+                    x->directory_seen[index / 64] |= mask;
+                    found++;
+                }
+            }
+            else
+                invalid = 1;
+        }
         e = errno;
-        closedir(d);
-        REQUIRE(!e && found == 1);
+        if (closedir(d) < 0 && !e)
+            e = errno;
+        REQUIRE(!e && !invalid && found == (z ? z : 1) && dot == 1 && parent == 1);
         break;
     }
     case CREATE:
@@ -868,16 +1093,23 @@ static int operation(context_t *x)
         REQUIRE(!unlink(x->temporary));
         break;
     case FILE_READ:
+    case FILE_READ_API:
+    case FILE_READ_CHECKED:
         for (size_t done = 0; done < z;)
         {
             ssize_t n = pread(x->fd, x->b + done, z - done, (off_t)done);
+            ++x->file_read_calls;
             if (n < 0 && errno == EINTR)
                 continue;
             if (n <= 0)
                 return n < 0 ? errno : EIO;
+            if ((size_t)n > z - done)
+                return EIO;
             done += (size_t)n;
+            x->file_read_bytes += (uint64_t)n;
         }
-        REQUIRE(!memcmp(x->a, x->b, z));
+        if (b->op != FILE_READ_API)
+            REQUIRE(!memcmp(x->a, x->b, z));
         break;
     case FILE_WRITE:
     case FILE_SYNC:
@@ -956,6 +1188,7 @@ static int operation(context_t *x)
         REQUIRE(!memcmp(x->a, x->b, z));
         break;
     case TCP_STREAM:
+    case TCP_VECTOR:
     {
         size_t sent = 0, received = 0;
         uint64_t deadline = perf_now_ns() + UINT64_C(10000000000);
@@ -968,7 +1201,27 @@ static int operation(context_t *x)
             bool progress = false;
             if (sent < z)
             {
-                ssize_t n = send(x->fd, x->a + sent, z - sent, MSG_DONTWAIT | MSG_NOSIGNAL);
+                ssize_t n;
+                if (b->op == TCP_VECTOR)
+                {
+                    size_t left = z - sent, first = left < 733 ? left : 733;
+                    x->send_vectors[0] = (struct iovec){x->a + sent, first};
+                    x->send_vectors[1] = (struct iovec){x->a + sent + first, left - first};
+                    if ((x->vector_sends + x->vector_writes) & 1)
+                    {
+                        ++x->vector_writes;
+                        n = writev(x->fd, x->send_vectors, 2);
+                    }
+                    else
+                    {
+                        ++x->vector_sends;
+                        x->send_message.msg_iov = x->send_vectors;
+                        x->send_message.msg_iovlen = 2;
+                        n = sendmsg(x->fd, &x->send_message, MSG_DONTWAIT | MSG_NOSIGNAL);
+                    }
+                }
+                else
+                    n = send(x->fd, x->a + sent, z - sent, MSG_DONTWAIT | MSG_NOSIGNAL);
                 if (n > 0)
                 {
                     sent += (size_t)n;
@@ -979,7 +1232,19 @@ static int operation(context_t *x)
                 else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)
                     return errno;
             }
-            ssize_t n = recv(x->fd, x->b + received, z - received, MSG_DONTWAIT);
+            ssize_t n;
+            if (b->op == TCP_VECTOR)
+            {
+                size_t left = z - received, first = left < 17 ? left : 17;
+                x->receive_vectors[0] = (struct iovec){x->b + received, first};
+                x->receive_vectors[1] = (struct iovec){x->b + received + first, left - first};
+                x->receive_message.msg_iov = x->receive_vectors;
+                x->receive_message.msg_iovlen = 2;
+                ++x->vector_receives;
+                n = recvmsg(x->fd, &x->receive_message, MSG_DONTWAIT);
+            }
+            else
+                n = recv(x->fd, x->b + received, z - received, MSG_DONTWAIT);
             if (n > 0)
             {
                 received += (size_t)n;
@@ -1032,12 +1297,17 @@ static int batch(context_t *x, unsigned n)
         if (e)
             return e;
     }
+    if (x->bench->op == MEMMOVE || x->bench->op == MEMMOVE_BACK1 || x->bench->op == MEMMOVE_FWD1)
+        x->move_calls += n;
     return 0;
 }
 static void run_bench(perf_config_t *c, const bench_t *b)
 {
     if ((b->op == SOCKET_BURST || b->op == THREAD_IDENTITY || b->op == FORK_IDENTITY ||
-         b->op == MEMCMP_GUARD) &&
+         b->op == MEMCMP_GUARD || b->op == MEMCOPY_GUARD || b->op == TCP_VECTOR ||
+         (b->op == DIRECTORY && b->size) || b->op == FILE_READ_API ||
+         b->op == FILE_READ_CHECKED || b->op == POLL_DISTINCT_IDLE ||
+         b->op == POLL_DISTINCT_READY || b->op == POLL_LOCAL_REPEAT) &&
         !c->case_name)
         return;
     if (!selected(c, b->group) || !selected_case(c, b->name) || stopped(c))
@@ -1078,12 +1348,7 @@ static void run_bench(perf_config_t *c, const bench_t *b)
             break;
         n = n > b->cap / 2 ? b->cap : n * 2;
     }
-    struct timespec resolution = {0};
-    clock_getres(CLOCK_MONOTONIC, &resolution);
-    uint64_t target = (uint64_t)c->duration_ms * 1000000;
-    uint64_t floor = ((uint64_t)resolution.tv_sec * 1000000000 + resolution.tv_nsec) * 5;
-    if (target < floor)
-        target = floor;
+    uint64_t target = sample_target_ns(c, 1);
     for (unsigned round = 0; !r.error && round < c->rounds && !stopped(c); round++)
     {
         struct rusage before = {0}, after = {0};
@@ -1118,10 +1383,12 @@ static void run_bench(perf_config_t *c, const bench_t *b)
     if (!r.error && r.elapsed_ns == 0)
         snprintf(r.detail, sizeof(r.detail),
                  "below clock resolution; increase --duration or iteration cap");
-    if (b->op == MEMCPY || b->op == MEMSET || b->op == MEMMOVE || b->op == MEMCMP_EQUAL ||
+    if (b->op == MEMCPY || b->op == MEMCPY_UNALIGNED || b->op == MEMSET || b->op == MEMMOVE ||
+        b->op == MEMMOVE_BACK1 || b->op == MEMMOVE_FWD1 || b->op == MEMCMP_EQUAL ||
         b->op == MEMCMP_UNALIGNED || b->op == MEMCMP_LATE || b->op == FILE_READ ||
+        b->op == FILE_READ_API || b->op == FILE_READ_CHECKED ||
         b->op == FILE_WRITE || b->op == FILE_RANDOM || b->op == FILE_SYNC || b->op == FILE_MAP ||
-        b->op == PIPE || b->op == LOCAL || b->op == TCP_ECHO || b->op == TCP_STREAM ||
+        b->op == PIPE || b->op == LOCAL || b->op == TCP_ECHO || (b->op == TCP_STREAM || b->op == TCP_VECTOR) ||
         b->op == UDP_ECHO)
         r.bytes = r.operations * b->size;
     if (b->op == SLEEP)
@@ -1131,8 +1398,54 @@ static void run_bench(perf_config_t *c, const bench_t *b)
         r.error = -2;
     finish(&r, costs);
     free(costs);
-    if (b->op == TCP_ECHO || b->op == TCP_STREAM)
+    if (!r.error && (b->op == MEMCPY || b->op == MEMCPY_UNALIGNED))
+    {
+        size_t source = b->op == MEMCPY_UNALIGNED ? 1 : 0, target = source ? 2 : 0;
+        if (memcmp(x->b + target, x->a + source, b->size)) r.error = EIO;
+    }
+    if (!r.error && (b->op == MEMMOVE || b->op == MEMMOVE_BACK1 || b->op == MEMMOVE_FWD1))
+    {
+        size_t gap = b->op == MEMMOVE ? 16 : 1;
+        for (size_t i = 0; i < b->size + gap; i++)
+        {
+            size_t original;
+            if (b->op == MEMMOVE_FWD1)
+            {
+                size_t shift = x->move_calls < b->size ? (size_t)x->move_calls : b->size;
+                original = i >= b->size ? i : i + shift < b->size ? i + shift : b->size;
+            }
+            else
+                original = x->move_calls <= i / gap ? i - (size_t)x->move_calls * gap : i % gap;
+            if (x->b[i] != x->a[original]) { r.error = EIO; break; }
+        }
+    }
+    if (!r.error && (b->op == POLL_IDLE || b->op == POLL_READY || b->op == POLL_DISTINCT_IDLE ||
+                     b->op == POLL_DISTINCT_READY || b->op == POLL_LOCAL_REPEAT))
+    {
+        short expected = b->op == POLL_READY || b->op == POLL_DISTINCT_READY ? POLLIN : 0;
+        for (size_t i = 0; i < b->size; i++)
+            if (x->polls[i].revents != expected) { r.error = EIO; break; }
+        if (b->op == POLL_DISTINCT_IDLE || b->op == POLL_DISTINCT_READY || b->op == POLL_LOCAL_REPEAT)
+            snprintf(r.detail, sizeof(r.detail), "%u entries; %s local endpoints; final revents validated",
+                     (unsigned)b->size, b->op == POLL_LOCAL_REPEAT ? "repeated" : "distinct");
+    }
+    if (b->op == MEMCOPY_GUARD && !r.error)
+        snprintf(r.detail, sizeof(r.detail), "8x8 alignments; overlap gaps 1..33; guarded page edges and canaries");
+    if (b->op == FILE_READ_API && !r.error && memcmp(x->a, x->b, b->size))
+        r.error = EIO;
+    if (b->op == FILE_READ || b->op == FILE_READ_API || b->op == FILE_READ_CHECKED)
+        snprintf(r.detail, sizeof(r.detail), "pread_calls=%llu bytes=%llu; check=%s; includes warmup",
+                 (unsigned long long)x->file_read_calls, (unsigned long long)x->file_read_bytes,
+                 b->op == FILE_READ_API ? "after timing" : "each op");
+    if (b->op == DIRECTORY)
+        snprintf(r.detail, sizeof(r.detail), "readdir_calls=%llu entries=%llu; includes warmup",
+                 (unsigned long long)x->directory_calls, (unsigned long long)x->directory_entries);
+    if (b->op == TCP_ECHO || (b->op == TCP_STREAM || b->op == TCP_VECTOR))
         snprintf(r.detail, sizeof(r.detail), "connected_rx_bytes=%d", x->socket_receive_capacity);
+    if (b->op == TCP_VECTOR)
+        snprintf(r.detail, sizeof(r.detail), "sendmsg=%llu writev=%llu recvmsg=%llu; verified payload",
+                 (unsigned long long)x->vector_sends, (unsigned long long)x->vector_writes,
+                 (unsigned long long)x->vector_receives);
     if (b->op == MEMCMP_GUARD && !r.error)
         snprintf(r.detail, sizeof(r.detail),
                  "all 8x8 alignments; equal/first/middle/last differences; protected page ends");
@@ -1166,7 +1479,35 @@ struct parallel
     unsigned mode, count;
     bool same_cpu;
     uint64_t deadline, shared_counter;
+    context_t *file_context;
+    bench_t file_bench;
+    unsigned char **read_buffers;
 };
+static void parallel_file_cleanup(parallel_t *p)
+{
+    if (p->read_buffers)
+        for (unsigned i = 0; i < p->count; i++) free(p->read_buffers[i]);
+    free(p->read_buffers);
+    if (p->file_context) cleanup(p->file_context);
+}
+static int parallel_file_prepare(parallel_t *p)
+{
+    p->file_bench = (bench_t){"filesystem", "pread_parallel_n", FILE_READ_API, 4096, 1};
+    p->file_context = calloc(1, sizeof(*p->file_context));
+    if (!p->file_context) return ENOMEM;
+    p->file_context->bench = &p->file_bench;
+    p->file_context->config = p->config;
+    int error = prepare(p->file_context);
+    if (error) return error;
+    p->read_buffers = calloc(p->count, sizeof(*p->read_buffers));
+    if (!p->read_buffers) return ENOMEM;
+    for (unsigned i = 0; i < p->count; i++)
+    {
+        p->read_buffers[i] = malloc(4096);
+        if (!p->read_buffers[i]) return ENOMEM;
+    }
+    return 0;
+}
 static void *parallel_worker(void *arg)
 {
     worker_t *w = arg;
@@ -1213,6 +1554,15 @@ static void *parallel_worker(void *arg)
                     ((volatile char *)v)[0] = 1;
                     free(v);
                 }
+                else if (p->mode == 5)
+                {
+                    ssize_t bytes = pread(p->file_context->fd, p->read_buffers[w->index], 4096, 0);
+                    if (bytes != 4096)
+                    {
+                        w->error = bytes < 0 ? errno : EIO;
+                        break;
+                    }
+                }
                 else
                     sched_yield();
                 count++;
@@ -1226,7 +1576,9 @@ static void *parallel_worker(void *arg)
 static void run_parallel(perf_config_t *c, const char *name, unsigned mode, unsigned count,
                          bool same)
 {
-    const char *group = mode == 0 || mode == 4 ? "scheduling" : "threading";
+    const char *group = mode == 5 ? "filesystem" :
+                        mode == 0 || mode == 4 ? "scheduling" : "threading";
+    if (mode == 5 && !c->case_name) return;
     if (!selected(c, group) || !selected_case(c, name) || stopped(c))
         return;
     current(c, name);
@@ -1260,6 +1612,13 @@ static void run_parallel(perf_config_t *c, const char *name, unsigned mode, unsi
             r.error = ENOMEM;
             break;
         }
+        if (mode == 5 && (r.error = parallel_file_prepare(p)))
+        {
+            parallel_file_cleanup(p);
+            free(p->workers);
+            free(p);
+            break;
+        }
         pthread_mutex_init(&p->mutex, NULL);
         unsigned created = 0;
         for (unsigned i = 0; i < count; i++)
@@ -1277,7 +1636,7 @@ static void run_parallel(perf_config_t *c, const char *name, unsigned mode, unsi
         struct rusage before = {0}, after = {0};
         getrusage(RUSAGE_SELF, &before);
         uint64_t start = perf_now_ns();
-        p->deadline = start + (uint64_t)c->duration_ms * 4000000;
+        p->deadline = start + sample_target_ns(c, 4);
         __atomic_store_n(&p->start, 1, __ATOMIC_RELEASE);
         while (__atomic_load_n(&p->done, __ATOMIC_ACQUIRE) < created)
             usleep(1000);
@@ -1290,6 +1649,10 @@ static void run_parallel(perf_config_t *c, const char *name, unsigned mode, unsi
             pthread_join(w->thread, NULL);
             if (w->error)
                 r.error = w->error;
+            if (mode == 5 && w->count && memcmp(p->file_context->a, p->read_buffers[i], 4096))
+                r.error = EIO;
+            if (mode == 5 && !w->count && !stopped(c))
+                r.error = EIO;
             total += w->count;
             if (w->count < low)
                 low = w->count;
@@ -1313,11 +1676,17 @@ static void run_parallel(perf_config_t *c, const char *name, unsigned mode, unsi
         else if (!r.error)
             r.error = EIO;
         pthread_mutex_destroy(&p->mutex);
+        parallel_file_cleanup(p);
         free(p->workers);
         free(p);
     }
     finish(&r, costs);
     free(costs);
+    if (mode == 5)
+    {
+        r.bytes = r.operations * 4096;
+        snprintf(r.detail, sizeof(r.detail), "shared pread; every worker progressed; final bytes checked outside timing");
+    }
     perf_record(c->state, &r);
 }
 
@@ -1327,10 +1696,21 @@ typedef struct
     pthread_cond_t condition;
     pthread_t thread;
     perf_config_t *config;
-    unsigned turn, rounds;
+    unsigned turn, peer_cpu;
+    uint64_t owner_pid;
     bool abort, ready;
     int error;
 } handoff_t;
+/* Debugger-only root: the coordinator publishes this heap record until join. */
+static handoff_t *g_perf_handoff;
+__attribute__((noinline)) void perf_handoff_ready_checkpoint(void)
+{
+    __asm__ volatile("" : : "r"(g_perf_handoff) : "memory");
+}
+__attribute__((noinline)) void perf_handoff_sample_checkpoint(void)
+{
+    __asm__ volatile("" : : "r"(g_perf_handoff) : "memory");
+}
 static int handoff_wait(handoff_t *h, unsigned turn)
 {
     while (h->turn != turn && !h->abort)
@@ -1352,11 +1732,12 @@ static int handoff_wait(handoff_t *h, unsigned turn)
 static void *handoff_worker(void *arg)
 {
     handoff_t *h = arg;
-    sys_thread_set_affinity(h->config->cpus > 1 ? 1 : 0);
+    int affinity_error = sys_thread_set_affinity(h->peer_cpu);
     pthread_mutex_lock(&h->mutex);
+    if (affinity_error) { h->error = EIO; h->abort = true; }
     h->ready = true;
     pthread_cond_signal(&h->condition);
-    for (unsigned i = 0; i < h->rounds; i++)
+    while (!h->abort)
     {
         if (handoff_wait(h, 1))
             break;
@@ -1366,20 +1747,34 @@ static void *handoff_worker(void *arg)
     pthread_mutex_unlock(&h->mutex);
     return NULL;
 }
-static void run_handoff(perf_config_t *c)
+static void run_handoff(perf_config_t *c, const char *name, unsigned cpu, unsigned peer,
+                        bool diagnostic)
 {
-    if (!selected(c, "threading") || !selected_case(c, "condition_pingpong") || stopped(c))
-        return;
-    const char *name = "condition_pingpong";
+    if ((diagnostic && !c->case_name) || !selected(c, "threading") ||
+        !selected_case(c, name) || stopped(c)) return;
     current(c, name);
     perf_result_t r = {0};
     snprintf(r.name, sizeof(r.name), "%s", name);
     snprintf(r.group, sizeof(r.group), "threading");
     r.workers = 2;
+    if (cpu >= c->cpus || peer >= c->cpus)
+    {
+        r.error = -1;
+        snprintf(r.detail, sizeof(r.detail), "requires CPUs %u and %u", cpu, peer);
+        perf_record(c->state, &r);
+        return;
+    }
+    if (sys_thread_set_affinity(cpu))
+    {
+        r.error = EIO;
+        perf_record(c->state, &r);
+        return;
+    }
     uint64_t *costs = calloc(c->rounds, sizeof(uint64_t));
     if (!costs)
     {
         r.error = ENOMEM;
+        sys_thread_set_affinity(0);
         perf_record(c->state, &r);
         return;
     }
@@ -1392,9 +1787,12 @@ static void run_handoff(perf_config_t *c)
             break;
         }
         h->config = c;
-        h->rounds = 64;
-        pthread_mutex_init(&h->mutex, NULL);
-        pthread_cond_init(&h->condition, NULL);
+        h->peer_cpu = peer;
+        h->owner_pid = (uint64_t)getpid();
+        r.error = pthread_mutex_init(&h->mutex, NULL);
+        if (r.error) { free(h); break; }
+        r.error = pthread_cond_init(&h->condition, NULL);
+        if (r.error) { pthread_mutex_destroy(&h->mutex); free(h); break; }
         r.error = pthread_create(&h->thread, NULL, handoff_worker, h);
         if (r.error)
         {
@@ -1416,17 +1814,23 @@ static void run_handoff(perf_config_t *c)
                 h->abort = true;
             }
         }
+        perf_log("PERF_HANDOFF_IDS,%u,%llu,%llu\n", sample,
+                 (unsigned long long)pthread_self(), (unsigned long long)h->thread);
+        g_perf_handoff = h;
+        perf_handoff_ready_checkpoint();
         struct rusage before = {0}, after = {0};
         getrusage(RUSAGE_SELF, &before);
         uint64_t start = perf_now_ns();
         unsigned completed = 0;
-        for (unsigned i = 0; i < h->rounds && !h->abort; i++)
+        uint64_t target = sample_target_ns(c, 1);
+        while (!h->abort)
         {
             h->turn = 1;
             pthread_cond_signal(&h->condition);
             if (handoff_wait(h, 0))
                 break;
             completed++;
+            if (perf_now_ns() - start >= target) break;
             if (stopped(c))
             {
                 h->abort = true;
@@ -1435,10 +1839,12 @@ static void run_handoff(perf_config_t *c)
         }
         uint64_t elapsed = perf_now_ns() - start;
         getrusage(RUSAGE_SELF, &after);
+        perf_handoff_sample_checkpoint();
         h->abort = true;
         pthread_cond_broadcast(&h->condition);
         pthread_mutex_unlock(&h->mutex);
         pthread_join(h->thread, NULL);
+        g_perf_handoff = NULL;
         r.error = h->error;
         if (!r.error && completed)
         {
@@ -1455,6 +1861,9 @@ static void run_handoff(perf_config_t *c)
     }
     finish(&r, costs);
     free(costs);
+    snprintf(r.detail, sizeof(r.detail), "condition round trip; CPUs %u/%u; target_ns=%llu",
+             cpu, peer, (unsigned long long)sample_target_ns(c, 1));
+    if (sys_thread_set_affinity(0) && !r.error) r.error = EIO;
     perf_record(c->state, &r);
 }
 int perf_run(perf_config_t *c)
@@ -1469,7 +1878,12 @@ int perf_run(perf_config_t *c)
     perf_log("PERF_META,clock,monotonic_milliseconds\nPERF_META,clock_resolution_"
              "ns,%llu\nPERF_META,percentiles,batch_average_ns_per_operation\n",
              (unsigned long long)((uint64_t)resolution.tv_sec * 1000000000 + resolution.tv_nsec));
+    perf_log("PERF_META,condition_protocol,timed_minimum_five_ticks_v2\n"
+             "PERF_META,parallel_protocol,minimum_five_ticks_v2\n"
+             "PERF_META,minimum_sample_ticks,5\n");
     perf_log("PERF_META,case,%s\n", c->case_name ? c->case_name : "all");
+    perf_log("PERF_META,group,%s\n", c->group ? c->group : "all");
+    perf_log("PERF_META,ui_present_batch,%u\n", c->present_batch);
     perf_log("PERF_META,ui_present,%s\n", c->present_mode == 1   ? "static"
                                           : c->present_mode == 2 ? "bottom"
                                                                  : "dashboard");
@@ -1497,7 +1911,8 @@ int perf_run(perf_config_t *c)
         }
         run_bench(c, &benches[i]);
     }
-    run_handoff(c);
+    run_handoff(c, "condition_pingpong", 0, c->cpus > 1 ? 1 : 0, false);
+    run_handoff(c, "condition_pingpong_2_3", 2, 3, true);
     run_parallel(c, "cpu_work_1", 0, 1, false);
     run_parallel(c, "cpu_work_n", 0, c->threads, false);
     run_parallel(c, "cpu_work_2n", 0, c->threads * 2, false);
@@ -1506,6 +1921,7 @@ int perf_run(perf_config_t *c)
     run_parallel(c, "malloc_contended_n", 3, c->threads, false);
     run_parallel(c, "yield_same_cpu_n", 4, c->threads, true);
     run_parallel(c, "yield_spread_n", 4, c->threads, false);
+    run_parallel(c, "pread_parallel_n", 5, c->threads, false);
     pthread_mutex_lock(&c->state->lock);
     snprintf(c->state->current, sizeof(c->state->current), "%s",
              stopped(c) ? "Stopped" : "Complete");
@@ -1522,7 +1938,8 @@ static void help(void)
     perf_log("perf [--gui | --cli] [--autorun] [--exit-when-done] [--quick]\n"
              "     [--group "
              "memory|vm|syscall|threading|scheduling|process|ipc|filesystem|network]\n"
-             "     [--ui-present dashboard|static|bottom] [--case NAME] [--rounds 1..15] "
+             "     [--ui-present dashboard|static|bottom] [--present-batch 1..128] [--case NAME] "
+             "[--rounds 1..15] "
              "[--duration 10..1000] [--threads 1..32]\n"
              "     [--workdir /tmp] [--net IPv4 --port PORT] [--dns-host NAME]\n"
              "Default opens the GUI. --cli prints CSV records. Echo endpoint must "
@@ -1568,6 +1985,7 @@ int main(int argc, char **argv)
     c->state = s;
     c->rounds = 5;
     c->duration_ms = 30;
+    c->present_batch = 1;
     c->gui = true;
     c->workdir = "/tmp";
     pthread_mutex_init(&s->lock, NULL);
@@ -1606,6 +2024,8 @@ int main(int argc, char **argv)
                 c->group = a;
             else if (!strcmp(v, "--case"))
                 c->case_name = a;
+            else if (!strcmp(v, "--present-batch"))
+                c->present_batch = (unsigned)atoi(a);
             else if (!strcmp(v, "--ui-present"))
             {
                 if (!strcmp(a, "dashboard"))
@@ -1647,8 +2067,10 @@ int main(int argc, char **argv)
         }
     }
     if (!c->rounds || c->rounds > PERF_MAX_ROUNDS || c->duration_ms < 10 || c->duration_ms > 1000 ||
-        !c->threads || c->threads > 32 || (!c->gui && c->present_mode) || c->port > 65535 ||
-        (!!c->port != !!c->net_host))
+        !c->threads || c->threads > 32 ||
+        (!c->present_batch || c->present_batch > 128 ||
+         (c->present_batch > 1 && !c->present_mode) || (!c->gui && c->present_mode)) ||
+        c->port > 65535 || (!!c->port != !!c->net_host))
     {
         help();
         return 2;
@@ -1676,9 +2098,10 @@ int main(int argc, char **argv)
         for (size_t i = 0; i < sizeof(benches) / sizeof(benches[0]); i++)
             if (!strcmp(c->case_name, benches[i].name))
                 valid = true;
-        const char *extra[] = {"condition_pingpong", "cpu_work_1",         "cpu_work_n",
+        const char *extra[] = {"condition_pingpong", "condition_pingpong_2_3", "cpu_work_1",         "cpu_work_n",
                                "cpu_work_2n",        "atomic_contended_n", "mutex_contended_n",
-                               "malloc_contended_n", "yield_same_cpu_n",   "yield_spread_n"};
+                               "malloc_contended_n", "yield_same_cpu_n",   "yield_spread_n",
+                               "pread_parallel_n"};
         for (size_t i = 0; i < sizeof(extra) / sizeof(extra[0]); i++)
             if (!strcmp(c->case_name, extra[i]))
                 valid = true;

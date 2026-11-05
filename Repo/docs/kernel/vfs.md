@@ -111,8 +111,10 @@ wrap or expose kernel addresses; they remain stable for the node's runtime
 lifetime and are not persisted on disk. Concurrent changes are reflected by a
 new open or a successful rewind. A failed rewind preserves the previous view.
 
-Workers serialize each shared cursor with a sleeping gate and copy value
-records into registered heap requests. A caller killed during a wait cannot
+Directory-next first tries that cursor gate once and copies its immutable value
+record into the registered request synchronously. Busy cursors use the protected
+worker's sleeping gate. Snapshot construction and rewind refresh remain worker
+operations. EOF and invalid records use the same shared record validation. A caller killed during a wait cannot
 leave its stack/user address in a worker. Close removes a handle immediately;
 already pinned operations retain their stream until completion and deferred
 cleanup. `DIR` itself is heap-owned; callers must synchronize shared uses of

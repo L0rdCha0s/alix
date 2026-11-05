@@ -115,3 +115,14 @@ heap-owned under the existing nonblocking preemption guard and checked user
 copy. As with legacy poll, failed output copying may consume the dequeued event.
 This measures queue residence after input routing, not hardware arrival or
 display scanout. The native [performance app](../performance.md) exercises it.
+
+## Framebuffer publication cost
+
+The normal framebuffer copy uses bounded packed scalar source loads and aligned
+volatile 64-bit destination stores. It copies 32-byte groups followed by guarded
+8-byte and byte tails; source alignment need not match destination alignment.
+This avoids calling freestanding libc memcpy once per word. GOP mask conversion,
+cursor composition, page flipping and the existing publication fences retain
+their own paths. The render lock still covers publication. Native pixel/resize
+validation and measured interference with thread handoff are recorded in
+[the fourth performance pass](../performance-pass4-2026-11-05.md).

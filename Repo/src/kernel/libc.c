@@ -1,4 +1,5 @@
 #include "libc.h"
+#include "libc_compare.h"
 #include "serial_format.h"
 
 #include "fd.h"
@@ -250,20 +251,7 @@ char *strrchr(const char *str, int ch)
 
 int memcmp(const void *a, const void *b, size_t count)
 {
-    const uint8_t *pa = (const uint8_t *)a;
-    const uint8_t *pb = (const uint8_t *)b;
-
-    for (size_t i = 0; i < count; ++i)
-    {
-        uint8_t va = pa[i];
-        uint8_t vb = pb[i];
-        if (va != vb)
-        {
-            // Return difference of the first differing bytes (unsigned comparison)
-            return (int)va - (int)vb;
-        }
-    }
-    return 0;
+    return libc_compare_bytes(a, b, count);
 }
 
 ssize_t read(int fd, void *buffer, size_t count)

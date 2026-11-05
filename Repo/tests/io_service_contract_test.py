@@ -68,6 +68,9 @@ typedef struct process {
 static _Thread_local process_t *current_process;
 static _Thread_local unsigned held_locks;
 static _Thread_local bool prep_guard;
+static uint64_t g_io_cleanup_sequence;
+static uint64_t process_io_admission_sequence(void){return __atomic_load_n(&g_io_cleanup_sequence,__ATOMIC_ACQUIRE);}
+static void process_io_record_admission(uint64_t sequence){CHECK(prep_guard);(void)sequence;}
 static _Thread_local int fail_allocation_after=-1;
 static pthread_mutex_t heap_lock=PTHREAD_MUTEX_INITIALIZER;
 typedef struct { void *address; size_t size; } allocation_t;

@@ -4,6 +4,9 @@
 #include "errno.h"
 #include <stdint.h>
 
+/* Payload delivered by executor steps, not requested or captured bytes. */
+static uint64_t g_io_tcp_completed_bytes[2], g_io_tcp_wouldblock[2];
+
 typedef struct
 {
     net_tcp_socket_t *socket;
@@ -49,6 +52,23 @@ static const fd_ops_t io_tcp_ops = { .close = io_tcp_file_close, .fstat = io_tcp
 bool io_tcp_description_valid(const fd_description_t *description)
 {
     return description && fd_description_ops(description)->close == io_tcp_file_close;
+}
+
+size_t io_tcp_capture_limit(fd_description_t *description, bool writing, size_t count)
+{
+    /* Small records already have a bounded capture; avoid another TCP-lock
+     * snapshot where it cannot remove meaningful allocation/copy work. */
+    if (count <= 256 || !io_tcp_description_valid(description)) return count;
+    io_tcp_file_t *file = fd_description_context(description);
+    net_tcp_owned_status_t status;
+    if (net_tcp_socket_owned_snapshot(file->socket, &status)) return count;
+    /* Do not use instantaneous write_capacity: zero means backpressure, not a
+     * zero-length operation. The executor must still wait or report EAGAIN.
+     * A concurrent reader can consume this snapshot's bytes; a short prefix
+     * remains legal and the normal executor rechecks readiness and ownership. */
+    uint64_t limit = writing ? status.mss : status.available;
+    if (!limit) limit = status.mss;
+    return limit && limit < count ? (size_t)limit : count;
 }
 
 typedef struct
@@ -251,7 +271,11 @@ bool io_tcp_execute(io_request_t *request, io_service_result_t *result,
             bool expected = false;
             if (!__atomic_compare_exchange_n(&file->reader_owned, &expected, true, false,
                                               __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
-            { result->result = -EAGAIN; return nonblocking; }
+            {
+                result->result = -EAGAIN;
+                if (nonblocking) __atomic_add_fetch(&g_io_tcp_wouldblock[0], 1, __ATOMIC_RELAXED);
+                return nonblocking;
+            }
             /* Independent event services can share a description. Serialize
              * their reads without blocking either event worker. */
             error = net_tcp_socket_owned_snapshot(file->socket, &status);
@@ -264,7 +288,11 @@ bool io_tcp_execute(io_request_t *request, io_service_result_t *result,
                     (ssize_t)net_tcp_socket_read(file->socket, operation->data, (size_t)operation->count);
                 if (bytes < 0) result->result = bytes;
                 else if ((size_t)bytes > operation->count) result->result = -EIO;
-                else if (bytes) result->result = (int64_t)bytes;
+                else if (bytes)
+                {
+                    result->result = (int64_t)bytes;
+                    __atomic_add_fetch(&g_io_tcp_completed_bytes[0], (uint64_t)bytes, __ATOMIC_RELAXED);
+                }
                 else complete = false;
             }
             else if (status.flags & NET_TCP_OWNED_ERROR) result->result = -ECONNRESET;
@@ -272,7 +300,11 @@ bool io_tcp_execute(io_request_t *request, io_service_result_t *result,
             else if (!(status.flags & (NET_TCP_OWNED_CONNECTED | NET_TCP_OWNED_CONNECTING))) result->result = -ENOTCONN;
             else complete = false;
             __atomic_store_n(&file->reader_owned, false, __ATOMIC_RELEASE);
-            if (!complete && nonblocking) { result->result = -EAGAIN; complete = true; }
+            if (!complete && nonblocking)
+            {
+                result->result = -EAGAIN; complete = true;
+                __atomic_add_fetch(&g_io_tcp_wouldblock[0], 1, __ATOMIC_RELAXED);
+            }
             return complete;
         }
         case IO_TCP_WRITE:
@@ -285,8 +317,17 @@ bool io_tcp_execute(io_request_t *request, io_service_result_t *result,
             size_t bytes = operation->count < status.write_capacity ?
                            (size_t)operation->count : (size_t)status.write_capacity;
             if (bytes && net_tcp_socket_send(file->socket, operation->data, bytes))
-            { result->result = (int64_t)bytes; return true; }
-            if (nonblocking) { result->result = -EAGAIN; return true; }
+            {
+                result->result = (int64_t)bytes;
+                __atomic_add_fetch(&g_io_tcp_completed_bytes[1], bytes, __ATOMIC_RELAXED);
+                return true;
+            }
+            if (nonblocking)
+            {
+                result->result = -EAGAIN;
+                __atomic_add_fetch(&g_io_tcp_wouldblock[1], 1, __ATOMIC_RELAXED);
+                return true;
+            }
             return false; /* Backpressure or a state transition: recheck next step. */
         case IO_TCP_AVAILABLE:
             if (operation->count) return true;

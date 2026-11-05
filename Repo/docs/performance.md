@@ -41,16 +41,58 @@ Options:
 | `--duration MS` | 30 | 10–1000 ms requested batch duration |
 | `--threads N` | min(online CPUs, 8) | 1–32 workers; oversubscription uses twice N |
 | `--group NAME` | all | Select one group below |
-| `--case NAME` | all | Run one named workload; `socket_burst_128` is opt-in |
+| `--case NAME` | all | Run one named workload; diagnostic cases below are opt-in |
 | `--workdir PATH` | `/tmp` | Existing directory for unique temporary workload files |
 | `--net IPv4 --port N` | absent | TCP and UDP echo endpoint |
 | `--dns-host NAME` | absent | Opt-in resolver workload |
+| `--ui-present dashboard/static/bottom` | dashboard | Draw normally, hold a static bitmap, or change its final pixel on each upload |
+| `--present-batch N` | 1 | 1–128 uploads per UI observation; N > 1 requires GUI static/bottom mode |
 
 Filesystem workloads create and remove their own `perf-XXXXXX` directory and
 1 MiB file. `/tmp` exercises the memory-backed VFS; use a directory on the mounted
 AlixFS volume to measure persistent writes and `fsync`. Cache reads deliberately
 measure warm data. These are not raw-device or cold-cache storage benchmarks.
 The opt-in `--case socket_burst_128` opens 128 unconnected TCP descriptors and reports their receive-buffer heap reservation. It is excluded from the default suite.
+
+Additional opt-in evaluations are `memory_copy_guard_pages` (memcpy/memmove
+return values, all 8x8 pointer alignments, lengths 0–257/4095/4096, overlap gaps
+1–33, read-only source, protected page edges and destination canaries),
+`memcmp_guard_pages` (all pointer alignments, unsigned ordering and protected
+page ends), `thread_identity_lifecycle` (new
+thread identity across CPU migration) and `fork_thread_identity` (CLI-only
+identity validation in fork-child callbacks). `tcp_vector_stream_1m` alternates
+sendmsg/writev with recvmsg scatter copies and validates every echoed byte. It
+requires the same echo endpoint as the scalar stream case. The default inventory
+has 79 cases.
+
+Opt-in filesystem evaluations include `directory_scan_128` (validate every name
+once), `cached_read_4k_api`, `cached_read_60k_api`, `cached_read_64k_api` and
+`cached_read_60k_checked`. API cases validate the last array after timing; the
+checked case validates every operation. Their detail rows count actual pread
+calls/bytes including warmup and calibration. `pread_parallel_n` shares a file
+across N pinned readers, requires every worker to progress and verifies final
+buffers outside timing. Per-round worker ranges are retained in JSON `fairness`.
+
+`condition_pingpong_2_3` is an opt-in handoff on CPUs 2/3; the default case keeps
+CPUs 0/1 so compositor interference remains observable. The alternate requires
+four online CPUs and restores the benchmark coordinator to CPU 0 afterward.
+`PERF_HANDOFF_IDS` and JSON `handoff_ids` retain the actual native endpoint IDs.
+The QEMU driver accepts `--scheduler-profile` for either handoff case. It captures
+active priorities, affinity, run queues and current CPU occupants before timing,
+validates endpoint identities, and excludes the paused run from comparisons.
+`--scheduler-costs` instead uses two debugger checkpoints: it arms optional
+CPU-local scheduler counters when both endpoints are ready, then captures the
+first completed sample while both remain alive. JSON `scheduler_snapshot.costs`
+contains lock wait, selection, preparation, FP, MMU, register, stack and cleanup
+counts/TSC sums per thread. Some phases are inclusive; do not sum them as disjoint
+wall time. These are diagnostic TSC units, not calibrated nanoseconds, and the
+mode adds overhead and excludes its report from timing comparisons. Profiling
+is disabled by default. Current kernel stack-debug enforcement is disabled by
+request; its configuration and measurements are in the fifth pass.
+
+Kernel profiles also retain futex retry/reuse and wake-to-resume tick totals plus
+framebuffer publication byte/tick counters. Framebuffer counters cover the whole
+boot, including setup; periodic frame timing can bias coarse tick sums.
 
 The default suite has a bounded working set and does not deliberately exhaust
 RAM, force swap, modify existing files or flood a network.
@@ -60,15 +102,22 @@ RAM, force swap, modify existing files or flood a network.
 | Group | Paths exercised |
 | --- | --- |
 | `syscall` | PID query, monotonic and process CPU clocks, 256-byte entropy |
-| `memory` | malloc/free at 64 B, 4 KiB, 1 MiB; calloc; realloc preserving data; fragmented allocation churn; memcpy, memset and overlapping memmove |
+| `memory` | malloc/free at 64 B, 4 KiB, 1 MiB; calloc; realloc preserving data; fragmented allocation churn; aligned/unaligned memcpy, memset, forward/backward one-byte and backward 16-byte overlapping memmove, aligned/unaligned/early/late memcmp |
 | `vm` | Map/touch/unmap, sparse reservation, protection changes, discard plus 16 real demand-zero faults per operation |
-| `threading` | Futex mismatch and empty wake, uncontended mutex/rwlock, TLS, create/join, cross-CPU condition handoff, shared atomics, contended mutex and allocator |
+| `threading` | Futex mismatch and empty wake, normal/recursive/error-checking mutexes, read/write locks, pthread/raw identity queries, TLS, create/join, cross-CPU condition handoff, shared atomics, contended mutex and allocator |
 | `scheduling` | Yield alone, 1/10 ms sleeps, CPU work at 1/N/2N workers, yields sharing one CPU and spread across CPUs; worker progress ranges |
 | `process` | Self-spawn and wait, single-threaded fork/exit/wait (CLI only) |
 | `ipc` | Nonblocking pipe and local socket-pair transfers at 64 B/4 KiB, readiness scans at 1/32/128 entries |
 | `filesystem` | stat, open/close, dup, directory enumeration, create/unlink, warm sequential and random reads, overwrite, write/fsync, private file mappings |
 | `network` | Socket lifecycle, TCP connect/close, small echo, serialized 64 KiB echo, pipelined 1 MiB echo, UDP at 64/1200 B, optional resolver |
 | GUI | Continuous native widget drawing and full-surface presentation, frame intervals, scheduled wake delay, real mouse/key queue delay, input-to-present return, queue overflow count |
+
+Copy throughput cases verify the final complete payload after timing. Move
+cases perform one move per operation and verify the final array against the
+original data and the actual number of warmup/calibration/measured moves. The
+guarded copy case is correctness-only; its elapsed time includes validation and
+should not be treated as copy throughput. These user VM guards are separate
+from the disabled kernel stack-debug guards.
 
 The poll-size workloads repeat a live descriptor to isolate vector-scan cost
 without measuring descriptor creation. Pipe/socket-pair transfers write and
@@ -134,16 +183,29 @@ captured reports. Use uncaptured runs for quantitative baselines.
 bytes, total elapsed ns, batch-average p50/p95/max ns per operation, user/system
 CPU microseconds, minor/major faults and error. `PERF_SAMPLE` preserves each raw
 batch duration and operation count. `PERF_FAIRNESS` preserves the minimum and
-maximum worker progress per round. The JSON report retains the raw batches.
+maximum worker progress per round. The JSON report retains raw batches, host UTC/load observations and observed
+sample ranges expanded by one advertised tick per operation. Those ranges are
+descriptive and are not confidence intervals. The runner verifies the guest's
+echoed arguments and rejects configuration mismatches or build changes during
+measurement. New reports also fingerprint the evaluation driver and launcher,
+reject edits during a run, and compare recorded evaluator fingerprints.
+Comparisons check presentation mode, upload count and dimensions.
 
 `PERF_UI` fields are phase, metric, count, mean/p50/p95/max ns.
 `PERF_UI_WORKLOAD` has the same fields with the workload name replacing phase.
-These are actual individual UI observations, not batch averages. Per-workload
-assignment follows the workload observed by the UI loop; transitions are not
+With the default upload count these are individual UI observations. In explicit
+batched mode the present metric is named `present_batch_average`; its value is
+total batch duration divided by uploads. `PERF_UI_PRESENT_BATCH` retains phase,
+sequence, upload count and total elapsed ns. These batches intentionally block
+the event loop; their frame/input delays are not ordinary responsiveness results.
+Per-workload assignment follows the workload observed by the UI loop; transitions are not
 kernel tracing boundaries. The host JSON keeps both aggregate and workload UI
 metrics. `--case NAME` also selects a single workload in the QEMU driver;
 `--pcap` saves network packets for tcpdump. `--kernel-profile` takes an existing
-debugger checkpoint after a single case for kernel counters. Its pause affects
+debugger checkpoint after a single case for kernel counters, including submitted
+TCP capture/reservation versus executor-completed bytes. Named TCP counters are
+retained in `kernel_counters`; they include calibration/warmup and count read
+PEEK before user copyout. See the continued report for their exact scope. Its pause affects
 GUI observations, so those GUI reports are excluded from comparisons. Exported guest CSV includes the aggregate UI rows.
 
 ## Measurement boundaries
@@ -154,6 +216,11 @@ measurement continues for at least five clock ticks, even in quick mode, to
 avoid reporting zero-cost operations when a calibration sample straddles a
 tick. GUI `0` means below the clock's resolution. CPU accounting is also sampled
 at timer granularity and, in GUI mode, includes both UI and benchmark threads.
+Condition round trips now run to the requested duration and at least five
+clock ticks. Parallel workloads retain their four-times-duration window with
+the same minimum tick floor. Their explicit protocol identifiers prevent
+comparisons against the older fixed-64 handoff and shorter quick parallel runs.
+The runner checks successful sample durations and progress-record completeness.
 Percentiles over three or five batch averages are descriptive, not statistical
 confidence intervals. GUI histogram values at 2000 ms are a saturated lower
 bound; exact maxima remain available.
@@ -189,7 +256,15 @@ change retains the existing persistent-worker ownership and deferred-close
 contract. A subsequent [performance investigation](performance-pass-2026-11-05.md) reduced unopened socket reservations and fixed deferred receive and scheduler wake delays.
 The original captured run is visual/debug evidence, not a timing baseline.
 
-## Validation recorded on 5 November 2026
+Follow-up results for the 75-case suite are in
+[the thread/memory/TCP investigation](performance-pass2-2026-11-05.md) and
+[the filesystem/admission investigation](performance-pass3-2026-11-05.md), followed
+by [GUI scheduling and publication](performance-pass4-2026-11-05.md) and
+[scheduler phase measurements and guard configuration](performance-pass5-2026-11-05.md).
+The current 79-case inventory adds the
+[unaligned copy investigation](performance-pass6-2026-11-05.md).
+
+## Initial validation recorded on 5 November 2026
 
 - Two fresh eight-CPU CLI boots each completed all 64 cases: 63 OK and the
   optional DNS case skipped, with zero failures. Reports are

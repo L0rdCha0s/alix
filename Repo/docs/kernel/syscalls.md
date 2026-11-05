@@ -236,6 +236,15 @@ caller's waiter, while a running continuation keeps all resources until it
 finishes. Final request release only queues cleanup; destructors run unlocked
 on the cleanup worker. Indefinite TCP waits are excluded from the finite pool.
 
+A full private I/O admission queue returns an internal restart marker after
+preparation unwinds its owners. Storage/event admission captures a cleanup-progress
+sequence before allocation. The syscall then waits for progress on a static queue,
+with a one-tick fallback, and restarts the original instruction so inputs are
+captured again. The heap-owned thread retains only the sequence token. Scheduler
+locking closes the sequence-check/enqueue race and avoids reviving terminal
+callers; no service pointer, request or caller stack survives in this wait.
+See [the filesystem performance pass](../performance-pass3-2026-11-05.md).
+
 `tests/io_service_qemu_test.py` passes the native queued/running cancellation,
 independent cleanup, late OPEN-result disposal, retained service join and live
 waiter shutdown cases, followed by an eight-CPU TLS fixture. It restores the

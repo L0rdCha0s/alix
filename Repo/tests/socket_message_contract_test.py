@@ -62,6 +62,8 @@ static bool user_copy_to_user(void*out,const void*in,size_t bytes){CHECK(guard);
 static int user_file_pin(uint64_t fd,fd_description_t**out){CHECK(guard);*out=NULL;if(fd!=3)return -EBADF;++description.refs;*out=&description;return 0;}
 static void fd_description_put(fd_description_t*d){if(d){CHECK(d->refs);--d->refs;}}
 static bool io_tcp_description_valid(fd_description_t*d){return d&&d->socket;}
+/* Transport sizing is exercised by the native TCP evaluations. */
+static size_t io_tcp_capture_limit(fd_description_t*d,bool writing,size_t count){CHECK(guard&&io_tcp_description_valid(d));(void)writing;return count;}
 /* TCP-only dependency model; UDP is executed by native socket/Quinn tests. */
 static bool io_udp_description_valid(const fd_description_t*d){(void)d;return false;}
 static io_udp_state_t *io_udp_state(io_request_t*r){(void)r;CHECK(false);return NULL;}

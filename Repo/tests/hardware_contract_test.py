@@ -172,16 +172,18 @@ static void serial_printf(const char *format,...) { (void)format; }
 int main(void) {
     boot_info.e820_entry_count=1;
     boot_info.e820[0]=(bootinfo_e820_entry_t){.base=0x11000000,.length=0x60000000,.type=1};
-    configure_heap_from_e820(); assert(kernel_heap_base==0x11000000 && kernel_heap_size==KERNEL_HEAP_SIZE);
+    /* The committed policy reserves one quarter of usable RAM, capped at the
+     * configured maximum: 1.5 GiB supplies a 384 MiB heap here. */
+    configure_heap_from_e820(); assert(kernel_heap_base==0x11000000 && kernel_heap_size==0x18000000ULL);
     boot_info.framebuffer_enabled=1; boot_info.framebuffer_base=0x20000000; boot_info.framebuffer_size=0x1000000;
-    configure_heap_from_e820(); assert(kernel_heap_base>=0x21000000 && kernel_heap_size==KERNEL_HEAP_SIZE);
+    configure_heap_from_e820(); assert(kernel_heap_base>=0x21000000 && kernel_heap_size==0x18000000ULL);
     boot_info.framebuffer_base=0x60000000;
     configure_heap_from_e820(); assert(kernel_heap_base==0x11000000 && kernel_heap_end<=0x60000000);
     boot_info.framebuffer_base=0x11000000; boot_info.framebuffer_size=0x1300000;
     configure_heap_from_e820(); assert(kernel_heap_base>=0x12300000 && !(kernel_heap_base&0x1fffff));
     boot_info.e820_entry_count=2; boot_info.e820[0].type=2;
     boot_info.e820[1]=(bootinfo_e820_entry_t){.base=0x40000000,.length=0x20000000,.type=1};
-    configure_heap_from_e820(); assert(kernel_heap_base==0x40000000);
+    configure_heap_from_e820(); assert(kernel_heap_base==0x40000000 && kernel_heap_size==0x08000000ULL);
     return 0;
 }
 """

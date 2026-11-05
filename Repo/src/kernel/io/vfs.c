@@ -372,30 +372,11 @@ static int io_vfs_directory_close(void *context)
 
 static const fd_ops_t io_vfs_directory_ops = { .close = io_vfs_directory_close, .poll = io_vfs_poll };
 
-static int io_vfs_directory_next(io_vfs_directory_t *directory, void *output, bool rewind)
+/* Caller owns the snapshot/cursor gate; no allocation, VFS lock or wait. */
+static int io_vfs_directory_read_locked(io_vfs_directory_t *directory, void *output)
 {
-    wait_queue_wait(&directory->cursor_waiters, io_vfs_directory_ready, directory);
     int result = 0;
-    if (rewind)
-    {
-        /* POSIX rewind refreshes the directory state. A failed refresh keeps
-         * the old snapshot/cursor intact. The protected worker owns this heap
-         * record across any VFS wait. */
-        vfs_directory_snapshot_t *fresh = calloc(1, sizeof(*fresh));
-        if (!fresh) result = -ENOMEM;
-        else
-        {
-            result = vfs_directory_snapshot(directory->node, fresh);
-            if (!result)
-            {
-                vfs_directory_snapshot_release(&directory->snapshot);
-                directory->snapshot = *fresh;
-                directory->cursor = directory->index = 0;
-            }
-            free(fresh);
-        }
-    }
-    else if (directory->index < directory->snapshot.count)
+    if (directory->index < directory->snapshot.count)
     {
         size_t remaining = directory->cursor <= directory->snapshot.bytes ?
                            directory->snapshot.bytes - directory->cursor : 0;
@@ -421,6 +402,33 @@ static int io_vfs_directory_next(io_vfs_directory_t *directory, void *output, bo
             }
         }
     }
+    return result;
+}
+
+static int io_vfs_directory_next(io_vfs_directory_t *directory, void *output, bool rewind)
+{
+    wait_queue_wait(&directory->cursor_waiters, io_vfs_directory_ready, directory);
+    int result = 0;
+    if (rewind)
+    {
+        /* POSIX rewind refreshes the directory state. A failed refresh keeps
+         * the old snapshot/cursor intact. The protected worker owns this heap
+         * record across any VFS wait. */
+        vfs_directory_snapshot_t *fresh = calloc(1, sizeof(*fresh));
+        if (!fresh) result = -ENOMEM;
+        else
+        {
+            result = vfs_directory_snapshot(directory->node, fresh);
+            if (!result)
+            {
+                vfs_directory_snapshot_release(&directory->snapshot);
+                directory->snapshot = *fresh;
+                directory->cursor = directory->index = 0;
+            }
+            free(fresh);
+        }
+    }
+    else result = io_vfs_directory_read_locked(directory, output);
     __atomic_store_n(&directory->cursor_owned, false, __ATOMIC_RELEASE);
     wait_queue_wake_all(&directory->cursor_waiters);
     return result;
@@ -458,12 +466,23 @@ bool io_vfs_try_execute(io_request_t *request, io_service_result_t *result)
     if (!request || !result || !spinlock_preempt_disabled() ||
         io_request_buffer_size(request) < sizeof(io_vfs_operation_t)) return false;
     fd_description_t *description = io_request_description(request);
-    if (!io_vfs_description_valid(description)) return false;
     io_vfs_operation_t *operation = io_request_buffer(request);
     size_t available = io_request_buffer_size(request) - sizeof(*operation);
     if (operation->reserved || operation->count > available) return false;
-    io_vfs_file_t *file = fd_description_context(description);
     result->description_owned = NULL;
+    if (operation->opcode == IO_VFS_READ_DIR)
+    {
+        if (!description || fd_description_ops(description)->close != io_vfs_directory_close ||
+            operation->count != sizeof(syscall_directory_entry_t)) return false;
+        io_vfs_directory_t *directory = fd_description_context(description);
+        if (!io_vfs_directory_ready(directory)) return false;
+        result->result = io_vfs_directory_read_locked(directory, operation->data);
+        __atomic_store_n(&directory->cursor_owned, false, __ATOMIC_RELEASE);
+        wait_queue_wake_all(&directory->cursor_waiters);
+        return true;
+    }
+    if (!io_vfs_description_valid(description)) return false;
+    io_vfs_file_t *file = fd_description_context(description);
     switch (operation->opcode)
     {
         case IO_VFS_READ:

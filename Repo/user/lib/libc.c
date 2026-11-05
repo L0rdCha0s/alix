@@ -1,4 +1,5 @@
 #include <stdarg.h>
+#include "libc_compare.h"
 
 #include "userlib.h"
 #include "serial.h"
@@ -669,166 +670,81 @@ void *memset(void *dst, int value, size_t count)
     return dst;
 }
 
-void *memcpy(void *dst, const void *src, size_t count)
+/* x86 permits unaligned words. Packed/aliasable accesses avoid the old byte
+ * fallback when the two pointers have different alignment. Each word stays
+ * within count; direction and load-before-store order also cover tiny overlaps. */
+typedef struct __attribute__((packed, may_alias))
 {
-    uint8_t *d = (uint8_t *)dst;
-    const uint8_t *s = (const uint8_t *)src;
-    if (count == 0 || d == s)
-    {
-        return dst;
-    }
+    uint64_t value;
+} libc_copy_word_t;
 
-    size_t word_size = sizeof(size_t);
-    size_t word_mask = word_size - 1u;
-    if ((((uintptr_t)d ^ (uintptr_t)s) & word_mask) == 0)
+static inline void libc_copy_forward(uint8_t *dst, const uint8_t *src, size_t count)
+{
+    while (count >= 32u)
     {
-        while (count && (((uintptr_t)d) & word_mask))
-        {
-            *d++ = *s++;
-            count--;
-        }
-        size_t *dw = (size_t *)d;
-        const size_t *sw = (const size_t *)s;
-        while (count >= word_size * 4u)
-        {
-            dw[0] = sw[0];
-            dw[1] = sw[1];
-            dw[2] = sw[2];
-            dw[3] = sw[3];
-            dw += 4;
-            sw += 4;
-            count -= word_size * 4u;
-        }
-        while (count >= word_size)
-        {
-            *dw++ = *sw++;
-            count -= word_size;
-        }
-        d = (uint8_t *)dw;
-        s = (const uint8_t *)sw;
+        ((libc_copy_word_t *)dst)[0].value = ((const libc_copy_word_t *)src)[0].value;
+        ((libc_copy_word_t *)dst)[1].value = ((const libc_copy_word_t *)src)[1].value;
+        ((libc_copy_word_t *)dst)[2].value = ((const libc_copy_word_t *)src)[2].value;
+        ((libc_copy_word_t *)dst)[3].value = ((const libc_copy_word_t *)src)[3].value;
+        dst += 32u;
+        src += 32u;
+        count -= 32u;
     }
-
-    while (count >= 8)
+    while (count >= sizeof(uint64_t))
     {
-        d[0] = s[0];
-        d[1] = s[1];
-        d[2] = s[2];
-        d[3] = s[3];
-        d[4] = s[4];
-        d[5] = s[5];
-        d[6] = s[6];
-        d[7] = s[7];
-        d += 8;
-        s += 8;
-        count -= 8;
+        ((libc_copy_word_t *)dst)->value = ((const libc_copy_word_t *)src)->value;
+        dst += sizeof(uint64_t);
+        src += sizeof(uint64_t);
+        count -= sizeof(uint64_t);
     }
     while (count--)
-    {
-        *d++ = *s++;
-    }
+        *dst++ = *src++;
+}
+
+void *memcpy(void *dst, const void *src, size_t count)
+{
+    if (dst != src && count)
+        libc_copy_forward(dst, src, count);
     return dst;
 }
 
 void *memmove(void *dst, const void *src, size_t count)
 {
-    uint8_t *d = (uint8_t *)dst;
-    const uint8_t *s = (const uint8_t *)src;
-    if (d == s || count == 0)
-    {
+    uint8_t *d = dst;
+    const uint8_t *s = src;
+    if (d == s || !count)
         return dst;
-    }
-
-    if (d < s)
+    if ((uintptr_t)d < (uintptr_t)s)
+        libc_copy_forward(d, s, count);
+    else
     {
-        return memcpy(dst, src, count);
-    }
-
-    size_t word_size = sizeof(size_t);
-    size_t word_mask = word_size - 1u;
-    d += count;
-    s += count;
-
-    if ((((uintptr_t)d ^ (uintptr_t)s) & word_mask) == 0)
-    {
-        while (count && (((uintptr_t)d) & word_mask))
+        while (count >= 32u)
         {
-            *--d = *--s;
-            count--;
+            count -= 32u;
+            libc_copy_word_t *dw = (libc_copy_word_t *)(d + count);
+            const libc_copy_word_t *sw = (const libc_copy_word_t *)(s + count);
+            dw[3].value = sw[3].value;
+            dw[2].value = sw[2].value;
+            dw[1].value = sw[1].value;
+            dw[0].value = sw[0].value;
         }
-        size_t *dw = (size_t *)d;
-        const size_t *sw = (const size_t *)s;
-        while (count >= word_size)
+        while (count >= sizeof(uint64_t))
         {
-            dw--;
-            sw--;
-            *dw = *sw;
-            count -= word_size;
+            count -= sizeof(uint64_t);
+            ((libc_copy_word_t *)(d + count))->value = ((const libc_copy_word_t *)(s + count))->value;
         }
-        d = (uint8_t *)dw;
-        s = (const uint8_t *)sw;
-    }
-
-    while (count--)
-    {
-        *--d = *--s;
+        while (count)
+        {
+            --count;
+            d[count] = s[count];
+        }
     }
     return dst;
 }
 
 int memcmp(const void *a, const void *b, size_t count)
 {
-    const uint8_t *pa = (const uint8_t *)a;
-    const uint8_t *pb = (const uint8_t *)b;
-    size_t word_size = sizeof(size_t);
-    size_t word_mask = word_size - 1u;
-
-    if ((((uintptr_t)pa ^ (uintptr_t)pb) & word_mask) == 0)
-    {
-        while (count && (((uintptr_t)pa) & word_mask))
-        {
-            if (*pa != *pb)
-            {
-                return (int)*pa - (int)*pb;
-            }
-            pa++;
-            pb++;
-            count--;
-        }
-
-        const size_t *wa = (const size_t *)pa;
-        const size_t *wb = (const size_t *)pb;
-        while (count >= word_size)
-        {
-            if (*wa != *wb)
-            {
-                const uint8_t *ba = (const uint8_t *)wa;
-                const uint8_t *bb = (const uint8_t *)wb;
-                for (size_t i = 0; i < word_size; ++i)
-                {
-                    if (ba[i] != bb[i])
-                    {
-                        return (int)ba[i] - (int)bb[i];
-                    }
-                }
-            }
-            wa++;
-            wb++;
-            count -= word_size;
-        }
-        pa = (const uint8_t *)wa;
-        pb = (const uint8_t *)wb;
-    }
-
-    while (count--)
-    {
-        if (*pa != *pb)
-        {
-            return (int)*pa - (int)*pb;
-        }
-        pa++;
-        pb++;
-    }
-    return 0;
+    return libc_compare_bytes(a, b, count);
 }
 
 void *memchr(const void *src, int ch, size_t count)

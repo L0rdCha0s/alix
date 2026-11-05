@@ -105,6 +105,15 @@ the retention limit remains one MSS. Each event-executor scan also stops taking
 the shared request-queue lock after its first empty result. A later submission
 changes the readiness sequence and starts another scan.
 
+Large owned TCP data requests reserve a transport-sized prefix before copying
+user payloads. Writes use the negotiated MSS; reads use queued bytes, falling
+back to one segment when empty. Requests at most 256 bytes keep their small
+capture without an extra snapshot. The hint preserves positive counts and does
+not decide readiness: the executor rechecks all state and may wait, return a
+short prefix or report EAGAIN. It applies to scalar and vector stream APIs;
+local/UDP limits remain separate. Native measurements and byte-counter semantics
+are in [the continued performance report](../performance-pass2-2026-11-05.md).
+
 Message preparation reserves four vector headers for ordinary calls and grows
 only to the supplied vector count. Empty local sends omit ancillary ownership
 records; receives retain the same SCM_RIGHTS capture and rollback owners.

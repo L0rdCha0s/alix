@@ -229,6 +229,20 @@ struct trap_frame
     uint64_t ss;
 };
 
+typedef struct
+{
+    uint64_t lock_calls, lock_wait_tsc;
+    uint64_t pick_calls, pick_tsc;
+    uint64_t prepare_calls, prepare_tsc;
+    uint64_t finish_calls, finish_tsc;
+    uint64_t deferred_calls, deferred_tsc;
+    uint64_t validation_calls, validation_tsc;
+    uint64_t fpu_calls, fpu_tsc;
+    uint64_t mmu_calls, mmu_tsc, cr3_writes;
+    uint64_t msr_calls, msr_tsc;
+    uint64_t stack_calls, stack_walks, stack_tsc;
+} scheduler_cost_stats_t;
+
 struct thread
 {
     thread_tls_t tls;
@@ -358,6 +372,13 @@ struct thread
     fd_description_t *vm_file_prepare; /* Caller-independent ownership until VM publication. */
     void *vm_fault_state;
     bool vm_syscall_active;
+    /* Caller-owned restart token; values only, never a borrowed queue pointer. */
+    uint64_t io_admission_sequence;
+    bool io_admission_pending;
+    uint64_t futex_woken_tick;
+    bool futex_wake_stamped;
+    /* Diagnostic updates occur on the owning CPU with IRQs disabled. */
+    scheduler_cost_stats_t scheduler_cost;
 };
 
 struct process
@@ -455,6 +476,8 @@ struct process
     bool default_affinity_enabled;
     uint32_t default_affinity_cpu;
     uint32_t magic;
+    /* Scheduler-locked generation of all process-private futex wakes. */
+    uint64_t futex_wake_sequence;
 };
 
 #define RUN_QUEUE_CPU_INVALID 0xFFFFFFFFu
@@ -710,6 +733,21 @@ static inline bool thread_lifetime_active(const thread_t *thread)
     return state == THREAD_LIFETIME_ALIVE;
 }
 
+/* Off unless armed by the native performance debugger in a private guest.
+ * TSC spans below are CPU-local diagnostic units, not calibrated nanoseconds. */
+typedef struct __attribute__((aligned(64))) { uint32_t enabled; } scheduler_cost_control_t;
+extern scheduler_cost_control_t g_sched_cost_control;
+static inline uint64_t scheduler_cost_clock(void)
+{
+    uint32_t lo, hi;
+    __asm__ volatile ("lfence; rdtsc" : "=a"(lo), "=d"(hi) : : "memory");
+    return ((uint64_t)hi << 32) | lo;
+}
+static inline uint64_t scheduler_cost_begin(void)
+{
+    return __atomic_load_n(&g_sched_cost_control.enabled, __ATOMIC_RELAXED) ? scheduler_cost_clock() : 0;
+}
+
 static inline uint64_t scheduler_lock_acquire(const char *where)
 {
     (void)where;
@@ -717,7 +755,14 @@ static inline uint64_t scheduler_lock_acquire(const char *where)
     cpu_cli();
     /* context_switch releases this lock from assembly after changing stacks,
      * so it must not participate in the C spinlock preemption-depth pairing. */
+    uint64_t started = scheduler_cost_begin();
     spinlock_lock_raw(&g_scheduler_lock);
+    if (started && __atomic_load_n(&g_sched_cost_control.enabled, __ATOMIC_RELAXED))
+    {
+        uint64_t elapsed = scheduler_cost_clock() - started;
+        thread_t *owner = current_thread_local();
+        if (owner) { ++owner->scheduler_cost.lock_calls; owner->scheduler_cost.lock_wait_tsc += elapsed; }
+    }
     return flags;
 }
 

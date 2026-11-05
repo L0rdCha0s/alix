@@ -68,7 +68,7 @@ int socket_open(const char *iface_name);
 int socket_connect(int fd, const char *ipv4_text, uint16_t port);
 ssize_t socket_available(int fd);
 int printf(const char *format, ...);
-int snprintf(char *buffer, size_t size, const char *format, ...);
+int (snprintf)(char *buffer, size_t size, const char *format, ...);
 int64_t lseek(int fd, int64_t offset, int whence);
 int fstat(int fd, struct stat *st);
 ssize_t pread(int fd, void *buffer, size_t count, off_t offset);

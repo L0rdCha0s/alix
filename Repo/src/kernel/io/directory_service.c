@@ -2,6 +2,11 @@
 #include "process_internal.h"
 #include "user_copy.h"
 #include "errno.h"
+#include "libc.h"
+
+/* Native diagnostic counters; a request includes EOF probes. */
+static uint64_t g_io_directory_next_requests, g_io_directory_worker_submits;
+static uint64_t g_io_directory_next_inline __attribute__((used));
 
 /* Directory handle preparation is bounded and cannot yield. Before any wait,
  * the calling thread's registered I/O record owns every retained input. The
@@ -47,7 +52,23 @@ static int io_directory_prepare(uint32_t operation, int handle, const char *path
                    operation == SYSCALL_DIRECTORY_NEXT ? IO_VFS_READ_DIR : IO_VFS_REWIND_DIR;
     work->count = operation == SYSCALL_DIRECTORY_NEXT ? sizeof(syscall_directory_entry_t) : 0;
     if (path) result = user_copy_cstring_from_user((char *)work->data, VFS_PATH_MAX, path, NULL);
-    if (!result) result = io_service_submit(service, request);
+    if (!result)
+    {
+        if (operation == SYSCALL_DIRECTORY_NEXT)
+            __atomic_add_fetch(&g_io_directory_next_requests, 1, __ATOMIC_RELAXED);
+        io_service_result_t completed = {.result = -EIO, .description_owned = NULL};
+        if (operation == SYSCALL_DIRECTORY_NEXT && io_vfs_try_execute(request, &completed))
+        {
+            if (completed.description_owned) fatal("inline directory read returned an owner");
+            result = io_request_complete_inline(request, completed.result);
+            if (!result) __atomic_add_fetch(&g_io_directory_next_inline, 1, __ATOMIC_RELAXED);
+        }
+        else
+        {
+            __atomic_add_fetch(&g_io_directory_worker_submits, 1, __ATOMIC_RELAXED);
+            result = io_service_submit(service, request);
+        }
+    }
     if (result) (void)process_io_finish_current(true);
     return result;
 }

@@ -48,11 +48,17 @@ def type_command(qmp, text):
         time.sleep(0.12)
 
 
-def command_complete(log, offset):
-    # Interactive line redraws also contain the prompt. Require a fresh line
-    # after command output, with no command text after the prompt. A kernel log
-    # can insert a newline during input redraw; that is not command completion.
-    return re.search(r"(?:^|\n)root@alix\$ (?=\r?\n|$|\[\d+(?:\.\d+)?\])", log[offset:]) is not None
+def command_complete(log, offset, evidence=None):
+    # A serial read can end at a redraw's empty prompt before its command text
+    # arrives. Preparation must first observe kernel-generated execution/output
+    # evidence, then a following prompt. Typed input cannot supply that evidence.
+    tail = log[offset:]
+    if evidence is not None:
+        found = tail.find(evidence)
+        if found < 0:
+            return False
+        tail = tail[found + len(evidence):]
+    return re.search(r"(?:^|\n)root@alix\$ (?=\r?\n|$|\[\d+(?:\.\d+)?\])", tail) is not None
 
 
 def native_elf_symbol(binary, name):
@@ -81,14 +87,21 @@ def start_user_breakpoint(qmp, staging, log_path, binary, definition):
     qmp.execute("human-monitor-command", {"command-line": f"gdbserver tcp:127.0.0.1:{port}"})
     script = staging / "user-breakpoint.gdb"
     output = log_path.with_suffix(".breakpoint.txt")
+    first_stage = f"hbreak *{address}\ncommands\n silent\n"
+    if len(definition) > 3:
+        final_symbol, final_commands = definition[3]
+        final_address = native_elf_symbol(binary, final_symbol)
+        if native_elf_symbol(symbols, final_symbol) != final_address:
+            raise RuntimeError("debug symbols do not match the final checkpoint")
+        # Continue ends the first command list. The second is already armed.
+        first_stage += extra_commands + "\n disable 1\n continue\nend\n"
+        first_stage += f"hbreak *{final_address}\ncommands\n silent\n"
+        extra_commands = "\n".join(final_commands)
     script.write_text(f"""set pagination off
 set auto-load off
 set print elements 16
 target remote 127.0.0.1:{port}
-hbreak *{address}
-commands
- silent
- echo ALIX_USER_BREAKPOINT_HIT\\n
+{first_stage} echo ALIX_USER_BREAKPOINT_HIT\\n
 {extra_commands}
  info registers rip rsp rbp rax rdi rsi rdx
  bt 32
@@ -417,20 +430,22 @@ def run_native_elf(binary_name, markers, log_path, label, timeout_seconds=40,
                 offset = len(harness.read_log())
                 command(preparation)
                 prepared = harness.wait_for(runner, "disposable guest setup",
-                    lambda log: command_complete(log, offset), 15)
+                    lambda log: command_complete(log, offset, expected), 15)
                 if expected not in prepared[offset:]:
                     raise RuntimeError("disposable guest setup failed: " + preparation)
             offset = len(harness.read_log())
             command("mkdir /tmp")
-            harness.wait_for(runner, "tmp directory", lambda log: command_complete(log, offset), 3)
+            harness.wait_for(runner, "tmp directory", lambda log: command_complete(log, offset, "[process] allocate name=mkdir"), 3)
             offset = len(harness.read_log())
             command(f"wget http://10.0.2.2:{port}/test.elf /tmp/test.elf")
-            harness.wait_for(runner, "test download", lambda log: command_complete(log, offset), download_timeout_seconds)
+            expected = f"Saved {(served / 'test.elf').stat().st_size} bytes to /tmp/test.elf"
+            harness.wait_for(runner, "test download", lambda log: command_complete(log, offset, expected), download_timeout_seconds)
             for name, _ in input_files:
                 offset = len(harness.read_log())
                 command(f"wget http://10.0.2.2:{port}/{name} /tmp/{name}")
+                expected = f"Saved {(served / name).stat().st_size} bytes to /tmp/{name}"
                 harness.wait_for(runner, "fixture input download",
-                    lambda log: command_complete(log, offset), download_timeout_seconds)
+                    lambda log: command_complete(log, offset, expected), download_timeout_seconds)
             offset = len(harness.read_log())
             launch = "/tmp/test.elf" if gui_launch else "runelf /tmp/test.elf"
             if arguments:
@@ -440,12 +455,12 @@ def run_native_elf(binary_name, markers, log_path, label, timeout_seconds=40,
                     preparation = len(harness.read_log())
                     command("mkdir " + directory)
                     harness.wait_for(runner, "GUI dependency directory",
-                        lambda log: command_complete(log, preparation), 3)
+                        lambda log: command_complete(log, preparation, "[process] allocate name=mkdir"), 3)
                 preparation = len(harness.read_log())
                 command(f"wget http://10.0.2.2:{port}/__gui-terminal.elf /usr/bin/atk_shell.elf")
-                harness.wait_for(runner, "fresh GUI terminal",
-                    lambda log: command_complete(log, preparation), download_timeout_seconds)
                 expected = f"Saved {(served / '__gui-terminal.elf').stat().st_size} bytes to /usr/bin/atk_shell.elf"
+                harness.wait_for(runner, "fresh GUI terminal",
+                    lambda log: command_complete(log, preparation, expected), download_timeout_seconds)
                 if expected not in harness.read_log()[preparation:]:
                     raise RuntimeError("fresh GUI terminal was not installed in the disposable guest")
                 offset = len(harness.read_log())
@@ -470,9 +485,10 @@ def run_native_elf(binary_name, markers, log_path, label, timeout_seconds=40,
                     raise RuntimeError(f"native audio capture did not start: {response}")
                 audio_capturing = True
             if gui_launch:
-                key_names = {" ": "spc", "/": "slash", ".": "dot", ":": "shift-semicolon",
-                             "_": "shift-minus", "-": "minus"}
-                hmp_send_keys(qmp, [key_names.get(char, char) for char in launch] + ["ret"])
+                # Timed HMP taps can merge repeated keys when guest virtual
+                # time runs slower than the host (e.g. 1000 becoming 100).
+                # Use the existing explicit press/release path for commands.
+                type_command(qmp, launch)
             else:
                 command(launch)
 

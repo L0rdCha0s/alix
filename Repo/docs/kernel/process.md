@@ -93,7 +93,13 @@ Thread creation allocates:
 
 The initial CPU context is built so that the first `context_switch(...)` into the thread returns into `thread_trampoline`, which calls the thread’s `entry(arg)` and then `process_exit(...)`.
 
-Public stack-watch requests hold the scheduler lock across the eligibility
+The normal build currently disables kernel stack canary validation, context
+hash guards, stack write watching, stack-page protection and their logs through
+`include/build_features.h`, by explicit request. The reserved stack margin and
+allocation layout remain stable. Scheduler ownership, quiescence and ordinary
+VM permissions retain their separate behavior.
+
+When the optional modes are enabled, public stack-watch requests hold the scheduler lock across the eligibility
 check and page-table publication. The process variant also resolves its main
 thread under `threads_lock`. This prevents another CPU from claiming and
 disarming a ready thread between the check and making its stack read-only.
@@ -224,11 +230,16 @@ thread/process storage. `tests/futex_contract_test.py` exercises collisions,
 isolation, wake-before-sleep and cancellation of all list positions.
 
 The expected-value check attempts the process memory lock without spinning
-under the global scheduler lock. If a VM operation owns it, the futex caller
-releases scheduler ownership before waiting for memory access, then repeats the
-value check and waiter publication under scheduler serialization. No physical
-pointer or earlier value is reused across that retry. Thread termination,
-changed/unmapped words and pending signals are rechecked before registration.
+under the global scheduler lock. On contention it snapshots a process-private
+wake sequence, releases scheduler ownership and obtains one checked scalar read.
+After reacquiring the scheduler lock, an unchanged sequence allows that value to
+serve as the comparison point. A crossing wake invalidates it and retries with
+fresh data. Every valid process futex wake increments the sequence, including
+an empty wake. This closes the load-to-registration gap without repeatedly
+competing for a second memory-lock acquisition. No physical alias survives the
+checked read. Thread termination, faults and pending signals are checked before
+registration. Coarse wake-to-resume counters by CPU use native timer ticks;
+they do not provide nanosecond clock accuracy.
 
 ## SMP Safety Notes
 

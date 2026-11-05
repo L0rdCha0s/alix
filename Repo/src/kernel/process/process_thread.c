@@ -313,7 +313,9 @@ thread_t *thread_create(process_t *process,
     }
 #endif
 
+#if ENABLE_STACK_CANARY_CHECKS
     memset(guard_base, STACK_GUARD_PATTERN, guard_bytes);
+#endif
     thread->stack_allocation_raw = raw_allocation;
     thread->stack_allocation_size = allocation_size;
     thread->stack_guard_base = guard_base;
@@ -420,7 +422,7 @@ thread_t *thread_create(process_t *process,
     thread_t *signal_creator = current_thread_local();
     if (is_user_thread && signal_creator && signal_creator->process == process)
         thread->signal_mask = signal_creator->signal_mask;
-    thread->context_guard_enabled = !is_idle;
+    thread->context_guard_enabled = ENABLE_CONTEXT_GUARD && !is_idle;
     thread->fault_reason = NULL;
     thread->fault_error_code = 0;
     thread->fault_address = 0;

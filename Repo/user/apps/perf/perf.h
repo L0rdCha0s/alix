@@ -23,7 +23,7 @@ typedef struct
 } perf_state_t;
 typedef struct
 {
-    unsigned rounds, duration_ms, threads, cpus, present_mode;
+    unsigned rounds, duration_ms, threads, cpus, present_mode, present_batch;
     bool gui, autorun, exit_when_done;
     const char *group, *case_name, *workdir, *net_host, *dns_host;
     unsigned port;

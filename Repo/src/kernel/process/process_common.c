@@ -26,7 +26,7 @@ static inline bool canonical_u64(uint64_t v)
     return sign == 0 || sign == 0x1FFFFu;
 }
 
-static const char *const g_context_guard_reg_names[] = {
+static const char *const g_context_guard_reg_names[] __attribute__((unused)) = {
     "r15",
     "r14",
     "r13",
@@ -145,6 +145,7 @@ run_queue_t g_run_queues[SMP_MAX_CPUS];
 cpu_usage_counters_t g_cpu_usage[SMP_MAX_CPUS];
 uint64_t g_cpu_switch_counts[SMP_MAX_CPUS];
 spinlock_t g_scheduler_lock;
+scheduler_cost_control_t g_sched_cost_control;
 thread_t *g_sleep_queue_head = NULL;
 uint64_t g_next_pid = 1;
 uint64_t g_next_tid = 1;
@@ -486,7 +487,7 @@ static bool thread_running_on_any_cpu(const thread_t *thread)
     return false;
 }
 
-static bool thread_running_elsewhere(const thread_t *thread)
+static bool __attribute__((unused)) thread_running_elsewhere(const thread_t *thread)
 {
     if (!thread)
     {
@@ -738,6 +739,7 @@ bool thread_stack_pointer_valid(const thread_t *thread, uint64_t rsp)
 
 bool thread_stack_guard_intact(const thread_t *thread)
 {
+#if !defined(ENABLE_STACK_CANARY_CHECKS) || ENABLE_STACK_CANARY_CHECKS
     if (!thread || !thread->stack_guard_base)
     {
         return true;
@@ -757,9 +759,12 @@ bool thread_stack_guard_intact(const thread_t *thread)
         }
     }
     return true;
+#else
+    (void)thread;
+    return true;
+#endif
 }
 
-#if ENABLE_STACK_WRITE_DEBUG
 static bool thread_stack_range_contains(const thread_t *thread,
                                         uintptr_t addr,
                                         size_t len)
@@ -785,6 +790,7 @@ static bool thread_stack_range_contains(const thread_t *thread,
     return true;
 }
 
+#if ENABLE_STACK_WRITE_DEBUG
 static uintptr_t thread_stack_watch_default_suspect(thread_t *thread)
 {
     if (!thread)
@@ -1110,7 +1116,6 @@ bool process_pointer_on_stack(const void *ptr, size_t len)
 
 static void thread_free_resources(thread_t *thread);
 bool thread_process_deferred_frees_locked(uint32_t cpu_index, deferred_free_stats_t *stats);
-static bool thread_saved_frame_valid(thread_t *thread, const char *label);
 
 void thread_registry_add(thread_t *thread)
 {
@@ -1773,7 +1778,7 @@ bool thread_context_in_bounds(thread_t *thread,
     return ok;
 }
 
-static void thread_check_context_bounds(const thread_t *thread,
+static void __attribute__((unused)) thread_check_context_bounds(const thread_t *thread,
                                         const char *label)
 {
 #if ENABLE_CONTEXT_GUARD
@@ -1988,7 +1993,7 @@ static void __attribute__((unused)) scheduler_debug_dump_stack(const uint64_t *b
     }
 }
 
-static void scheduler_debug_dump_thread_stack(thread_t *thread, const char *label)
+static void __attribute__((unused)) scheduler_debug_dump_thread_stack(thread_t *thread, const char *label)
 {
 #if ENABLE_SCHEDULER_STACK_DUMP
     if (!thread || !thread->stack_base)
@@ -2295,7 +2300,7 @@ void thread_scan_stack_for_suspicious_values(thread_t *thread,
 #endif
 }
 
-static size_t thread_context_guard_collect_locked(const thread_t *thread,
+static size_t __attribute__((unused)) thread_context_guard_collect_locked(const thread_t *thread,
                                                   const uint64_t **words_out)
 {
 #if ENABLE_CONTEXT_GUARD
@@ -2335,7 +2340,7 @@ static size_t thread_context_guard_collect_locked(const thread_t *thread,
 #endif
 }
 
-static void context_guard_dump_window(thread_t *thread,
+static void __attribute__((unused)) context_guard_dump_window(thread_t *thread,
                                       uintptr_t focus_addr,
                                       size_t words_before,
                                       size_t words_after)
@@ -2405,7 +2410,7 @@ static void context_guard_dump_window(thread_t *thread,
 #endif
 }
 
-static uint64_t thread_compute_context_guard(const thread_t *thread)
+static uint64_t __attribute__((unused)) thread_compute_context_guard(const thread_t *thread)
 {
 #if ENABLE_CONTEXT_GUARD
     const uint64_t *words = NULL;

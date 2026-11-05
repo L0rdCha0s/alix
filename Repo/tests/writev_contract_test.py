@@ -57,6 +57,10 @@ static bool user_copy_from_user(void *out,const void *in,size_t bytes){
 static int user_file_pin(uint64_t fd,fd_description_t **out){CHECK(guard);*out=NULL;if(fd!=3)return -EBADF;++description.refs;*out=&description;return 0;}
 static void fd_description_put(fd_description_t *d){if(d){CHECK(d->refs);--d->refs;}}
 static bool io_tcp_description_valid(fd_description_t *d){return d->kind==1;}
+/* Transport sizing is exercised by the native TCP evaluations. */
+static size_t io_tcp_capture_limit(fd_description_t*d,bool writing,size_t count){CHECK(guard&&io_tcp_description_valid(d));(void)writing;return count;}
+/* This fixture has no local socket descriptions. */
+static bool io_local_description_valid(const fd_description_t *d){(void)d;return false;}
 /* This fixture models TCP/pipe/audio/storage descriptions, never UDP. */
 static bool io_udp_description_valid(const fd_description_t *d){(void)d;return false;}
 static bool io_pipe_description_valid(fd_description_t *d){return d->kind==2;}
