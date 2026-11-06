@@ -180,6 +180,8 @@ bool process_kill(process_t *process, int status);
 void process_kill_tree(process_t *process);
 
 process_t *process_current(void);
+/* Current process cannot be killed while owning a blocking continuation. */
+bool process_current_is_kernel_service(void);
 thread_t *thread_current(void);
 bool process_thread_stack_bounds(const thread_t *thread,
                                  uintptr_t *base_out,
@@ -280,6 +282,7 @@ int process_user_thread_detach(uint64_t tid);
 struct syscall_thread_info;
 int process_user_thread_info(uint64_t tid, struct syscall_thread_info *info);
 int process_user_thread_set_name(uint64_t tid, const char *name);
+int process_user_thread_priority(uint64_t tid, int priority);
 int process_user_thread_prepare_exit(void);
 int64_t process_user_thread_create(const char *name,
                                   uintptr_t entry,

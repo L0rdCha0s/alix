@@ -1,0 +1,25 @@
+--- a/xpcom/threads/TimerThread.cpp
++++ b/xpcom/threads/TimerThread.cpp
+@@ -13,6 +13,9 @@
+ #include "mozilla/glean/XpcomMetrics.h"
+ #include "nsIObserverService.h"
+ #include "nsIPropertyBag2.h"
++#ifdef MOZ_WIDGET_ALIX
++#  include "nsISupportsPriority.h"
++#endif
+ #include "nsThreadUtils.h"
+ #include "nsTimerImpl.h"
+ 
+@@ -513,6 +516,12 @@
+     if (NS_FAILED(rv)) {
+       mThread = nullptr;
+     } else {
++#ifdef MOZ_WIDGET_ALIX
++      nsCOMPtr<nsISupportsPriority> priority = do_QueryInterface(mThread);
++      if (priority) {
++        priority->SetPriority(nsISupportsPriority::PRIORITY_HIGH);
++      }
++#endif
+       RefPtr r = MakeRefPtr<TimerObserverRunnable>(this);
+       if (NS_IsMainThread()) {
+         r->Run();

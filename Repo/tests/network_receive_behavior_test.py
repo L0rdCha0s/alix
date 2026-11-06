@@ -89,6 +89,13 @@ static bool tcp_reassembly_store(net_tcp_socket_t *s, uint32_t q,
 { (void)s; (void)q; (void)p; (void)n; return true; }
 static void tcp_reassembly_drain(net_tcp_socket_t *s) { (void)s; }
 """
+    # Existing receive cases own a fixed scratch buffer. Exercise the real
+    # optional-growth failure path without reallocating that static storage.
+    program += r"""
+static void *receive_growth_unavailable(void *p, size_t n) { (void)p; (void)n; return NULL; }
+#define realloc receive_growth_unavailable
+""" + definition(source, "static bool tcp_grow_rx_buffer") + "\n#undef realloc\n"
+    program += definition(source, "static void tcp_rx_note_data") + "\n"
     for signature in ["static inline void tcp_signal_read_event",
                       "static void tcp_send_ack", "static void tcp_schedule_ack",
                       "static void tcp_mark_error", "static bool tcp_rx_reserve_space",

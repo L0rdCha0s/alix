@@ -1,0 +1,126 @@
+--- a/js/src/jit/ExecutableAllocator.cpp
++++ b/js/src/jit/ExecutableAllocator.cpp
+@@ -28,6 +28,20 @@
+ #include "js/MemoryMetrics.h"
+ #include "util/Poison.h"
+ 
++#ifdef MOZ_WIDGET_ALIX
++#  include <stdlib.h>
++#  pragma GCC visibility push(default)
++#  include "serial.h"
++#  include <usyscall.h>
++#  pragma GCC visibility pop
++
++static inline uint64_t RetireTimestampCounter() {
++  uint32_t low, high;
++  asm volatile("lfence; rdtsc" : "=a"(low), "=d"(high) : : "memory");
++  return (uint64_t(high) << 32) | low;
++}
++#endif
++
+ using namespace js::jit;
+ 
+ ExecutablePool::~ExecutablePool() {
+@@ -270,6 +284,15 @@
+                                      JitPoisonRangeVector& ranges) {
+   MOZ_ASSERT(CurrentThreadCanAccessRuntime(rt));
+ 
++#ifdef MOZ_WIDGET_ALIX
++  const char* diagnostics = getenv("ALIX_PRESENT_DIAGNOSTICS");
++  bool measure = diagnostics && diagnostics[0] == '1' && !diagnostics[1];
++  uint64_t started = measure ? sys_monotonic_millis() : 0;
++  size_t skippedRanges = 0, skippedBytes = 0, poisonedBytes = 0;
++  uint64_t writableCycles = 0, fillCycles = 0, executableCycles = 0,
++           releaseCycles = 0;
++#endif
++
+ #ifdef DEBUG
+   // Make sure no pools have the mark bit set.
+   for (size_t i = 0; i < ranges.length(); i++) {
+@@ -285,6 +308,12 @@
+       if (pool->m_refCount == 1) {
+         // This is the last reference so the release() call below will
+         // unmap the memory. Don't bother poisoning it.
++#ifdef MOZ_WIDGET_ALIX
++        if (measure) {
++          ++skippedRanges;
++          skippedBytes += ranges[i].size;
++        }
++#endif
+         continue;
+       }
+ 
+@@ -293,16 +322,31 @@
+       // Use the pool's mark bit to indicate we made the pool writable.
+       // This avoids reprotecting a pool multiple times.
+       if (!pool->isMarked()) {
++#ifdef MOZ_WIDGET_ALIX
++        uint64_t before = measure ? RetireTimestampCounter() : 0;
++#endif
+         reprotectPool(rt, pool, ProtectionSetting::Writable,
+                       MustFlushICache::No);
++#ifdef MOZ_WIDGET_ALIX
++        if (measure) writableCycles += RetireTimestampCounter() - before;
++#endif
+         pool->mark();
+       }
+ 
+       // Note: we use memset instead of js::Poison because we want to poison
+       // JIT code in release builds too. Furthermore, we don't want the
+       // invalid-ObjectValue poisoning js::Poison does in debug builds.
++#ifdef MOZ_WIDGET_ALIX
++      uint64_t beforeFill = measure ? RetireTimestampCounter() : 0;
++#endif
+       memset(ranges[i].start, JS_SWEPT_CODE_PATTERN, ranges[i].size);
+       MOZ_MAKE_MEM_NOACCESS(ranges[i].start, ranges[i].size);
++#ifdef MOZ_WIDGET_ALIX
++      if (measure) {
++        fillCycles += RetireTimestampCounter() - beforeFill;
++        poisonedBytes += ranges[i].size;
++      }
++#endif
+     }
+   }
+ 
+@@ -311,12 +355,40 @@
+   for (size_t i = 0; i < ranges.length(); i++) {
+     ExecutablePool* pool = ranges[i].pool;
+     if (pool->isMarked()) {
++#ifdef MOZ_WIDGET_ALIX
++      uint64_t before = measure ? RetireTimestampCounter() : 0;
++#endif
+       reprotectPool(rt, pool, ProtectionSetting::Executable,
+                     MustFlushICache::No);
++#ifdef MOZ_WIDGET_ALIX
++      if (measure) executableCycles += RetireTimestampCounter() - before;
++#endif
+       pool->unmark();
+     }
++#ifdef MOZ_WIDGET_ALIX
++    uint64_t beforeRelease = measure ? RetireTimestampCounter() : 0;
++#endif
+     pool->release();
+-  }
++#ifdef MOZ_WIDGET_ALIX
++    if (measure) releaseCycles += RetireTimestampCounter() - beforeRelease;
++#endif
++  }
++#ifdef MOZ_WIDGET_ALIX
++  if (measure && !ranges.empty()) {
++    uint64_t finished = sys_monotonic_millis();
++    serial_printf("[alix-jit-retire] now_ms=%llu ranges=%llu skipped_ranges=%llu skipped_bytes=%llu poisoned_bytes=%llu elapsed_ms=%llu writable_cycles=%llu fill_cycles=%llu executable_cycles=%llu release_cycles=%llu\n",
++                  (unsigned long long)finished,
++                  (unsigned long long)ranges.length(),
++                  (unsigned long long)skippedRanges,
++                  (unsigned long long)skippedBytes,
++                  (unsigned long long)poisonedBytes,
++                  (unsigned long long)(finished - started),
++                  (unsigned long long)writableCycles,
++                  (unsigned long long)fillCycles,
++                  (unsigned long long)executableCycles,
++                  (unsigned long long)releaseCycles);
++  }
++#endif
+ }
+ 
+ ExecutablePool::Allocation ExecutableAllocator::systemAlloc(size_t n) {

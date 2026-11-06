@@ -42,6 +42,8 @@ void free(void *ptr);
 void *calloc(size_t count, size_t size);
 void *realloc(void *ptr, size_t size);
 int abs(int value);
+void qsort(void *base, size_t count, size_t width,
+           int (*compare)(const void *, const void *));
 int atoi(const char *str);
 int setenv(const char *name, const char *value, int overwrite);
 int unsetenv(const char *name);

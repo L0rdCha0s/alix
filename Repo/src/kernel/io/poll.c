@@ -7,14 +7,10 @@
 _Static_assert(sizeof(syscall_pollfd_t) == 8, "poll wire layout");
 typedef struct
 {
-    fd_description_t *description;
-} io_poll_pin_t;
-typedef struct
-{
     size_t count;
     bool infinite, pinned, select_mode;
     uint64_t deadline;
-    io_poll_pin_t *pins;
+    fd_table_pin_t *pins;
     syscall_pollfd_t entries[];
 } io_poll_set_t;
 
@@ -83,11 +79,13 @@ int io_poll_pin(fd_description_t *description, fd_table_t *table)
         entry->revents = 0;
         if (set->select_mode && (entry->events & ~(SYSCALL_POLL_IN | SYSCALL_POLL_OUT | SYSCALL_POLL_PRI)))
             return -EINVAL;
-        if (entry->fd < 0) continue;
-        int result = fd_table_pin(table, entry->fd, &set->pins[index].description, NULL);
-        if (result == -EBADF) entry->revents = SYSCALL_POLL_NVAL;
-        else if (result) return result;
+        set->pins[index].fd = entry->fd;
     }
+    int result = fd_table_pin_many(table, set->pins, set->count);
+    if (result) return result;
+    for (size_t index = 0; index < set->count; ++index)
+        if (set->entries[index].fd >= 0 && !set->pins[index].description)
+            set->entries[index].revents = SYSCALL_POLL_NVAL;
     return 0;
 }
 

@@ -136,6 +136,7 @@ typedef enum
 {
     PID,
     CLOCK,
+    BOOT_CLOCK,
     CPU_CLOCK,
     YIELD,
     RANDOM,
@@ -166,6 +167,7 @@ typedef enum
     RWLOCK_WRITE,
     PTHREAD_SELF,
     NATIVE_THREAD_SELF,
+    THREAD_PRIORITY_HINT,
     THREAD_IDENTITY,
     FORK_IDENTITY,
     TLS,
@@ -180,6 +182,11 @@ typedef enum
     POLL_DISTINCT_READY,
     POLL_LOCAL_REPEAT,
     STAT,
+    FSTAT_METADATA,
+    STAT_MISSING,
+    STAT_DIRECTORY,
+    STAT_SYMLINK,
+    LSTAT_SYMLINK,
     OPEN,
     DUP,
     DIRECTORY,
@@ -211,6 +218,7 @@ typedef struct
 static const bench_t benches[] = {
     {"syscall", "getpid", PID, 0, 1048576},
     {"syscall", "monotonic_clock", CLOCK, 0, 1048576},
+    {"syscall", "boot_clock", BOOT_CLOCK, 0, 1048576},
     {"syscall", "process_cpu_clock", CPU_CLOCK, 0, 65536},
     {"syscall", "getrandom_256", RANDOM, 256, 65536},
     {"scheduling", "yield_alone", YIELD, 0, 65536},
@@ -249,6 +257,7 @@ static const bench_t benches[] = {
     {"threading", "mutex_errorcheck_uncontended", MUTEX, PTHREAD_MUTEX_ERRORCHECK, 1048576},
     {"threading", "pthread_self", PTHREAD_SELF, 0, 1048576},
     {"threading", "native_thread_self", NATIVE_THREAD_SELF, 0, 1048576},
+    {"threading", "thread_priority_hints", THREAD_PRIORITY_HINT, 0, 4096},
     {"threading", "thread_identity_lifecycle", THREAD_IDENTITY, 0, 8},
     {"process", "fork_thread_identity", FORK_IDENTITY, 0, 4},
     {"threading", "rwlock_read_uncontended", RWLOCK, 0, 1048576},
@@ -269,6 +278,13 @@ static const bench_t benches[] = {
     {"ipc", "poll_ready_distinct_128", POLL_DISTINCT_READY, 128, 65536},
     {"ipc", "poll_idle_local_repeated_128", POLL_LOCAL_REPEAT, 128, 65536},
     {"filesystem", "stat", STAT, 0, 65536},
+    {"filesystem", "fstat_metadata", FSTAT_METADATA, 0, 65536},
+    {"filesystem", "stat_missing", STAT_MISSING, 0, 65536},
+    {"filesystem", "stat_directory", STAT_DIRECTORY, 0, 65536},
+    {"filesystem", "stat_symlink", STAT_SYMLINK, 0, 65536},
+    {"filesystem", "lstat_symlink", LSTAT_SYMLINK, 0, 65536},
+    {"filesystem", "stat_directory_512", STAT_DIRECTORY, 512, 65536},
+    {"filesystem", "stat_missing_wide_512", STAT_MISSING, 512, 65536},
     {"filesystem", "open_close", OPEN, 0, 4096},
     {"filesystem", "dup_close", DUP, 0, 4096},
     {"filesystem", "directory_scan", DIRECTORY, 0, 4096},
@@ -315,8 +331,11 @@ typedef struct
     unsigned char *guard_a, *guard_b;
     size_t guard_length;
     uint64_t move_calls;
+    uint64_t boot_clock_previous;
+    struct timespec clock_probe[4];
     char directory[4096], path[4096], temporary[4096];
     bool directory_created;
+    struct stat expected_stat, stat_scratch;
     pthread_mutex_t mutex;
     pthread_mutexattr_t mutex_attribute;
     pthread_rwlock_t rwlock;
@@ -443,6 +462,23 @@ static int prepare(context_t *x)
     for (size_t i = 0; i < MB + 64; i++)
         x->a[i] = (unsigned char)(i * 37u + 11u);
     memset(x->b, 0, MB + 64);
+    if (b->op == BOOT_CLOCK)
+    {
+        REQUIRE(!clock_gettime(CLOCK_MONOTONIC, &x->clock_probe[0]));
+        REQUIRE(!clock_gettime(CLOCK_BOOTTIME, &x->clock_probe[1]));
+        REQUIRE(!clock_gettime(CLOCK_MONOTONIC, &x->clock_probe[2]));
+        uint64_t before = (uint64_t)x->clock_probe[0].tv_sec * 1000000000u + x->clock_probe[0].tv_nsec;
+        uint64_t boot = (uint64_t)x->clock_probe[1].tv_sec * 1000000000u + x->clock_probe[1].tv_nsec;
+        uint64_t after = (uint64_t)x->clock_probe[2].tv_sec * 1000000000u + x->clock_probe[2].tv_nsec;
+        REQUIRE(before <= boot && boot <= after);
+        REQUIRE(!clock_getres(CLOCK_BOOTTIME, &x->clock_probe[3]));
+        REQUIRE(x->clock_probe[3].tv_sec || x->clock_probe[3].tv_nsec > 0);
+        x->clock_probe[2] = (struct timespec){0, 20000000};
+        while (nanosleep(&x->clock_probe[2], &x->clock_probe[2])) REQUIRE(errno == EINTR);
+        REQUIRE(!clock_gettime(CLOCK_BOOTTIME, &x->clock_probe[0]));
+        x->boot_clock_previous = (uint64_t)x->clock_probe[0].tv_sec * 1000000000u + x->clock_probe[0].tv_nsec;
+        REQUIRE(x->boot_clock_previous >= boot + 20000000u);
+    }
     if (b->op >= MEMCMP_EQUAL && b->op <= MEMCMP_LATE)
     {
         size_t source = b->op == MEMCMP_UNALIGNED ? 1 : 0,
@@ -493,7 +529,7 @@ static int prepare(context_t *x)
     e = pthread_rwlock_init(&x->rwlock, NULL);
     if (e)
         return e;
-    if (b->op == PTHREAD_SELF || b->op == NATIVE_THREAD_SELF || b->op == THREAD_IDENTITY ||
+    if (b->op == PTHREAD_SELF || b->op == NATIVE_THREAD_SELF || b->op == THREAD_PRIORITY_HINT || b->op == THREAD_IDENTITY ||
         b->op == FORK_IDENTITY)
     {
         REQUIRE(sys_thread_info(0, &x->thread_info) == 0);
@@ -568,9 +604,9 @@ static int prepare(context_t *x)
         x->fd = open(x->path, O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0600);
         REQUIRE(x->fd >= 0);
         REQUIRE(transfer(x->fd, x->a, MB, true, false) == 0);
-        if (b->op == DIRECTORY && b->size)
+        if ((b->op == DIRECTORY || b->op == STAT_DIRECTORY || b->op == STAT_MISSING) && b->size)
         {
-            REQUIRE(b->size <= 128);
+            REQUIRE(b->size <= (b->op == DIRECTORY ? 128u : 512u));
             for (unsigned i = 1; i < b->size; i++)
             {
                 snprintf(x->temporary, sizeof(x->temporary), "%s/entry-%03u", x->directory, i);
@@ -581,6 +617,17 @@ static int prepare(context_t *x)
             }
             snprintf(x->temporary, sizeof(x->temporary), "%s/churn", x->directory);
         }
+        if (b->op == STAT || b->op == FSTAT_METADATA || b->op == STAT_SYMLINK)
+            REQUIRE(!fstat(x->fd, &x->expected_stat));
+        if (b->op == STAT_DIRECTORY)
+            REQUIRE(!stat(x->directory, &x->expected_stat));
+        if (b->op == STAT_SYMLINK || b->op == LSTAT_SYMLINK)
+        {
+            REQUIRE(!symlink("data", x->temporary));
+            if (b->op == LSTAT_SYMLINK)
+                REQUIRE(!lstat(x->temporary, &x->expected_stat) && S_ISLNK(x->expected_stat.st_mode));
+        }
+        memset(&x->stat_scratch, 0xA5, sizeof(x->stat_scratch));
     }
     if (b->op == TCP_CONNECT || b->op == TCP_ECHO || (b->op == TCP_STREAM || b->op == TCP_VECTOR) || b->op == UDP_ECHO)
     {
@@ -739,6 +786,15 @@ static int operation(context_t *x)
     case CLOCK:
         REQUIRE(!clock_gettime(CLOCK_MONOTONIC, &t));
         sink = t.tv_nsec;
+        break;
+    case BOOT_CLOCK:
+        REQUIRE(!clock_gettime(CLOCK_BOOTTIME, &t));
+        {
+            uint64_t now = (uint64_t)t.tv_sec * 1000000000u + t.tv_nsec;
+            REQUIRE(now >= x->boot_clock_previous);
+            x->boot_clock_previous = now;
+            sink = now;
+        }
         break;
     case CPU_CLOCK:
         REQUIRE(!clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &t));
@@ -943,6 +999,21 @@ static int operation(context_t *x)
     case NATIVE_THREAD_SELF:
         REQUIRE(sys_thread_self() == x->parent_tid);
         break;
+    case THREAD_PRIORITY_HINT:
+    {
+        int saved = -1, observed = -1;
+        e = pthread_getpriority_np(pthread_self(), &saved);
+        if (e) return e == ENOSYS ? -1 : e;
+        int set = pthread_setpriority_np(pthread_self(), PTHREAD_PRIORITY_HIGH_NP);
+        int query = set ? set : pthread_getpriority_np(pthread_self(), &observed);
+        int restore = pthread_setpriority_np(pthread_self(), saved);
+        REQUIRE(!set && !query && !restore && observed == PTHREAD_PRIORITY_HIGH_NP);
+        REQUIRE(pthread_setpriority_np(pthread_self(), -1) == EINVAL);
+        REQUIRE(pthread_getpriority_np(pthread_self(), NULL) == EINVAL);
+        REQUIRE(pthread_setpriority_np(UINT64_MAX, PTHREAD_PRIORITY_HIGH_NP) == ESRCH);
+        REQUIRE(sys_thread_priority(0, SYSCALL_THREAD_PRIORITY_QUERY) == saved);
+        break;
+    }
     case THREAD_IDENTITY:
         x->identity_error = 0;
         e = pthread_create(&x->identity_thread, NULL, identity_worker, x);
@@ -1023,6 +1094,21 @@ static int operation(context_t *x)
         REQUIRE(!stat(x->path, &st) && st.st_size == MB);
         break;
     }
+    case FSTAT_METADATA:
+        REQUIRE(!fstat(x->fd, &x->stat_scratch));
+        break;
+    case STAT_MISSING:
+        REQUIRE(stat(x->temporary, &x->stat_scratch) == -1 && errno == ENOENT);
+        break;
+    case STAT_DIRECTORY:
+        REQUIRE(!stat(x->directory, &x->stat_scratch));
+        break;
+    case STAT_SYMLINK:
+        REQUIRE(!stat(x->temporary, &x->stat_scratch));
+        break;
+    case LSTAT_SYMLINK:
+        REQUIRE(!lstat(x->temporary, &x->stat_scratch));
+        break;
     case OPEN:
         fd = open(x->path, O_RDONLY | O_CLOEXEC);
         REQUIRE(fd >= 0);
@@ -1303,11 +1389,11 @@ static int batch(context_t *x, unsigned n)
 }
 static void run_bench(perf_config_t *c, const bench_t *b)
 {
-    if ((b->op == SOCKET_BURST || b->op == THREAD_IDENTITY || b->op == FORK_IDENTITY ||
+    if ((b->op == BOOT_CLOCK || b->op == SOCKET_BURST || b->op == THREAD_IDENTITY || b->op == FORK_IDENTITY ||
          b->op == MEMCMP_GUARD || b->op == MEMCOPY_GUARD || b->op == TCP_VECTOR ||
-         (b->op == DIRECTORY && b->size) || b->op == FILE_READ_API ||
-         b->op == FILE_READ_CHECKED || b->op == POLL_DISTINCT_IDLE ||
-         b->op == POLL_DISTINCT_READY || b->op == POLL_LOCAL_REPEAT) &&
+         ((b->op == DIRECTORY || b->op == STAT_DIRECTORY || b->op == STAT_MISSING) && b->size) ||
+         b->op == FILE_READ_API ||
+         b->op == FILE_READ_CHECKED || b->op == POLL_LOCAL_REPEAT) &&
         !c->case_name)
         return;
     if (!selected(c, b->group) || !selected_case(c, b->name) || stopped(c))
@@ -1429,8 +1515,30 @@ static void run_bench(perf_config_t *c, const bench_t *b)
             snprintf(r.detail, sizeof(r.detail), "%u entries; %s local endpoints; final revents validated",
                      (unsigned)b->size, b->op == POLL_LOCAL_REPEAT ? "repeated" : "distinct");
     }
+    if (!r.error && (b->op == STAT || b->op == FSTAT_METADATA || b->op == STAT_DIRECTORY ||
+                     b->op == STAT_SYMLINK || b->op == LSTAT_SYMLINK))
+    {
+        if (b->op == STAT && stat(x->path, &x->stat_scratch)) r.error = errno;
+        const struct stat *a = &x->expected_stat, *v = &x->stat_scratch;
+        if (a->st_size != v->st_size || a->st_mode != v->st_mode || a->st_type != v->st_type ||
+            a->st_dev != v->st_dev || a->st_ino != v->st_ino || a->st_nlink != v->st_nlink ||
+            a->st_uid != v->st_uid || a->st_gid != v->st_gid || a->st_blksize != v->st_blksize ||
+            a->st_blocks != v->st_blocks || a->st_atime != v->st_atime || a->st_mtime != v->st_mtime ||
+            a->st_ctime != v->st_ctime || a->st_atim.tv_sec != v->st_atim.tv_sec ||
+            a->st_mtim.tv_sec != v->st_mtim.tv_sec || a->st_ctim.tv_sec != v->st_ctim.tv_sec ||
+            a->st_atim.tv_nsec != v->st_atim.tv_nsec || a->st_mtim.tv_nsec != v->st_mtim.tv_nsec ||
+            a->st_ctim.tv_nsec != v->st_ctim.tv_nsec) r.error = EIO;
+    }
+    if (!r.error && b->op == STAT_MISSING)
+    {
+        const unsigned char *bytes = (const void *)&x->stat_scratch;
+        for (size_t i = 0; i < sizeof(x->stat_scratch); i++)
+            if (bytes[i] != 0xA5) { r.error = EIO; break; }
+    }
     if (b->op == MEMCOPY_GUARD && !r.error)
         snprintf(r.detail, sizeof(r.detail), "8x8 alignments; overlap gaps 1..33; guarded page edges and canaries");
+    if (b->op == BOOT_CLOCK && !r.error)
+        snprintf(r.detail, sizeof(r.detail), "boot clock: monotonic bracket, 20ms sleep and nondecreasing reads verified");
     if (b->op == FILE_READ_API && !r.error && memcmp(x->a, x->b, b->size))
         r.error = EIO;
     if (b->op == FILE_READ || b->op == FILE_READ_API || b->op == FILE_READ_CHECKED)

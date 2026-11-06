@@ -30,7 +30,9 @@ int main(void)
     uint64_t boot_after = sys_monotonic_millis();
     if (second < first || second - first < 25000000ULL ||
         second - first > (boot_after - boot_before) * 1000000ULL)
-    { serial_printf("PROCESS_UPTIME_TEST: FAIL elapsed\n"); return 1; }
+    { serial_printf("PROCESS_UPTIME_TEST: FAIL elapsed boot_before=%llu boot_after=%llu first_ns=%llu second_ns=%llu\n",
+                    (unsigned long long)boot_before, (unsigned long long)boot_after,
+                    (unsigned long long)first, (unsigned long long)second); return 1; }
 
     worker_t *workers = calloc(8, sizeof(*workers));
     pthread_t *threads = calloc(8, sizeof(*threads));

@@ -600,6 +600,29 @@ int fd_table_pin(fd_table_t *table, int fd, fd_description_t **description_out,
     return result;
 }
 
+int fd_table_pin_many(fd_table_t *table, fd_table_pin_t *pins, size_t count)
+{
+    if (!table || count > FD_TABLE_MAX_ENTRIES || (count && !pins)) return -EINVAL;
+    for (size_t index = 0; index < count; ++index) pins[index].description = NULL;
+    if (!count) return 0;
+    int result = 0;
+    spinlock_lock(&table->lock);
+    /* Shutdown drains entries outside this lock after publishing closed.
+     * Never inspect those entries once closed is observed. */
+    if (!table->closed)
+        for (size_t index = 0; index < count; ++index)
+        {
+            int fd = pins[index].fd;
+            if (fd < 0 || (size_t)fd >= table->capacity) continue;
+            fd_description_t *description = table->entries[fd].description;
+            if (!description) continue;
+            if (!fd_description_get(description)) { result = -EOVERFLOW; break; }
+            pins[index].description = description;
+        }
+    spinlock_unlock(&table->lock);
+    return result;
+}
+
 static int fd_table_remove(fd_table_t *table, int fd, fd_description_t *expected)
 {
     if (!fd_table_valid(table, fd))

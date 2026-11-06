@@ -51,6 +51,7 @@ static unsigned stage_failure,legacy_allocations,legacy_releases,owner_queries,b
 static bool legacy_full,send_succeeds;
 static int g_tcp_fd_ops;
 static uint64_t g_connect_timeout_ticks=400;
+static uint64_t g_tcp_rx_capacity_bytes;
 static uint64_t timer_ticks(void) { return 123; }
 static thread_t *thread_current(void) { CHECK(locked);++owner_queries;return (thread_t *)(uintptr_t)0x1234; }
 static int fd_allocate(const void *ops,void *context) { CHECK(locked&&ops==&g_tcp_fd_ops&&context);++legacy_allocations;return legacy_full?-1:17; }
@@ -60,7 +61,7 @@ static net_tcp_socket_t g_sockets[NET_TCP_MAX_SOCKETS];
 static void tcp_reassembly_clear(net_tcp_socket_t *socket) { CHECK(locked&&socket); }
 static void *buffer_allocate(void) { void *p=malloc(64);CHECK(p);++buffers;return p; }
 static void buffer_free(void *p) { CHECK(locked&&buffers);--buffers;free(p); }
-static bool tcp_init_rx_buffer(net_tcp_socket_t *s) { CHECK(locked);if(stage_failure==1)return false;s->rx_buffer=buffer_allocate();s->rx_capacity=64;return true; }
+static bool tcp_init_rx_buffer(net_tcp_socket_t *s) { CHECK(locked);if(stage_failure==1)return false;s->rx_buffer=buffer_allocate();s->rx_capacity=64;g_tcp_rx_capacity_bytes+=64;return true; }
 static bool tcp_init_tx_buffer(net_tcp_socket_t *s) { CHECK(locked);if(stage_failure==2)return false;s->tx_frame=buffer_allocate();s->tx_frame_capacity=64;return true; }
 static uint16_t tcp_allocate_port(void) { CHECK(locked);return stage_failure==3?0:49152; }
 static bool tcp_send_segment(net_tcp_socket_t *s,uint32_t seq,uint8_t flags,const uint8_t *data,size_t len,bool advance,bool track) {

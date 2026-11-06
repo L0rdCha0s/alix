@@ -593,7 +593,8 @@ zen-import:
 zen-build: zen-import
 	$(MAKE) zen-gecko-build
 
-zen-package:
+# Packaging must consume executables linked with the current native runtime.
+zen-package: zen-gecko-build
 	python3 ports/zen/package_browser.py --entry zen --output "$(ZEN_BROWSER_PACKAGE_DIR)"
 
 zen-source-test:
@@ -828,10 +829,10 @@ zen-js-configure: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_LD_SCRIPT) $(ZEN_SSP_ARCHIV
 zen-js-build: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_LD_SCRIPT) $(ZEN_SSP_ARCHIVE)
 	ALIX_RUNTIME_OBJECTS="$(ZEN_USER_RUNTIME_OBJECTS)" python3 ports/zen/configure_engine.py --engine-dir "$(ZEN_ENGINE_DIR)" --build $(if $(filter 1,$(ZEN_JS_KEEP_GOING)),--keep-going,)
 
-zen-gecko-configure: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_LD_SCRIPT) $(ZEN_SSP_ARCHIVE)
+zen-gecko-configure: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_LD_SCRIPT) $(ZEN_SSP_ARCHIVE) $(ZEN_DSO_START)
 	ALIX_RUNTIME_OBJECTS="$(ZEN_USER_RUNTIME_OBJECTS)" python3 ports/zen/configure_engine.py --engine-dir "$(ZEN_ENGINE_DIR)" --project browser
 
-zen-gecko-build: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_LD_SCRIPT) $(ZEN_SSP_ARCHIVE)
+zen-gecko-build: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_LD_SCRIPT) $(ZEN_SSP_ARCHIVE) $(ZEN_DSO_START)
 	ALIX_RUNTIME_OBJECTS="$(ZEN_USER_RUNTIME_OBJECTS)" python3 ports/zen/configure_engine.py --engine-dir "$(ZEN_ENGINE_DIR)" --project browser --build --jobs "$(ZEN_GECKO_JOBS)" $(if $(filter 1,$(ZEN_GECKO_KEEP_GOING)),--keep-going,)
 
 zen-patch-test:

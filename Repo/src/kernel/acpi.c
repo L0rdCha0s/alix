@@ -1,4 +1,5 @@
 #include "acpi.h"
+#include <stdint.h>
 
 #include "bootinfo.h"
 #include "physmem.h"
@@ -727,6 +728,29 @@ bool acpi_has_i8042(void)
     const acpi_fadt_t *fadt = acpi_find_table_cached("FACP", &length);
     if (!fadt || length < offsetof(acpi_fadt_t, boot_arch_flags) + sizeof(uint16_t)) return false;
     return (fadt->boot_arch_flags & 2) != 0;
+}
+
+bool acpi_pm_timer_port(uint16_t *port, uint32_t *mask)
+{
+    if (!port || !mask) return false;
+    *port = 0; *mask = 0;
+    size_t length = 0;
+    const acpi_fadt_t *fadt = acpi_find_table_cached("FACP", &length);
+    if (!fadt || length < offsetof(acpi_fadt_t, flags) + sizeof(fadt->flags) ||
+        (fadt->flags & (1u << 20)) || fadt->pm_timer_length != 4) return false;
+    uint64_t address = fadt->pm_timer_block;
+    if (length >= offsetof(acpi_fadt_t, x_pm_timer_block) + sizeof(fadt->x_pm_timer_block) &&
+        fadt->x_pm_timer_block.address)
+    {
+        const acpi_gas_t *gas = &fadt->x_pm_timer_block;
+        if (gas->address_space_id != 1 || gas->register_bit_offset ||
+            (gas->register_bit_width && gas->register_bit_width < 24)) return false;
+        address = gas->address;
+    }
+    if (!address || address > UINT16_MAX - 3u) return false;
+    *port = (uint16_t)address;
+    *mask = (fadt->flags & (1u << 8)) ? UINT32_MAX : 0x00ffffffu;
+    return true;
 }
 
 const void *acpi_find_table_cached(const char *signature, size_t *length_out)

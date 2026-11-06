@@ -20,6 +20,13 @@
 /* Published-row diagnostic totals; clock units remain native timer ticks. */
 static uint64_t g_video_flush_calls, g_video_flush_bytes, g_video_flush_ticks;
 static uint64_t g_video_flush_max_ticks;
+bool g_video_opaque_copy_enabled = false;
+static uint64_t g_video_opaque_copy_bytes;
+
+typedef struct __attribute__((packed, may_alias))
+{
+    uint64_t value;
+} framebuffer_copy_word_t;
 
 typedef struct atk_state atk_state_t;
 typedef struct atk_widget atk_widget_t;
@@ -809,11 +816,31 @@ void video_blit_rgba32_untracked(int x,
     const uint8_t *row_ptr = (const uint8_t *)pixels +
                              (size_t)src_y * (size_t)stride_bytes +
                              (size_t)src_x * sizeof(video_color_t);
+    uint64_t opaque_bytes = 0;
     for (int row = 0; row < copy_h; ++row)
     {
         const video_color_t *src_row = (const video_color_t *)row_ptr;
         video_color_t *dst_row = &backbuffer[(y0 + row) * g_video_width + x0];
-        for (int col = 0; col < copy_w; ++col)
+        int col = 0;
+        size_t row_bytes = (size_t)copy_w * sizeof(video_color_t);
+        uintptr_t source = (uintptr_t)src_row, destination = (uintptr_t)dst_row;
+        if (g_video_opaque_copy_enabled &&
+            ((source < destination && row_bytes <= destination - source) ||
+             (destination < source && row_bytes <= source - destination)))
+        {
+            while (copy_w - col >= 8)
+            {
+                const framebuffer_copy_word_t *s = (const void *)(src_row + col);
+                uint64_t a = s[0].value, b = s[1].value, c = s[2].value, d = s[3].value;
+                const uint64_t alpha = 0xff000000ff000000ULL;
+                if ((a & b & c & d & alpha) != alpha) break;
+                framebuffer_copy_word_t *out = (void *)(dst_row + col);
+                out[0].value = a; out[1].value = b; out[2].value = c; out[3].value = d;
+                col += 8;
+            }
+            opaque_bytes += (uint64_t)col * sizeof(video_color_t);
+        }
+        for (; col < copy_w; ++col)
         {
             video_color_t src_px = src_row[col];
             uint8_t a = (uint8_t)(src_px >> 24);
@@ -846,6 +873,7 @@ void video_blit_rgba32_untracked(int x,
         }
         row_ptr += stride_bytes;
     }
+    if (opaque_bytes) __atomic_add_fetch(&g_video_opaque_copy_bytes, opaque_bytes, __ATOMIC_RELAXED);
 }
 
 static inline void fb_memcpy_wc(volatile void *dst_mmio, const void *src, size_t bytes);
@@ -1165,11 +1193,6 @@ static int video_dirty_snapshot(video_dirty_rect_t *out, int max_rects)
 
 /* Packed aliasable reads permit any source alignment without per-word libc
  * calls. Destination stores stay aligned and volatile for the framebuffer. */
-typedef struct __attribute__((packed, may_alias))
-{
-    uint64_t value;
-} framebuffer_copy_word_t;
-
 /* Copy with wide stores; helps WC coalesce */
 static inline void fb_memcpy_wc(volatile void *dst_mmio, const void *src, size_t bytes)
 {

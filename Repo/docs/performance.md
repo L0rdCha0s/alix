@@ -63,7 +63,13 @@ thread identity across CPU migration) and `fork_thread_identity` (CLI-only
 identity validation in fork-child callbacks). `tcp_vector_stream_1m` alternates
 sendmsg/writev with recvmsg scatter copies and validates every echoed byte. It
 requires the same echo endpoint as the scalar stream case. The default inventory
-has 79 cases.
+has 86 cases.
+
+Metadata evaluations now include ordinary path stat, fstat, missing-path stat,
+directory stat and symlink follow/no-follow. Full metadata is checked after
+timing; missing-path calls require ENOENT and preserve a canary-filled output.
+Opt-in `stat_directory_512` and `stat_missing_wide_512` create 512 entries before
+timing to exercise lookup/snapshot budgets and worker fallback.
 
 Opt-in filesystem evaluations include `directory_scan_128` (validate every name
 once), `cached_read_4k_api`, `cached_read_60k_api`, `cached_read_64k_api` and
@@ -97,6 +103,60 @@ boot, including setup; periodic frame timing can bias coarse tick sums.
 The default suite has a bounded working set and does not deliberately exhaust
 RAM, force swap, modify existing files or flood a network.
 
+Completed native Zen stall captures can be checked and symbolized offline:
+
+```sh
+python3 tools/perf.py analyze-zen-stalls build/perf/zen-live \
+  --xul-symbols path/to/matching/unstripped/libxul.so
+```
+
+The analyzer requires the captured module's GNU build ID and live instruction
+bytes to match executable bytes in the supplied ELF. It batches source lookup
+through `x86_64-elf-addr2line`, preserves inline frames, and excludes saved syscall
+and blocked-render contexts from its live counts. It rejects a symbol file that
+changes during analysis and preserves an existing summary. Use `--output` for a
+new filename. Counts describe the bounded stall captures; they are not CPU-time
+percentages. Sampling pauses invalidate latency comparisons, and symbolization
+runs offline so it adds no further guest timing interference.
+
+Shaped-corner checks in the native Zen runner also retain bounded framebuffer
+settling observations. Four identical regions over at least 300 ms are required
+before functional RGB comparison; an eight-second timeout preserves the failed
+observations. This wait occurs after the measured response marker. Compare runs
+with the same `corner_capture_protocol`, since phase-hold cadence affects later
+inputs. See the [shader-math investigation](zen-shader-math-performance-2026-11-06.md)
+for the original-browser pixel anomaly that motivated this diagnostic.
+
+The native Zen runner also traces its first-profile update sweep and records
+chrome-element presence at input observations. `--startup-effects default`
+preserves normal fresh-profile effects; `--startup-effects quiescent` seeds only
+the disposable profile's saved version/build ID to isolate steady UI work.
+Preference readback and the absence of sweep elements are checked. References
+must use the same mode. No global animation preference or installed user profile
+is changed.
+
+For bounded live SWGL shader-state capture, first extract layout metadata from
+the exact unstripped library installed in the guest:
+
+```sh
+python3 tools/perf.py swgl-profile-info --xul-symbols MATCHING_LIBXUL \
+  --output NEW_METADATA_JSON
+```
+
+Pass that file to the native Zen runner with `--swgl-profile-info` and a live
+stall/progress snapshot mode. The sampler checks the loaded module build ID
+before reading shader fields through the existing physical page walker. It
+records callback pointers, shader flags and the stored span length; a recognized
+blur shader also includes sampler format/dimensions and blur inputs. Missing
+resident pages remain explicit. These are paused diagnostic runs, excluded from
+timing comparisons. The global shader state may describe an earlier primitive
+unless the captured PC is inside its recognized blur routine.
+
+Live snapshots now retain general registers and the memory position of each
+stack code candidate. The candidates remain distinct from an unwound call
+stack. The [R8 blur investigation](zen-r8-blur-performance-2026-11-06.md) uses
+these records to identify a missing optimized callback.
+
 ## Workloads
 
 | Group | Paths exercised |
@@ -119,8 +179,12 @@ guarded copy case is correctness-only; its elapsed time includes validation and
 should not be treated as copy throughput. These user VM guards are separate
 from the disabled kernel stack-debug guards.
 
-The poll-size workloads repeat a live descriptor to isolate vector-scan cost
-without measuring descriptor creation. Pipe/socket-pair transfers write and
+The original poll-size workloads repeat a live pipe descriptor to isolate
+vector-scan cost without measuring descriptor creation. Two default 128-entry
+cases also poll distinct local endpoints, idle or with one byte queued per
+endpoint. Their 64 socket pairs are created before timing, every final revents
+value is checked, and all endpoints are closed afterward. The opt-in
+`poll_idle_local_repeated_128` provides a matching local-backend alias control. Pipe/socket-pair transfers write and
 read in one thread: their results measure syscall/copy/readiness cost. The
 condition handoff measures blocking wakeups between threads. The CPU workers
 perform 128 dependent arithmetic steps per reported work unit. N-worker costs
@@ -261,8 +325,10 @@ Follow-up results for the 75-case suite are in
 [the filesystem/admission investigation](performance-pass3-2026-11-05.md), followed
 by [GUI scheduling and publication](performance-pass4-2026-11-05.md) and
 [scheduler phase measurements and guard configuration](performance-pass5-2026-11-05.md).
-The current 79-case inventory adds the
-[unaligned copy investigation](performance-pass6-2026-11-05.md).
+The 79-case inventory added the
+[unaligned copy investigation](performance-pass6-2026-11-05.md). The
+81-case inventory added [descriptor capture measurements](performance-pass7-2026-11-05.md).
+The current 86-case inventory includes [resident pathname metadata](performance-pass8-2026-11-05.md).
 
 ## Initial validation recorded on 5 November 2026
 
@@ -295,3 +361,19 @@ The current 79-case inventory adds the
   after stripping; the exact ZIP payload matches the runtime file, and that
   stripped app passed the native GUI runs. This is not a claim that the broad
   runtime-archive gate is green.
+
+Actual Zen engine/input diagnostics are available through the existing browser
+runner; see [the targeted Zen diagnostics](zen-performance-diagnostics-2026-11-05.md).
+The [software-rendering follow-up](zen-software-rendering-2026-11-06.md) adds
+clock-calibrated input stages and live render-thread contexts, then measures a
+fix for external fixed-width copies inside SWGL pixel loops.
+The [corner-mask pass](zen-corner-mask-performance-2026-11-06.md) adds native
+shape references, memory/progress snapshots and a measured corner-rendering fix,
+plus bounded writeback and corrected heap accounting. It records the remaining
+profile-heavy memory-pressure/navigation failure separately.
+The [shader-math pass](zen-shader-math-performance-2026-11-06.md) adds verified
+offline symbolization of live stalls and investigates discarded tangent-normal
+calculations and external scalar bit-operation calls in the software renderer.
+The [HTML5 media investigation](zen-html5-media-2026-11-06.md) adds codec,
+direct/Media Source playback, native video-frame and captured-audio diagnostics,
+and follows the decoder-routing, HAL and boot-clock failures exposed by them.

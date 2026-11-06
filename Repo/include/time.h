@@ -21,6 +21,8 @@ struct tm
 #define CLOCK_MONOTONIC 1
 #define CLOCK_PROCESS_CPUTIME_ID 2
 #define CLOCK_THREAD_CPUTIME_ID 3
+/* No system-suspend path exists yet, so boot and monotonic time coincide. */
+#define CLOCK_BOOTTIME 7
 #define TIME_UTC 1
 #define CLOCKS_PER_SEC 1000
 

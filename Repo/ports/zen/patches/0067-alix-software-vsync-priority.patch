@@ -1,0 +1,22 @@
+--- a/gfx/thebes/SoftwareVsyncSource.cpp
++++ b/gfx/thebes/SoftwareVsyncSource.cpp
+@@ -8,6 +8,9 @@
+ #include "base/task.h"
+ #include "gfxPlatform.h"
+ #include "nsThreadUtils.h"
++#ifdef MOZ_WIDGET_ALIX
++#  include "prthread.h"
++#endif
+ 
+ namespace mozilla::gfx {
+ 
+@@ -44,6 +47,9 @@
+   }
+ 
+   MOZ_ASSERT(IsInSoftwareVsyncThread());
++#ifdef MOZ_WIDGET_ALIX
++  PR_SetThreadPriority(PR_GetCurrentThread(), PR_PRIORITY_HIGH);
++#endif
+   TimeStamp vsyncTime = TimeStamp::Now();
+   TimeStamp outputTime = vsyncTime + GetVsyncRate();
+   NotifyVsync(vsyncTime, outputTime);

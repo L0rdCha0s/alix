@@ -78,6 +78,16 @@ static size_t g_heap_trace_allocations = 0;
 static size_t g_heap_trace_frees = 0;
 #endif
 
+/* Failure-only history, serialized by the heap lock. Keep caller addresses
+ * instead of logging/calling back while the allocator owns its lock. */
+typedef struct { size_t bytes; uintptr_t caller; } heap_failure_record_t;
+heap_failure_record_t g_heap_failure_records[16];
+heap_failure_record_t g_heap_first_failure;
+uint64_t g_heap_allocation_failures = 0;
+typedef struct { size_t bytes, previous_bytes; uintptr_t caller; } heap_realloc_failure_record_t;
+heap_realloc_failure_record_t g_heap_first_realloc_failure, g_heap_last_realloc_failure;
+uint64_t g_heap_realloc_failures;
+
 static uint32_t g_heap_trace_log_enable = 0;
 static uint32_t g_uheap_log_enable = 0;
 
@@ -1280,6 +1290,11 @@ void *malloc(size_t size)
     heap_block_t *block = find_suitable_block(size, trace_caller);
     if (!block)
     {
+        size_t slot = g_heap_allocation_failures % 16;
+        g_heap_failure_records[slot].bytes = requested;
+        g_heap_failure_records[slot].caller = (uintptr_t)trace_caller;
+        if (!g_heap_allocation_failures) g_heap_first_failure = g_heap_failure_records[slot];
+        ++g_heap_allocation_failures;
         heap_log("malloc fail size=", requested);
         heap_lock_release(flags);
         return NULL;
@@ -1666,12 +1681,25 @@ static heap_block_t *expand_block(heap_block_t *block, size_t size)
     return NULL;
 }
 
-/*
- * Resize an allocation.
- *
- * - `realloc(NULL, size)` behaves like `malloc(size)`.
- * - `realloc(ptr, 0)` frees and returns NULL.
- */
+/* The heap lock is owned; account actual block payload, including unsplit
+ * remainders, so later free() subtracts the same quantity. */
+static void heap_trace_resize_locked(size_t before, size_t after)
+{
+#if ENABLE_HEAP_TRACE
+    if (g_heap_trace_enabled)
+    {
+        if (after >= before) g_heap_trace_bytes_in_use += after - before;
+        else if (g_heap_trace_bytes_in_use >= before - after) g_heap_trace_bytes_in_use -= before - after;
+        else g_heap_trace_bytes_in_use = 0;
+        if (g_heap_trace_bytes_in_use > g_heap_trace_peak_bytes)
+            g_heap_trace_peak_bytes = g_heap_trace_bytes_in_use;
+    }
+#else
+    (void)before; (void)after;
+#endif
+}
+
+/* Resize an allocation; NULL delegates to malloc, zero size frees it. */
 void *realloc(void *ptr, size_t size)
 {
     heap_log("realloc ptr=", (uintptr_t)ptr);
@@ -1713,6 +1741,7 @@ void *realloc(void *ptr, size_t size)
         return NULL;
     }
 
+    size_t previous_size = block->size;
     if (block->size >= size)
     {
         if (block->size >= size + sizeof(heap_block_t) + HEAP_MIN_SPLIT_REMAINDER)
@@ -1722,6 +1751,7 @@ void *realloc(void *ptr, size_t size)
         }
         block->free_next = NULL;
         block->free_prev = NULL;
+        heap_trace_resize_locked(previous_size, block->size);
         heap_lock_release(flags);
         return ptr;
     }
@@ -1729,6 +1759,7 @@ void *realloc(void *ptr, size_t size)
     heap_block_t *expanded = expand_block(block, size);
     if (expanded)
     {
+        heap_trace_resize_locked(previous_size, expanded->size);
         void *result = (void *)((uintptr_t)expanded + sizeof(heap_block_t));
         heap_lock_release(flags);
         return result;
@@ -1739,6 +1770,17 @@ void *realloc(void *ptr, size_t size)
     void *new_ptr = malloc(size);
     if (!new_ptr)
     {
+        /* malloc's caller is realloc here. Retain the actual resize caller
+         * separately, without relying on frame pointers or another CPU's
+         * stack. The original allocation remains owned by the caller. */
+        heap_realloc_failure_record_t failure = {
+            size, old_size, (uintptr_t)__builtin_return_address(0)
+        };
+        flags = heap_lock_acquire();
+        if (!g_heap_realloc_failures) g_heap_first_realloc_failure = failure;
+        g_heap_last_realloc_failure = failure;
+        ++g_heap_realloc_failures;
+        heap_lock_release(flags);
         return NULL;
     }
 

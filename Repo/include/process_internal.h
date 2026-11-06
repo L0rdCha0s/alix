@@ -96,7 +96,9 @@
 #define STACK_OWNER_BUCKET_SIZE (1UL << STACK_OWNER_BUCKET_SHIFT)
 #define STACK_OWNER_BUCKET_COUNT 256u
 #define STACK_OWNER_BUCKET_MASK (STACK_OWNER_BUCKET_COUNT - 1)
-#define PROCESS_FUTEX_BUCKET_COUNT 64u
+/* Per-process intrusive lists and empty-wake counts. Browser workloads have
+ * many independent condition words; coarse buckets serialize unrelated wakes. */
+#define PROCESS_FUTEX_BUCKET_COUNT 1024u
 
 typedef uint64_t cpu_context_t;
 
@@ -325,6 +327,7 @@ struct thread
     uint64_t context_guard_words[CONTEXT_GUARD_WORDS];
     size_t context_guard_count;
     uint64_t last_scheduled_tick;
+    uint64_t ready_queue_tick;
     uintptr_t context_guard_protect_base;
     size_t context_guard_protect_len;
     bool context_guard_protected;
@@ -352,6 +355,7 @@ struct thread
     thread_t *futex_bucket_prev;
     thread_t *futex_bucket_next;
     bool futex_indexed;
+    bool futex_counted;
     bool futex_waiting;
     bool futex_notified;
     bool futex_interrupted;
@@ -384,7 +388,7 @@ struct thread
 struct process
 {
     uint64_t pid;
-    uint64_t started_monotonic_ticks; /* Immutable creation timestamp. */
+    uint64_t started_monotonic_millis; /* Immutable elapsed-clock creation timestamp. */
     /* Absolute path snapshot before publication; empty for anonymous images.
      * Storage shares the process lifetime, never a launcher or user stack. */
     char executable_path[SYSCALL_EXECUTABLE_PATH_MAX];
@@ -403,6 +407,7 @@ struct process
     bool vm_pager_busy;
     /* Scheduler-locked, intrusive registrations; no borrowed user pointers. */
     thread_t *futex_buckets[PROCESS_FUTEX_BUCKET_COUNT];
+    uint32_t futex_waiter_counts[PROCESS_FUTEX_BUCKET_COUNT];
     uint32_t thread_count;
     uint32_t running_thread_count;
     uint32_t join_waiters;
@@ -476,7 +481,7 @@ struct process
     bool default_affinity_enabled;
     uint32_t default_affinity_cpu;
     uint32_t magic;
-    /* Scheduler-locked generation of all process-private futex wakes. */
+    /* Scheduler-locked generation of wakes with possible waiters. */
     uint64_t futex_wake_sequence;
 };
 
@@ -552,6 +557,8 @@ extern uint64_t g_scheduler_switch_count;
 extern const fd_ops_t console_stdout_ops;
 extern uint32_t g_sched_priority_enable;
 extern uint32_t g_sched_steal_enable;
+extern uint32_t g_sched_idle_placement_enable;
+extern uint64_t g_sched_idle_placement_redirects;
 extern uint32_t g_sched_default_priority;
 extern uintptr_t kernel_heap_base;
 extern uintptr_t kernel_heap_end;
@@ -622,13 +629,21 @@ static inline uint32_t scheduler_time_slice_ticks(void)
     return ticks;
 }
 
+static inline uint32_t scheduler_ui_time_slice_ticks(void)
+{
+    uint32_t frequency = timer_frequency();
+    return frequency ? (uint32_t)(((uint64_t)frequency + 99U) / 100U) : 1U;
+}
+
 static inline uint32_t scheduler_thread_time_slice_ticks(const thread_t *thread)
 {
     uint32_t ticks = scheduler_time_slice_ticks();
     /* Input pollers, the compositor, and focused UI share the reserved UI CPU.
      * A 100 ms normal quantum lets one UI peer hide entire short key/mouse
-     * presses from another. Bound interactive peers to one 10 ms timer tick. */
-    return thread && thread->priority == THREAD_PRIORITY_UI && ticks > 1 ? 1 : ticks;
+     * presses from another. Bound interactive peers to 10 ms independently
+     * of the timer interrupt frequency. */
+    uint32_t ui_ticks = scheduler_ui_time_slice_ticks();
+    return thread && thread->priority == THREAD_PRIORITY_UI && ticks > ui_ticks ? ui_ticks : ticks;
 }
 
 static inline uint64_t cpu_save_flags(void)

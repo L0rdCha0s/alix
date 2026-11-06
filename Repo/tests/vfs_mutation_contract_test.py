@@ -18,11 +18,11 @@ code=r'''
 #define CHECK(c) do { if(!(c)){fprintf(stderr,"vfs mutation line %d: %s\n",__LINE__,#c);abort();} }while(0)
 #define serial_printf(...) ((void)0)
 #define vfs_log(...) ((void)0)
-typedef enum { VFS_NODE_DIR,VFS_NODE_FILE,VFS_NODE_BLOCK,VFS_NODE_SYMLINK } vfs_node_type_t;
+typedef enum { VFS_NODE_DIR,VFS_NODE_FILE,VFS_NODE_BLOCK,VFS_NODE_SYMLINK,VFS_NODE_FIFO,VFS_NODE_CHARACTER } vfs_node_type_t;
 typedef unsigned spinlock_t;
 typedef struct vfs_node vfs_node_t;
 typedef struct {vfs_node_t *mount_point;spinlock_t dirty_lock;bool needs_full_sync;} vfs_mount_t;
-struct vfs_node {vfs_node_type_t type;char *name,*data;size_t size,capacity;pthread_mutex_t data_lock;vfs_node_t *parent,*first_child,*next_sibling;vfs_mount_t *mount;bool allow_mutation,disk_name_dirty;uint32_t uid,gid,refcount,permissions;void *read_cb;ssize_t (*write_cb)(vfs_node_t *,size_t,const void *,size_t,void *);void *callback_context;};
+struct vfs_node {vfs_node_type_t type;char *name,*data;size_t size,capacity;pthread_mutex_t data_lock;vfs_node_t *parent,*first_child,*next_sibling;vfs_mount_t *mount;bool allow_mutation,disk_name_dirty,data_unloaded;uint64_t dirty_seq,data_seq,disk_data_offset;uint32_t uid,gid,refcount,permissions,character_kind;void *read_cb;ssize_t (*write_cb)(vfs_node_t *,size_t,const void *,size_t,void *);void *callback_context;};
 static vfs_node_t *root;
 static void vfs_lock_node_data(vfs_node_t *n);
 static void vfs_unlock_node_data(vfs_node_t *n);
@@ -30,8 +30,6 @@ static pthread_mutex_t tree_mutex=PTHREAD_MUTEX_INITIALIZER;
 static _Thread_local bool tree_owned;
 static void vfs_tree_lock_acquire(void){CHECK(!tree_owned);CHECK(!pthread_mutex_lock(&tree_mutex));tree_owned=true;}
 static void vfs_tree_lock_release(void){CHECK(tree_owned);tree_owned=false;CHECK(!pthread_mutex_unlock(&tree_mutex));}
-static void spinlock_lock(spinlock_t *l){CHECK(tree_owned && !*l);*l=1;}
-static void spinlock_unlock(spinlock_t *l){CHECK(tree_owned && *l);*l=0;}
 static bool vfs_node_allows_mutation(const vfs_node_t *n){return n->allow_mutation;}
 static void vfs_inherit_mutability(vfs_node_t *p,vfs_node_t *n){n->allow_mutation=p->allow_mutation;}
 static void vfs_inherit_ownership(vfs_node_t *p,vfs_node_t *n){n->uid=p->uid;n->gid=p->gid;}
@@ -70,7 +68,10 @@ for signature in ['static bool split_parent_and_name_checked(', 'static bool spl
 code+=r'''
 static void vfs_lock_node_data(vfs_node_t *n){CHECK(!pthread_mutex_lock(&n->data_lock));}
 static void vfs_unlock_node_data(vfs_node_t *n){CHECK(!pthread_mutex_unlock(&n->data_lock));}
-static void vfs_backpressure_wait(vfs_mount_t *m,size_t count){(void)m;(void)count;}
+static bool vfs_backpressure_wait(vfs_mount_t *m,size_t count){(void)m;(void)count;return true;}
+static int vfs_prepare_data(vfs_node_t *n){CHECK(!n->data_unloaded);return 0;}
+#define VFS_CHARACTER_ENTROPY 1u
+static vfs_node_type_t vfs_node_type(const vfs_node_t *n){return n->type;}
 static void vfs_note_file_dirty(vfs_node_t *n,size_t offset,size_t count,bool changed){(void)n;(void)offset;(void)count;(void)changed;}
 /* These rename/resize fixtures have no installed mappings. The page-cache
  * boundary is exercised with production code by filesystem_writeback_test. */
@@ -87,7 +88,7 @@ static bool ensure_capacity_locked(vfs_node_t *n,size_t needed){
 static void ensure_terminator_locked(vfs_node_t *n){CHECK(ensure_capacity_locked(n,n->size));n->data[n->size]=0;}
 #define VFS_PATH_MAX 4096u
 '''
-for signature in ['int vfs_resize_data(', 'static ssize_t vfs_write_at_internal(', 'ssize_t vfs_write_append(', 'ssize_t vfs_write_data_at(']:
+for signature in ['static bool vfs_truncate_data_locked(', 'int vfs_resize_data(', 'static ssize_t vfs_write_at_internal(', 'ssize_t vfs_write_append(', 'ssize_t vfs_write_data_at(']:
     code+=function_definition(source,signature)+'\n'
 code+=r'''
 typedef struct {uint32_t flags;} fd_description_t;

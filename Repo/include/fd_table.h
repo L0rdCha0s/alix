@@ -150,6 +150,17 @@ int fd_table_install_pair(fd_table_t *table, fd_description_t *first,
  * block. Neither the description nor a pointer into it may outlive the pin. */
 int fd_table_pin(fd_table_t *table, int fd, fd_description_t **description_out,
                  uint32_t *flags_out);
+/* Capture a bounded vector under one table lock. Inputs and outputs must be
+ * caller-protected, with no pre-existing output owners. Invalid/negative slots
+ * produce NULL; each valid entry gets its own reference, including duplicates.
+ * On overflow, earlier outputs remain owned and all later outputs stay NULL.
+ * No callbacks, allocation, or release of references occurs under the lock. */
+typedef struct
+{
+    int fd;
+    fd_description_t *description;
+} fd_table_pin_t;
+int fd_table_pin_many(fd_table_t *table, fd_table_pin_t *pins, size_t count);
 int fd_table_close(fd_table_t *table, int fd);
 /* expected must remain pinned across the call. Its identity cannot be reused
  * while pinned; a replacement slot returns -EAGAIN and remains untouched. */

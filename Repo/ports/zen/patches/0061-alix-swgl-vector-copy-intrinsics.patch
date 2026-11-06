@@ -1,0 +1,53 @@
+--- a/gfx/wr/swgl/src/vector_type.h
++++ b/gfx/wr/swgl/src/vector_type.h
+@@ -502,18 +502,27 @@
+   return SHUFFLE(a, b, 0, 8, 1, 9, 2, 10, 3, 11, 4, 12, 5, 13, 6, 14, 7, 15);
+ }
+ 
++// The Alix SDK disables implicit libc builtins. These fixed-size vector
++// transfers must still lower to register loads/stores, not external calls in
++// the per-pixel path. Keep the original fallback for other toolchains.
++#ifdef __ALIX__
++#  define SWGL_VECTOR_COPY __builtin_memcpy
++#else
++#  define SWGL_VECTOR_COPY memcpy
++#endif
++
+ template <typename T>
+ struct Unaligned {
+   template <typename P>
+   SI T load(const P* p) {
+     T v;
+-    memcpy(&v, p, sizeof(v));
++    SWGL_VECTOR_COPY(&v, p, sizeof(v));
+     return v;
+   }
+ 
+   template <typename P>
+   SI void store(P* p, T v) {
+-    memcpy(p, &v, sizeof(v));
++    SWGL_VECTOR_COPY(p, &v, sizeof(v));
+   }
+ };
+ 
+@@ -523,16 +532,18 @@
+   template <typename P>
+   SI VectorType<T, N> load(const P* p) {
+     VectorType<T, N> v;
+-    memcpy(v.elements, p, sizeof(v));
++    SWGL_VECTOR_COPY(v.elements, p, sizeof(v));
+     return v;
+   }
+ 
+   template <typename P>
+   SI void store(P* p, VectorType<T, N> v) {
+-    memcpy(p, v.elements, sizeof(v));
++    SWGL_VECTOR_COPY(p, v.elements, sizeof(v));
+   }
+ };
+ #endif
++
++#undef SWGL_VECTOR_COPY
+ 
+ template <typename T, typename P>
+ SI T unaligned_load(const P* p) {

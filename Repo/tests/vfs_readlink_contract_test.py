@@ -27,7 +27,7 @@ def main():
 typedef enum { VFS_NODE_DIR,VFS_NODE_FILE,VFS_NODE_BLOCK,VFS_NODE_SYMLINK } vfs_node_type_t;
 typedef struct vfs_node {
     struct vfs_node *parent,*child,*next; char *name,*data; size_t size,capacity;
-    vfs_node_type_t type; unsigned data_lock; uint32_t refcount;uint64_t atime,mtime,ctime;
+    vfs_node_type_t type; unsigned data_lock; uint32_t refcount;uint64_t atime,mtime,ctime,data_seq;
 } vfs_node_t;
 typedef struct {uint64_t size_bytes;vfs_node_type_t type;uint64_t atime,mtime,ctime;} vfs_stat_snapshot_t;
 static vfs_node_t *root;
@@ -61,7 +61,7 @@ static void vfs_mark_meta_dirty(vfs_node_t *n) { (void)n; }
                       "static const char *vfs_node_symlink_target(", "static bool vfs_assign_symlink_target(",
                       "static vfs_node_t *vfs_readlink_resolve_locked(", "ssize_t vfs_readlink_snapshot(",
                       "bool vfs_stat(", "ssize_t vfs_node_path_snapshot(", "ssize_t vfs_path_snapshot(", "int vfs_path_stat_snapshot(",
-                      "bool vfs_node_try_retain(", "int vfs_resolve_owned("):
+                      "void vfs_node_retain(", "bool vfs_node_try_retain(", "int vfs_resolve_owned("):
         code += function_definition(source, signature) + "\n"
     code += r'''
 static vfs_node_t *add(vfs_node_t *parent,const char *name,vfs_node_type_t type,const char *target) {

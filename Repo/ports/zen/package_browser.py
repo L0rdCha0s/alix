@@ -14,6 +14,17 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def copy_materialized(source, destination):
+    source = Path(source).resolve(strict=True)
+    if os.uname().sysname == "Darwin":
+        cloned = subprocess.run(["cp", "-c", str(source), str(destination)], capture_output=True)
+        if cloned.returncode == 0:
+            shutil.copystat(source, destination)
+            return str(destination)
+        Path(destination).unlink(missing_ok=True)
+    return shutil.copy2(source, destination)
+
+
 def load_image(path):
     with path.open("rb") as stream:
         header = stream.read(64)
@@ -84,8 +95,10 @@ def main():
                            cwd=objdir, env=environment, check=True)
         stage = Path(temporary) / "browser"
         # Mozilla's FasterMake tree uses host source symlinks. Materialize the
-        # bytes so the guest never depends on a host checkout path.
+        # bytes so the guest never depends on a host checkout path. APFS clones
+        # keep independent snapshots without duplicating multi-GiB debug data.
         shutil.copytree(source, stage, symlinks=False,
+                        copy_function=copy_materialized,
                         ignore=shutil.ignore_patterns("gmp-fake", "gmp-fakeopenh264",
                                                      "alix-browser-manifest.json"))
         chrome_resources = []
@@ -97,6 +110,11 @@ def main():
                 missing = sorted(set(chrome_resources) - set(resources.namelist()))
             if missing:
                 raise RuntimeError("missing native Zen chrome resources: " + ", ".join(missing))
+        platform_defaults = ["defaults/pref/alix.js"]
+        for relative in platform_defaults:
+            destination = stage / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(Path(__file__).parent / relative, destination)
         native = []
         files = []
         for path in sorted(stage.rglob("*")):
@@ -112,8 +130,8 @@ def main():
                 stripped = path.with_name(path.name + ".stripped")
                 # The native loader uses dynamic symbols in PT_LOAD. Full
                 # local symbol/string tables are development data, and AlixFS
-                # keeps installed file bytes resident even when ELF does not
-                # map those sections. Preserve every load/TLS byte below.
+                # materializes file bytes on first use, including sections
+                # that the ELF loader does not map. Preserve every load/TLS byte below.
                 subprocess.run(["x86_64-elf-strip", "--strip-all", "-o", str(stripped), str(path)], check=True)
                 if load_image(stripped) != image:
                     raise RuntimeError(f"stripping changed browser load/TLS bytes: {relative}")
@@ -124,8 +142,10 @@ def main():
                 digest = hashlib.file_digest(stream, "sha256").hexdigest()
             files.append({"path": relative, "bytes": path.stat().st_size, "sha256": digest})
         manifest = {"source": str(original), "format": "staged" if args.source else "omni",
+                    "staging": "apfs-clone-with-copy2-fallback" if os.uname().sysname == "Darwin" else "copy2",
                     "entry": args.entry, "native_images": native,
                     "files": files, "updater_present": (stage / "updater").is_file(),
+                    "platform_defaults": platform_defaults,
                     "verified_chrome_resources": chrome_resources}
         (stage / "alix-browser-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
         shutil.move(stage, args.output)

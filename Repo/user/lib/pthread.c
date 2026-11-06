@@ -661,6 +661,22 @@ int pthread_getattr_np(pthread_t thread, pthread_attr_t *attribute)
     return 0;
 }
 
+int pthread_setpriority_np(pthread_t thread, int priority)
+{
+    if (!thread || priority < PTHREAD_PRIORITY_BACKGROUND_NP || priority > PTHREAD_PRIORITY_HIGH_NP)
+        return EINVAL;
+    return pthread_status(sys_thread_priority(thread, priority));
+}
+
+int pthread_getpriority_np(pthread_t thread, int *priority)
+{
+    if (!thread || !priority) return EINVAL;
+    int result = sys_thread_priority(thread, SYSCALL_THREAD_PRIORITY_QUERY);
+    if (result < 0) return pthread_status(result);
+    *priority = result;
+    return 0;
+}
+
 int pthread_setname_np(pthread_t thread, const char *name)
 {
     if (!thread || !name) return EINVAL;

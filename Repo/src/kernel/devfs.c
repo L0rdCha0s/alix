@@ -1,5 +1,6 @@
 #include "devfs.h"
 #include "vfs.h"
+#include "spinlock.h"
 
 /*
  * src/kernel/devfs.c
@@ -13,13 +14,17 @@
  */
 
 static vfs_node_t *g_dev_root = NULL;
+static spinlock_t g_registration_lock = {0};
 
 static void devfs_set_mutable(bool allow)
 {
+    /* Registration changes a shared subtree policy across several VFS calls. */
+    if (allow) spinlock_lock(&g_registration_lock);
     if (g_dev_root)
     {
         vfs_set_subtree_mutable(g_dev_root, allow);
     }
+    if (!allow) spinlock_unlock(&g_registration_lock);
 }
 
 static vfs_node_t *devfs_root_node(void)

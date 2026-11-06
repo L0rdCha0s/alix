@@ -521,13 +521,14 @@
 +SOURCES += ["nsUserIdleServiceAlix.cpp"]
 --- /dev/null
 +++ b/widget/alix/nsAppShell.cpp
-@@ -0,0 +1,77 @@
+@@ -0,0 +1,83 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 +#include "nsAppShell.h"
 +#include "HeadlessScreenHelper.h"
 +#include "gfxPlatform.h"
++#include "mozilla/Hal.h"
 +#include "mozilla/RefPtr.h"
 +#include "mozilla/widget/Screen.h"
 +#include "mozilla/widget/ScreenManager.h"
@@ -538,11 +539,16 @@
 +using namespace mozilla::widget;
 +
 +nsAppShell::nsAppShell() = default;
-+nsAppShell::~nsAppShell() = default;
++nsAppShell::~nsAppShell() {
++  if (mHalInitialized)
++    hal::Shutdown();
++}
 +nsresult nsAppShell::Init() {
 +  nsresult result = nsBaseAppShell::Init();
 +  if (NS_FAILED(result))
 +    return result;
++  hal::Init();
++  mHalInitialized = true;
 +  if (XRE_IsParentProcess() && gfxPlatform::IsHeadless()) {
 +    mHeadlessScreen = MakeUnique<HeadlessScreenHelper>();
 +  } else if (XRE_IsParentProcess()) {
@@ -601,7 +607,7 @@
 +}
 --- /dev/null
 +++ b/widget/alix/nsAppShell.h
-@@ -0,0 +1,29 @@
+@@ -0,0 +1,30 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -627,6 +633,7 @@
 +private:
 +  mozilla::Monitor mWake{"AlixAppShellWake"};
 +  bool mWakePending = false;
++  bool mHalInitialized = false;
 +  user_atk_window_control_t mDisplay{};
 +  mozilla::UniquePtr<mozilla::widget::HeadlessScreenHelper> mHeadlessScreen;
 +};
@@ -932,7 +939,7 @@
 +#endif
 --- /dev/null
 +++ b/widget/alix/nsWindow.cpp
-@@ -0,0 +1,740 @@
+@@ -0,0 +1,805 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -947,6 +954,7 @@
 +#include "mozilla/UniquePtrExtensions.h"
 +#include "mozilla/WidgetUtils.h"
 +#include "mozilla/gfx/2D.h"
++#include "mozilla/gfx/Swizzle.h"
 +#include "mozilla/widget/PlatformWidgetTypes.h"
 +#include "nsIRollupListener.h"
 +#include "nsIWidgetListener.h"
@@ -954,8 +962,12 @@
 +#include "nsThreadUtils.h"
 +#include <algorithm>
 +#include <errno.h>
++#include <stdlib.h>
 +#include <string.h>
 +#include <usyscall.h>
++#pragma GCC visibility push(default)
++#include "serial.h"
++#pragma GCC visibility pop
 +
 +using namespace mozilla;
 +using namespace mozilla::gfx;
@@ -982,7 +994,10 @@
 +    mTextInput = new AlixTextInput();
 +  return mTextInput;
 +}
-+nsWindow::nsWindow() = default;
++nsWindow::nsWindow() {
++  const char *diagnostics = getenv("ALIX_PRESENT_DIAGNOSTICS");
++  mPresentDiagnostics = diagnostics && strcmp(diagnostics, "1") == 0;
++}
 +nsWindow::~nsWindow() { DestroyImpl(); }
 +
 +bool nsWindow::Control(uint32_t operation) {
@@ -1054,6 +1069,7 @@
 +  nsIWidget::OnDestroy();
 +  nsIWidget::Destroy();
 +  MutexAutoLock lock(mSurfaceMutex);
++  ReportPresentation();
 +  if (mHandle)
 +    sys_ui_close(mHandle);
 +  mHandle = 0;
@@ -1280,9 +1296,43 @@
 +                                            SurfaceFormat::B8G8R8X8);
 +  return do_AddRef(mDrawTarget);
 +}
++void nsWindow::ReportPresentation() {
++  if (!mPresentDiagnostics || !mPresentCount)
++    return;
++  serial_printf("[alix-present] handle=%u now_ms=%llu frames=%llu pixels=%llu dirty_pixels=%llu dirty_rects=%llu map_ms=%llu copy_ms=%llu submit_ms=%llu max_map_ms=%llu max_copy_ms=%llu max_submit_ms=%llu max_gap_ms=%llu\n",
++                unsigned(mHandle), (unsigned long long)sys_monotonic_millis(),
++                (unsigned long long)mPresentCount,
++                (unsigned long long)mPresentPixels,
++                (unsigned long long)mDirtyPixels,
++                (unsigned long long)mDirtyRects,
++                (unsigned long long)mMapMillis,
++                (unsigned long long)mCopyMillis,
++                (unsigned long long)mSubmitMillis,
++                (unsigned long long)mMaxMapMillis,
++                (unsigned long long)mMaxCopyMillis,
++                (unsigned long long)mMaxSubmitMillis,
++                (unsigned long long)mMaxPresentGapMillis);
++  mPresentCount = mPresentPixels = mDirtyPixels = mDirtyRects = 0;
++  mMapMillis = mCopyMillis = mSubmitMillis = 0;
++  mMaxMapMillis = mMaxCopyMillis = mMaxSubmitMillis = 0;
++  mMaxPresentGapMillis = 0;
++}
++void nsWindow::EndRemoteDrawingInRegion(
++    DrawTarget *, const LayoutDeviceIntRegion &region) {
++  if (mPresentDiagnostics) {
++    mPendingDirtyPixels = mPendingDirtyRects = 0;
++    for (auto iter = region.RectIter(); !iter.Done(); iter.Next()) {
++      const auto &rect = iter.Get();
++      mPendingDirtyPixels += uint64_t(rect.Width()) * rect.Height();
++      ++mPendingDirtyRects;
++    }
++  }
++  EndRemoteDrawing();
++}
 +void nsWindow::EndRemoteDrawing() {
 +  if (!mDrawTarget || !mHandle)
 +    return;
++  uint64_t started = mPresentDiagnostics ? sys_monotonic_millis() : 0;
 +  RefPtr<SourceSurface> snapshot = mDrawTarget->Snapshot();
 +  RefPtr<DataSourceSurface> data =
 +      snapshot ? snapshot->GetDataSurface() : nullptr;
@@ -1304,13 +1354,35 @@
 +    mUpload = std::move(replacement);
 +    mUploadCapacity = count;
 +  }
-+  for (int row = 0; row < size.height; ++row) {
-+    auto *source = reinterpret_cast<const uint32_t *>(
-+        mapping->GetData() + row * mapping->GetStride());
-+    for (int col = 0; col < size.width; ++col)
-+      mUpload[size_t(row) * size.width + col] = source[col] | 0xff000000u;
-+  }
++  uint64_t mapped = mPresentDiagnostics ? sys_monotonic_millis() : 0;
++  if (!SwizzleData(mapping->GetData(), mapping->GetStride(),
++                   SurfaceFormat::B8G8R8X8,
++                   reinterpret_cast<uint8_t *>(mUpload.get()),
++                   size.width * sizeof(uint32_t), SurfaceFormat::B8G8R8A8,
++                   size))
++    return;
++  uint64_t copied = mPresentDiagnostics ? sys_monotonic_millis() : 0;
 +  sys_ui_present(mHandle, mUpload.get(), count * sizeof(uint32_t));
++  if (mPresentDiagnostics) {
++    uint64_t submitted = sys_monotonic_millis();
++    ++mPresentCount;
++    mPresentPixels += count;
++    mDirtyPixels += mPendingDirtyPixels;
++    mDirtyRects += mPendingDirtyRects;
++    mPendingDirtyPixels = mPendingDirtyRects = 0;
++    mMapMillis += mapped - started;
++    mCopyMillis += copied - mapped;
++    mSubmitMillis += submitted - copied;
++    mMaxMapMillis = std::max(mMaxMapMillis, mapped - started);
++    mMaxCopyMillis = std::max(mMaxCopyMillis, copied - mapped);
++    mMaxSubmitMillis = std::max(mMaxSubmitMillis, submitted - copied);
++    if (mLastPresentMillis)
++      mMaxPresentGapMillis =
++          std::max(mMaxPresentGapMillis, started - mLastPresentMillis);
++    mLastPresentMillis = started;
++    if (mPresentCount >= 120)
++      ReportPresentation();
++  }
 +}
 +void nsWindow::CleanupRemoteDrawing() {
 +  MutexAutoLock lock(mSurfaceMutex);
@@ -1675,7 +1747,7 @@
 +}
 --- /dev/null
 +++ b/widget/alix/nsWindow.h
-@@ -0,0 +1,95 @@
+@@ -0,0 +1,104 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -1731,6 +1803,8 @@
 +  void PostRender(mozilla::widget::WidgetRenderingContext *) override;
 +  already_AddRefed<DrawTarget> StartRemoteDrawing() override;
 +  void EndRemoteDrawing() override;
++  void EndRemoteDrawingInRegion(DrawTarget *,
++                                const LayoutDeviceIntRegion &) override;
 +  void CleanupRemoteDrawing() override;
 +  void CaptureRollupEvents(bool) override;
 +  static bool PumpNativeEvents();
@@ -1738,6 +1812,7 @@
 +private:
 +  ~nsWindow() override;
 +  void DestroyImpl();
++  void ReportPresentation();
 +  bool Control(uint32_t);
 +  bool SetBounds(const LayoutDeviceIntRect &);
 +  void AcceptBounds();
@@ -1769,6 +1844,12 @@
 +  RefPtr<DrawTarget> mDrawTarget;
 +  mozilla::UniquePtr<uint32_t[]> mUpload;
 +  size_t mUploadCapacity = 0;
++  bool mPresentDiagnostics = false;
++  uint64_t mPresentCount = 0, mPresentPixels = 0, mDirtyPixels = 0,
++           mDirtyRects = 0, mPendingDirtyPixels = 0, mPendingDirtyRects = 0,
++           mMapMillis = 0, mCopyMillis = 0, mSubmitMillis = 0,
++           mMaxMapMillis = 0, mMaxCopyMillis = 0, mMaxSubmitMillis = 0,
++           mLastPresentMillis = 0, mMaxPresentGapMillis = 0;
 +};
 +#endif
 --- /dev/null

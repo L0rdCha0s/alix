@@ -44,6 +44,7 @@ void vfs_mapping_pull_locked(vfs_node_t *node)
     }
     if (!changed) return;
     node->dirty = node->disk_data_dirty = true;
+    ++node->data_seq;
     ++node->dirty_seq;
     node->mtime = node->ctime = timekeeping_now_seconds();
     vfs_queue_dirty_node(node);
@@ -119,6 +120,17 @@ int vfs_mapping_create_access(vfs_node_t *node, uint64_t offset, size_t length,
     *out = NULL;
     if (!node || !owner || !length || (offset & (FILE_PAGE-1)) ||
         (length & (FILE_PAGE-1)) || offset > INT64_MAX || length > INT64_MAX-offset) return -EINVAL;
+    if (__atomic_load_n(&node->data_unloaded, __ATOMIC_ACQUIRE))
+    {
+        /* Invalid metadata-only requests must not materialize a whole DSO. */
+        spinlock_lock(&node->data_lock);
+        int bounds = node->type != VFS_NODE_FILE || node->read_cb || node->write_cb ? -ENOTSUP :
+            offset >= node->size || length - FILE_PAGE >= node->size - offset ? -ENXIO : 0;
+        spinlock_unlock(&node->data_lock);
+        if (bounds) return bounds;
+    }
+    int prepared = vfs_prepare_data(node);
+    if (prepared) return prepared;
     vfs_file_mapping_t *m = calloc(1, sizeof(*m));
     if (!m) return -ENOMEM;
     m->count = length / FILE_PAGE; m->shared = shared; m->owner = owner;

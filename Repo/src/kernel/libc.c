@@ -299,3 +299,37 @@ int snprintf(char *buffer, size_t size, const char *format, ...)
     if (size) buffer[output.used < size ? output.used : size - 1] = 0;
     return context.error || output.used > INT32_MAX ? -1 : (int)output.used;
 }
+
+/* Constant-stack heapsort; same ordering algorithm as the user runtime. */
+static void libc_sort_swap(uint8_t *a, uint8_t *b, size_t width)
+{
+    while (width--) { uint8_t value = *a; *a++ = *b; *b++ = value; }
+}
+
+static void libc_sort_sift(uint8_t *base, size_t root, size_t count, size_t width,
+                           int (*compare)(const void *, const void *))
+{
+    while (root < count / 2)
+    {
+        size_t child = root * 2 + 1;
+        if (child + 1 < count && compare(base + child * width, base + (child + 1) * width) < 0)
+            ++child;
+        if (compare(base + root * width, base + child * width) >= 0) return;
+        libc_sort_swap(base + root * width, base + child * width, width);
+        root = child;
+    }
+}
+
+void qsort(void *base, size_t count, size_t width, int (*compare)(const void *, const void *))
+{
+    if (count < 2) return;
+    if (!base || !compare || !width || count > (size_t)-1 / width)
+    { return; }
+    uint8_t *bytes = (uint8_t *)base;
+    for (size_t root = count / 2; root > 0; ) libc_sort_sift(bytes, --root, count, width, compare);
+    for (size_t remaining = count; remaining > 1; )
+    {
+        libc_sort_swap(bytes, bytes + (--remaining) * width, width);
+        libc_sort_sift(bytes, 0, remaining, width, compare);
+    }
+}

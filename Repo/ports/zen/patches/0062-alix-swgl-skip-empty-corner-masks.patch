@@ -1,0 +1,48 @@
+--- a/gfx/wr/webrender/res/ellipse.glsl
++++ b/gfx/wr/webrender/res/ellipse.glsl
+@@ -413,18 +413,45 @@
+     vec2 i_br = (corner_shapes.z == 1.0) ? vec2(0.0) : clamped_inset.zy;
+     vec2 i_bl = (corner_shapes.w == 1.0) ? vec2(0.0) : clamped_inset.zw;
+ 
++    // SWGL predicates varying branches after evaluating their expressions.
++    // Skip expensive corner distances when no SIMD lane can use the result,
++    // while retaining the original per-lane mask for partially covered groups.
++#ifdef SWGL
++    if (anyInvocations(p_tl.x >= i_tl.x && p_tl.y >= i_tl.y)) {
++#endif
+     if (p_tl.x >= i_tl.x && p_tl.y >= i_tl.y) {
+         d = max(d, distance_to_shaped_corner(p_tl, center_radius_tl.zw, corner_shapes.x));
+     }
++#ifdef SWGL
++    }
++#endif
++#ifdef SWGL
++    if (anyInvocations(p_tr.x >= i_tr.x && p_tr.y >= i_tr.y)) {
++#endif
+     if (p_tr.x >= i_tr.x && p_tr.y >= i_tr.y) {
+         d = max(d, distance_to_shaped_corner(p_tr, center_radius_tr.zw, corner_shapes.y));
+     }
++#ifdef SWGL
++    }
++#endif
++#ifdef SWGL
++    if (anyInvocations(p_br.x >= i_br.x && p_br.y >= i_br.y)) {
++#endif
+     if (p_br.x >= i_br.x && p_br.y >= i_br.y) {
+         d = max(d, distance_to_shaped_corner(p_br, center_radius_br.zw, corner_shapes.z));
+     }
++#ifdef SWGL
++    }
++#endif
++#ifdef SWGL
++    if (anyInvocations(p_bl.x >= i_bl.x && p_bl.y >= i_bl.y)) {
++#endif
+     if (p_bl.x >= i_bl.x && p_bl.y >= i_bl.y) {
+         d = max(d, distance_to_shaped_corner(p_bl, center_radius_bl.zw, corner_shapes.w));
+     }
++#ifdef SWGL
++    }
++#endif
+ 
+     return d;
+ }

@@ -58,6 +58,7 @@ static void sleep_queue_insert(thread_t *value) {
 static void process_yield(void) { assert(!locked); ++yields; }
 static void scheduler_schedule(bool requeue) { assert(!locked && !requeue); ++schedules; }
 '''
+program += function_definition(source, "static void process_sleep_ticks_impl(")
 program += function_definition(source, "void process_sleep_ticks(")
 program += r'''
 static void reset(unsigned enabled) {

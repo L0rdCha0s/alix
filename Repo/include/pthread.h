@@ -23,6 +23,9 @@ typedef alix_once_t pthread_once_t;
 #define PTHREAD_STACK_MIN 16384u
 #define PTHREAD_DESTRUCTOR_ITERATIONS 4
 #define PTHREAD_CANCELED ((void *)-1)
+#define PTHREAD_PRIORITY_BACKGROUND_NP 0
+#define PTHREAD_PRIORITY_NORMAL_NP 1
+#define PTHREAD_PRIORITY_HIGH_NP 2
 #define PTHREAD_ONCE_INIT {0}
 #define PTHREAD_MUTEX_INITIALIZER {{0},0,0,0,PTHREAD_MUTEX_NORMAL,0x50544D58u}
 #define PTHREAD_COND_INITIALIZER {{0},0,CLOCK_REALTIME,0x50544356u}
@@ -104,6 +107,9 @@ int pthread_equal(pthread_t left, pthread_t right);
 void pthread_exit(void *result) __attribute__((__noreturn__));
 int pthread_setname_np(pthread_t thread, const char *name);
 int pthread_getname_np(pthread_t thread, char *name, size_t size);
+/* Alix base scheduling hints; focus and reserved UI overrides remain in effect. */
+int pthread_setpriority_np(pthread_t thread, int priority);
+int pthread_getpriority_np(pthread_t thread, int *priority);
 
 int pthread_mutexattr_init(pthread_mutexattr_t *attribute);
 int pthread_mutexattr_destroy(pthread_mutexattr_t *attribute);

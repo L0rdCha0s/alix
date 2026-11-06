@@ -46,6 +46,8 @@ struct thread {
     process_t *process; thread_t *process_next, *wait_queue_next;
     io_request_t *io_request; wait_queue_t *waiting_queue; wait_queue_t join_queue;
     bool io_interruptible, caught_pending;
+    bool io_admission_pending;
+    uint64_t io_admission_sequence, sleep_until_tick;
     bool alive, pending_destroy, exited, in_transition, sleeping, in_run_queue, wake_pending, preempt_pending;
     uint32_t running_cpu, time_slice_remaining; int state, exit_status;
 };
@@ -85,6 +87,8 @@ static bool process_signal_pending_locked(thread_t *thread) { CHECK(scheduler_lo
 static bool thread_in_run_queue_load(const thread_t *thread) { return thread->in_run_queue; }
 static void remove_from_run_queue_locked(thread_t *thread) { CHECK(scheduler_locked); thread->in_run_queue=false; }
 static void sleep_queue_remove(thread_t *thread) { CHECK(scheduler_locked); thread->sleeping=false; }
+static void sleep_queue_insert(thread_t *thread) { CHECK(scheduler_locked); thread->sleeping=true; }
+static uint64_t timer_ticks(void) { return 20; }
 static uint32_t scheduler_select_target_cpu(thread_t *thread) { (void)thread; return 0; }
 static void enqueue_thread_on_cpu_locked(thread_t *thread,uint32_t cpu) {
     (void)cpu; CHECK(scheduler_locked && !thread->exited && thread->state!=THREAD_STATE_ZOMBIE); thread->in_run_queue=true;

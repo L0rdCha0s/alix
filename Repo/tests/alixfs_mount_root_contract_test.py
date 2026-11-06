@@ -31,7 +31,8 @@ struct vfs_node {
     vfs_node_type_t type; vfs_node_t *parent,*first_child,*next_sibling; vfs_mount_t *mount;
     char *name,*data; size_t size,capacity,pending_dirty_bytes; spinlock_t data_lock;
     bool allow_mutation,dirty,disk_meta_dirty,disk_data_dirty,disk_name_dirty;
-    uint32_t disk_id,uid,gid,refcount,permissions; uint64_t atime,mtime,ctime,dirty_seq;
+    bool data_unloaded;
+    uint32_t disk_id,uid,gid,refcount,permissions; uint64_t atime,mtime,ctime,dirty_seq,data_seq,disk_data_offset;
 };
 /* This backend-only fixture has no mapped pages; native mapping tests cover
  * cache synchronization through the real paging layer. */
@@ -146,8 +147,15 @@ static void mount_read_regression(void) {
     for(vfs_node_t *file=dir->first_child;file;file=file->next_sibling) {
         unsigned id=file->disk_id-1;CHECK(file->parent==dir&&id<256);
         CHECK(file->size==(id==128?256*1024:37));
-        for(size_t j=0;j<file->size;++j)CHECK((unsigned char)file->data[j]==(unsigned char)id);
-        CHECK(file->data[file->size]==0);++count;
+        char *contents=file->data;
+        if(file->data_unloaded) {
+            CHECK(!file->data&&!file->capacity);
+            contents=malloc(file->size+1);CHECK(contents);
+            CHECK(alixfs_mount_read_data(fs,file->disk_data_offset,contents,file->size));
+            contents[file->size]=0;
+        }
+        for(size_t j=0;j<file->size;++j)CHECK((unsigned char)contents[j]==(unsigned char)id);
+        CHECK(contents[file->size]==0);if(file->data_unloaded)free(contents);++count;
     }
     CHECK(count==256);
     alixfs_mount_destroy(fs);free_node(root);

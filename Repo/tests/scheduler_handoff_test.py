@@ -35,7 +35,7 @@ typedef struct { bool locked; } spinlock_t;
 typedef struct { unsigned lifetime_state, state; } process_t;
 typedef struct thread {
     unsigned state; bool is_idle, wake_pending, preempt_pending, in_transition, context_valid, in_run_queue;
-    uint32_t running_cpu, time_slice_remaining; uint64_t last_scheduled_tick; spinlock_t context_lock;
+    uint32_t running_cpu, time_slice_remaining; uint64_t last_scheduled_tick, ready_queue_tick; spinlock_t context_lock;
     bool affinity_enabled; uint32_t affinity_cpu, priority;
     bool pending_destroy, exited; process_t *process;
     struct { uint64_t pick_calls, pick_tsc; } scheduler_cost;
@@ -49,6 +49,7 @@ static run_queue_t enqueue_queues[2];
 static bool testing_enqueue;
 static unsigned enqueue_locks;
 static uint64_t g_scheduler_switch_count, g_cpu_switch_counts[2];
+static uint64_t g_sched_terminal_current_rejections;
 static bool scheduler_locked, claimed, reject_first;
 static uint64_t irq_flags, last_saved_flags;
 static unsigned current_cpu, selections, switches, unsafe_unlocks;

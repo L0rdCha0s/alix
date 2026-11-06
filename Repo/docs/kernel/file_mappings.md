@@ -19,8 +19,9 @@ page ownership, and fork copies already dirty private pages into the child.
 Shared mappings from read-only descriptors allocate/cache physical pages on
 first use. Splits preserve their original backing offsets. The per-file page
 index avoids repeated linked-list searches while constructing large mappings.
-Private mappings now use copy-on-write. Clean source file contents remain
-resident in the VFS; dirty private pages can use the [swap pager](paging.md).
+Private mappings now use copy-on-write. Mapping preparation materializes a lazy
+AlixFS payload on a protected storage worker before publishing a mapping. Clean
+source file contents then remain resident in the VFS; dirty private pages can use the [swap pager](paging.md).
 This does not introduce a disk-backed, evictable AlixFS file cache.
 Hardware COW faults complete their TLB barrier before resuming. COW performed
 by a checked kernel copy records a completion ticket under the memory lock;

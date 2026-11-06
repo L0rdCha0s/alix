@@ -97,7 +97,7 @@ def main():
         *(["ac_add_options --disable-shared-js"] if args.project == "js" else []),
         "ac_add_options --disable-tests",
         "ac_add_options --disable-debug",
-        "ac_add_options --enable-optimize",
+        "ac_add_options --enable-optimize=-O2" if args.project == "browser" else "ac_add_options --enable-optimize",
         "ac_add_options --without-system-zlib",
         *([
             "ac_add_options --with-app-name=zen",

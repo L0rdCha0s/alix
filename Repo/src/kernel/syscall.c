@@ -31,6 +31,10 @@
  * the CPUs stopped; successful file calls pay no atomic accounting cost. */
 uint64_t g_file_io_errors[128][128];
 uint64_t g_io_admission_restarts, g_io_admission_restart_ticks;
+/* Explicit debugger profiling only. Keep the read-mostly gate away from the
+ * contended counter; normal operation performs no atomic increment. */
+uint32_t g_thread_self_profile_enabled __attribute__((aligned(64)));
+uint64_t g_thread_self_profile_calls __attribute__((aligned(64)));
 
 /*
  * src/kernel/syscall.c
@@ -1539,6 +1543,9 @@ static uint64_t syscall_dispatch_inner(syscall_frame_t *frame, uint64_t vector, 
         case SYSCALL_MONOTONIC_MILLIS:
             result = (int64_t)timer_monotonic_millis();
             break;
+        case SYSCALL_MONOTONIC_RESOLUTION_NS:
+            result = (int64_t)timer_monotonic_resolution_ns();
+            break;
         case SYSCALL_GETUID:
             result = (int64_t)process_get_uid(process_current());
             break;
@@ -1554,6 +1561,8 @@ static uint64_t syscall_dispatch_inner(syscall_frame_t *frame, uint64_t vector, 
             result = syscall_do_socket_available((int)frame->rdi);
             break;
         case SYSCALL_THREAD_SELF:
+            if (__atomic_load_n(&g_thread_self_profile_enabled, __ATOMIC_RELAXED))
+                __atomic_add_fetch(&g_thread_self_profile_calls, 1, __ATOMIC_RELAXED);
             result = (int64_t)thread_current_tid();
             break;
         case SYSCALL_THREAD_SET_TLS:
@@ -1635,6 +1644,9 @@ static uint64_t syscall_dispatch_inner(syscall_frame_t *frame, uint64_t vector, 
         }
         case SYSCALL_THREAD_PREPARE_EXIT:
             result = process_user_thread_prepare_exit();
+            break;
+        case SYSCALL_THREAD_PRIORITY:
+            result = process_user_thread_priority(frame->rdi, (int32_t)frame->rsi);
             break;
         case SYSCALL_PROCESS_UPTIME_NS:
             result = (int64_t)process_current_uptime_ns();

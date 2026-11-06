@@ -1,0 +1,201 @@
+--- a/gfx/wr/webrender/src/compositor/sw_compositor.rs
++++ b/gfx/wr/webrender/src/compositor/sw_compositor.rs
+@@ -99,6 +99,131 @@
+     }
+ }
+ 
++
++// Mask bytes depend only on this geometry and the fixed texture dimensions.
++// Keep owned copies per worker context; no caller's stack or source pixels are
++// retained. Non-Alix builds keep the original compositor path.
++#[cfg(target_os = "alix")]
++const MASK_CACHE_MAX_ENTRIES: usize = 64;
++#[cfg(target_os = "alix")]
++const MASK_CACHE_MAX_ENTRY_BYTES: usize = 64 * 64;
++
++#[cfg(target_os = "alix")]
++#[derive(Copy, Clone, PartialEq)]
++struct SwCompositeMaskKey {
++    clip_rect: DeviceIntRect,
++    radii: ClipRadius,
++    tile: DeviceIntRect,
++    size: DeviceIntSize,
++}
++
++#[cfg(target_os = "alix")]
++struct SwCompositeCachedMask {
++    key: SwCompositeMaskKey,
++    pixels: Vec<u8>,
++}
++
++#[cfg(target_os = "alix")]
++struct SwCompositeMaskCache {
++    enabled: bool,
++    diagnostics: bool,
++    hits: u64,
++    misses: u64,
++    entries: VecDeque<SwCompositeCachedMask>,
++}
++
++#[cfg(target_os = "alix")]
++unsafe extern "C" {
++    fn serial_printf(format: *const std::ffi::c_char, ...);
++}
++
++#[cfg(target_os = "alix")]
++macro_rules! mask_cache_log {
++    ($format:literal, $($argument:expr),* $(,)?) => {
++        unsafe {
++            serial_printf(concat!($format, "\0").as_ptr().cast(), $($argument),*);
++        }
++    };
++}
++
++#[cfg(target_os = "alix")]
++impl SwCompositeMaskCache {
++    fn new() -> Self {
++        let enabled = std::env::var_os("ALIX_SWGL_MASK_CACHE").as_deref()
++            != Some(std::ffi::OsStr::new("0"));
++        let diagnostics = std::env::var_os("ALIX_PRESENT_DIAGNOSTICS").as_deref()
++            == Some(std::ffi::OsStr::new("1"));
++        if std::env::var_os("ALIX_SWGL_MASK_CACHE_READBACK").as_deref()
++            == Some(std::ffi::OsStr::new("1")) {
++            mask_cache_log!(
++                "ALIX_SW_MASK_CACHE_CONFIG,enabled=%u,max_entries=%llu,max_entry_bytes=%llu\n",
++                enabled as u32,
++                MASK_CACHE_MAX_ENTRIES as u64,
++                MASK_CACHE_MAX_ENTRY_BYTES as u64,
++            );
++        }
++        Self { enabled, diagnostics, hits: 0, misses: 0, entries: VecDeque::new() }
++    }
++
++    fn restore(&mut self, key: SwCompositeMaskKey, pixels: &mut [u8]) -> bool {
++        if self.enabled {
++            if let Some(index) = self.entries.iter().position(|entry| entry.key == key) {
++                let entry = self.entries.remove(index).unwrap();
++                pixels.copy_from_slice(&entry.pixels);
++                self.entries.push_back(entry);
++                self.hits += 1;
++                return true;
++            }
++        }
++        self.misses += 1;
++        false
++    }
++
++    fn remember(&mut self, key: SwCompositeMaskKey, pixels: &[u8]) {
++        if !self.enabled || pixels.len() > MASK_CACHE_MAX_ENTRY_BYTES {
++            return;
++        }
++        let mut owned = if self.entries.len() == MASK_CACHE_MAX_ENTRIES {
++            self.entries.pop_front().unwrap().pixels
++        } else {
++            Vec::new()
++        };
++        owned.clear();
++        // Caching is optional. Allocation failure leaves the already computed
++        // mask usable and preserves the original rendering behavior.
++        if owned.try_reserve_exact(pixels.len()).is_err() {
++            return;
++        }
++        owned.extend_from_slice(pixels);
++        if self.entries.try_reserve(1).is_err() {
++            return;
++        }
++        self.entries.push_back(SwCompositeCachedMask { key, pixels: owned });
++    }
++
++    fn report(&self, context: *const SwCompositeJobContext) {
++        if !self.diagnostics || self.hits + self.misses == 0 {
++            return;
++        }
++        let bytes: usize = self.entries.iter().map(|entry| entry.pixels.len()).sum();
++        mask_cache_log!(
++            "ALIX_SW_MASK_CACHE_STATS,context=%p,enabled=%u,hits=%llu,misses=%llu,entries=%llu,bytes=%llu\n",
++            context.cast::<std::ffi::c_void>(),
++            self.enabled as u32,
++            self.hits,
++            self.misses,
++            self.entries.len() as u64,
++            bytes as u64,
++        );
++    }
++
++    fn report_if_due(&self, context: *const SwCompositeJobContext) {
++        if self.diagnostics && (self.hits + self.misses) % 120 == 0 {
++            self.report(context);
++        }
++    }
++}
++
+ // Persistent context that is stored per-thread, and available for use by composite
+ // jobs as required.
+ pub struct SwCompositeJobContext {
+@@ -106,6 +231,8 @@
+     mask: swgl::LockedResource,
+     // Fixed size RGBA8 texture that can be used as a temporary indirection buffer
+     indirect: swgl::LockedResource,
++    #[cfg(target_os = "alix")]
++    mask_cache: Mutex<SwCompositeMaskCache>,
+ }
+ 
+ // Persistent context for mask and indirection buffers, one per thread
+@@ -130,6 +257,14 @@
+         } else {
+             &self.main
+         }
++    }
++}
++
++#[cfg(target_os = "alix")]
++impl Drop for SwCompositeJobContext {
++    fn drop(&mut self) {
++        let context = self as *const Self;
++        self.mask_cache.lock().unwrap().report(context);
+     }
+ }
+ 
+@@ -168,6 +303,8 @@
+         SwCompositeJobContext {
+             indirect,
+             mask,
++            #[cfg(target_os = "alix")]
++            mask_cache: Mutex::new(SwCompositeMaskCache::new()),
+         }
+     }
+ }
+@@ -414,6 +551,21 @@
+             )
+         };
+ 
++        #[cfg(target_os = "alix")]
++        let key = SwCompositeMaskKey {
++            clip_rect: self.rounded_clip.rect,
++            radii: self.rounded_clip.radii,
++            tile: *band_clip,
++            size: DeviceIntSize::new(mask_width, mask_height),
++        };
++        #[cfg(target_os = "alix")]
++        let mut cache = ctx.mask_cache.lock().unwrap();
++        #[cfg(target_os = "alix")]
++        if cache.restore(key, mask_pixels) {
++            cache.report_if_due(ctx);
++            return;
++        }
++
+         // Rounded rect SDF function taken from the existing WR mask shaders.
+         // No doubt this could be done more efficiently, however it typically
+         // is run on only a very small number of pixels, so it's unlikely to
+@@ -465,6 +617,11 @@
+                 let d = (0.5 - d).min(1.0).max(0.0);
+                 mask_pixels[i] = (d * 255.0) as u8;
+             }
++        }
++        #[cfg(target_os = "alix")]
++        {
++            cache.remember(key, mask_pixels);
++            cache.report_if_due(ctx);
+         }
+     }
+ 

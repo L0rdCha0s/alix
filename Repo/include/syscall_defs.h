@@ -85,6 +85,8 @@ typedef enum
     SYSCALL_VM_FILE_MAP = 76,
     SYSCALL_VM_SYNC = 77,
     SYSCALL_NET_ROUTE = 78,
+    SYSCALL_MONOTONIC_RESOLUTION_NS = 79,
+    SYSCALL_THREAD_PRIORITY = 80,
 } syscall_id_t;
 
 /* Physical RAM counts in 4096-byte pages. TOTAL is the boot E820 usable RAM
@@ -411,6 +413,10 @@ typedef struct syscall_timezone_info
 
 #define SYSCALL_PROCESS_NAME_MAX 32
 #define SYSCALL_THREAD_INFO_MAIN 1u
+#define SYSCALL_THREAD_PRIORITY_QUERY (-1)
+#define SYSCALL_THREAD_PRIORITY_BACKGROUND 0
+#define SYSCALL_THREAD_PRIORITY_NORMAL 1
+#define SYSCALL_THREAD_PRIORITY_HIGH 2
 #define SYSCALL_THREAD_INFO_DETACHED 2u
 
 typedef struct syscall_thread_info

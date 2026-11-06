@@ -9,6 +9,9 @@ bool io_vfs_service_start(void);
 int io_vfs_service_snapshot(io_service_status_t *out);
 /* Borrowed kernel-lifetime service for other native VFS entry points. */
 io_service_t *io_vfs_service_current(void);
+/* Finite kernel lazy-read continuation. Pins the file in a registered request;
+ * no caller buffer or stack is retained by the protected storage worker. */
+int io_vfs_prepare_data_kernel(struct vfs_node *node);
 int64_t io_vfs_directory_user(uint32_t operation, int handle, void *argument, size_t bytes);
 
 ssize_t io_vfs_readlink_user(const char *path, void *buffer, size_t capacity);

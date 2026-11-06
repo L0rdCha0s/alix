@@ -40,6 +40,7 @@ static uint32_t g_user_file_start;
 /* Monotonic diagnostic counters, readable by the browser harness through GDB. */
 static uint64_t g_user_file_inline_socket, g_user_file_inline_poll;
 static uint64_t g_user_file_inline_pipe;
+static uint64_t g_user_file_inline_audio;
 /* Submitted native TCP data requests, indexed read/write. Payload bytes are
  * reserved/zeroed for reads and also captured from userspace for writes. */
 static uint64_t g_user_tcp_capture_calls[2], g_user_tcp_capture_bytes[2];
@@ -237,6 +238,21 @@ static int user_file_submit(user_file_service_t kind, io_request_t *request)
                 else __atomic_add_fetch(&g_user_file_inline_pipe, 1, __ATOMIC_RELAXED);
                 return result;
             }
+        }
+    }
+    if (kind == USER_AUDIO && io_audio_description_valid(description) &&
+        io_request_buffer_size(request) >= sizeof(io_audio_operation_t))
+    {
+        /* Status and available PCM writes are bounded. Keep the registered
+         * request and captured data; queue only when readiness is required. */
+        io_service_result_t completed = {.result = -EIO, .description_owned = NULL};
+        if (io_audio_execute(request, &completed))
+        {
+            if (completed.description_owned) fatal("inline audio returned an owner");
+            int result = io_request_complete_inline(request, completed.result);
+            if (result) user_file_abort(request);
+            else __atomic_add_fetch(&g_user_file_inline_audio, 1, __ATOMIC_RELAXED);
+            return result;
         }
     }
     if (kind == USER_TCP && io_tcp_description_valid(description) &&

@@ -1,0 +1,45 @@
+--- a/gfx/wr/swgl/src/composite.h
++++ b/gfx/wr/swgl/src/composite.h
+@@ -112,15 +112,26 @@
+   memcpy(dst, src, span * sizeof(P));
+ }
+ 
++static inline void composite_chunk(uint32_t* dst, PackedRGBA8 packed) {
++  U32 words = bit_cast<U32>(packed);
++  if ((packed[3] & packed[7] & packed[11] & packed[15]) == 255) {
++    unaligned_store(dst, packed);
++    return;
++  }
++  if ((words.x | words.y | words.z | words.w) == 0) {
++    return;
++  }
++  WideRGBA8 srcpx = unpack(packed);
++  WideRGBA8 dstpx = unpack(unaligned_load<PackedRGBA8>(dst));
++  unaligned_store(dst, pack(srcpx + dstpx - muldiv255(dstpx, alphas(srcpx))));
++}
++
+ template <>
+ void copy_row<true, uint32_t>(uint32_t* dst, const uint32_t* src, int span) {
+   // No scaling, so just do a fast composite.
+   auto* end = dst + span;
+   while (dst + 4 <= end) {
+-    WideRGBA8 srcpx = unpack(unaligned_load<PackedRGBA8>(src));
+-    WideRGBA8 dstpx = unpack(unaligned_load<PackedRGBA8>(dst));
+-    PackedRGBA8 r = pack(srcpx + dstpx - muldiv255(dstpx, alphas(srcpx)));
+-    unaligned_store(dst, r);
++    composite_chunk(dst, unaligned_load<PackedRGBA8>(src));
+     src += 4;
+     dst += 4;
+   }
+@@ -170,10 +181,7 @@
+     for (frac += srcWidth; frac >= dstWidth; frac -= dstWidth) {
+       src++;
+     }
+-    WideRGBA8 srcpx = unpack(bit_cast<PackedRGBA8>(srcn));
+-    WideRGBA8 dstpx = unpack(unaligned_load<PackedRGBA8>(dst));
+-    PackedRGBA8 r = pack(srcpx + dstpx - muldiv255(dstpx, alphas(srcpx)));
+-    unaligned_store(dst, r);
++    composite_chunk(dst, bit_cast<PackedRGBA8>(srcn));
+   }
+   if (dst < end) {
+     // Process any remaining pixels. Try to gather as many pixels as possible

@@ -223,7 +223,7 @@ process_t *allocate_process(const char *name, bool is_user)
         process_create_log(name, "pid_exhausted");
         return NULL;
     }
-    proc->started_monotonic_ticks = timer_ticks();
+    proc->started_monotonic_millis = timer_monotonic_millis();
     proc->state = PROCESS_STATE_READY;
     proc->lifetime_state = PROCESS_LIFETIME_ALIVE;
     bool space_ready = false;

@@ -145,6 +145,11 @@ bool vfs_try_read_data_at(vfs_node_t *file, size_t offset, void *buffer, size_t 
                           ssize_t *result);
 bool vfs_try_stat_data(vfs_node_t *file, vfs_stat_snapshot_t *output);
 bool vfs_try_node_stat_info(vfs_node_t *file, vfs_stat_info_t *output);
+/* Protected caller, retained cwd, captured kernel path. Bounded try-lock
+ * lookup/snapshot; false leaves output/result untouched and requires a worker.
+ * True returns a snapshot or a lookup error. No borrowed node escapes. */
+bool vfs_try_path_stat_info(vfs_node_t *cwd, const char *path, bool follow_final,
+                            uint32_t uid, uint32_t gid, vfs_stat_info_t *output, int *result);
 ssize_t vfs_write_data_at(vfs_node_t *file, size_t offset, const void *data, size_t count);
 /* Select EOF and commit the complete write under the same node data lock.
  * position is caller-owned synchronous state, never retained by the VFS. */
@@ -211,6 +216,9 @@ bool vfs_force_symlink(vfs_node_t *cwd, const char *target_path, const char *lin
 void vfs_set_subtree_mutable(vfs_node_t *node, bool allow);
 /* Acquire/release references; nodes live until the last ref (tree + FDs) is released. */
 void vfs_node_retain(vfs_node_t *node);
+/* Caller keeps node alive; no namespace/data/spinlock held. Large file data
+ * loads through a protected continuation and stays resident after success. */
+int vfs_prepare_data(vfs_node_t *node);
 /* Input must already have an owning reference or tree/owner lock protection. */
 bool vfs_node_try_retain(vfs_node_t *node);
 /* Protected worker only. Follows the final link; retains before tree unlock. */

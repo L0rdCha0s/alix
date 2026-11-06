@@ -18,6 +18,7 @@
 #include "procfs.h"
 #include "smp.h"
 #include "entropy.h"
+#include "io_vfs_service.h"
 
 extern void storage_request_flush(void);
 
@@ -121,6 +122,16 @@ static bool vfs_sync_lock_acquire(vfs_mount_t *mount)
     if (!mount)
     {
         return false;
+    }
+    /* wait_queue_wait cannot evaluate a predicate before there is a current
+     * thread. Bootstrap reads must still claim the gate, rather than silently
+     * proceeding as if that wait acquired it. */
+    if (!thread_current())
+    {
+        spinlock_lock(&mount->sync_lock.waiters.lock);
+        bool acquired = vfs_sync_lock_predicate(mount);
+        spinlock_unlock(&mount->sync_lock.waiters.lock);
+        return acquired;
     }
     wait_queue_wait(&mount->sync_lock.waiters, vfs_sync_lock_predicate, mount);
     return true;
@@ -397,6 +408,66 @@ void vfs_node_release_owned(vfs_node_t *node)
     vfs_tree_lock_release();
 }
 
+uint64_t g_vfs_lazy_loads, g_vfs_lazy_load_bytes, g_vfs_lazy_load_failures;
+
+int vfs_prepare_data(vfs_node_t *node)
+{
+    if (!node) return -EINVAL;
+    /* No eviction: once published, the existing buffer/mapping lifetime
+     * contracts are unchanged. Metadata-only users never enter this path. */
+    if (!__atomic_load_n(&node->data_unloaded, __ATOMIC_ACQUIRE)) return 0;
+    if (spinlock_preempt_disabled()) return -EAGAIN;
+    if (thread_current() && !process_current_is_kernel_service() && io_vfs_service_current())
+        return io_vfs_prepare_data_kernel(node);
+
+    /* Only an uncancellable worker, or pre-service bootstrap, owns this finite
+     * continuation. Serialize with extent relocation before taking data_lock. */
+    vfs_node_retain(node);
+    vfs_mount_t *mount = node->mount;
+    int error = !mount || !mount->backend ? -EIO : 0;
+    bool gated = !error && vfs_sync_lock_acquire(mount);
+    if (!error && !gated) error = -EAGAIN;
+    char *buffer = NULL;
+    if (!error)
+    {
+        spinlock_lock(&node->data_lock);
+        bool unloaded = node->data_unloaded;
+        size_t bytes = node->size;
+        uint64_t offset = node->disk_data_offset, sequence = node->data_seq;
+        spinlock_unlock(&node->data_lock);
+        if (unloaded)
+        {
+            buffer = bytes == SIZE_MAX ? NULL : malloc(bytes + 1);
+            if (!buffer) error = -ENOMEM;
+            else if (!alixfs_mount_read_data(mount->backend, offset, buffer, bytes)) error = -EIO;
+            if (!error)
+            {
+                buffer[bytes] = 0;
+                spinlock_lock(&node->data_lock);
+                if (node->data_unloaded && node->data_seq == sequence &&
+                    node->size == bytes && node->disk_data_offset == offset)
+                {
+                    node->data = buffer;
+                    node->capacity = bytes + 1;
+                    buffer = NULL;
+                    __atomic_store_n(&node->data_unloaded, false, __ATOMIC_RELEASE);
+                    __atomic_add_fetch(&g_vfs_lazy_loads, 1, __ATOMIC_RELAXED);
+                    __atomic_add_fetch(&g_vfs_lazy_load_bytes, bytes, __ATOMIC_RELAXED);
+                }
+                else if (node->data_unloaded) error = -EAGAIN;
+                /* Concurrent truncation can replace the unloaded contents;
+                 * discard the old read without overwriting the new buffer. */
+                spinlock_unlock(&node->data_lock);
+            }
+        }
+    }
+    if (gated) vfs_sync_lock_release(mount);
+    free(buffer);
+    if (error) __atomic_add_fetch(&g_vfs_lazy_load_failures, 1, __ATOMIC_RELAXED);
+    vfs_node_release_owned(node);
+    return error;
+}
+
 static void vfs_log_backpressure_event(const vfs_mount_t *mount,
                                        const char *phase,
                                        size_t dirty_bytes,
@@ -584,6 +655,7 @@ static bool vfs_assign_symlink_target(vfs_node_t *node, const char *target)
     node->data = copy;
     node->size = len;
     node->capacity = len + 1;
+    ++node->data_seq;
     vfs_unlock_node_data(node);
     if (old)
     {
@@ -862,6 +934,7 @@ static void vfs_free_subtree(vfs_node_t *node)
 static bool ensure_capacity_locked(vfs_node_t *file, size_t need)
 {
     if (!file || file->type != VFS_NODE_FILE) return false;
+    if (file->data_unloaded) return false; /* Prepare before acquiring data_lock. */
 
     if (need == SIZE_MAX) return false;
     size_t req = need + 1; /* keep a trailing '\0' */
@@ -901,6 +974,7 @@ bool vfs_reserve(vfs_node_t *file, size_t size_hint)
     {
         return true;
     }
+    if (vfs_prepare_data(file)) return false;
     bool ok = false;
     vfs_lock_node_data(file);
     ok = ensure_capacity_locked(file, size_hint);
@@ -911,6 +985,7 @@ bool vfs_reserve(vfs_node_t *file, size_t size_hint)
 static void ensure_terminator_locked(vfs_node_t *node)
 {
     if (!node || node->type != VFS_NODE_FILE) return;
+    if (node->data_unloaded) return;
     if (node->capacity == 0)
     {
         if (ensure_capacity_locked(node, 0))
@@ -921,6 +996,34 @@ static void ensure_terminator_locked(vfs_node_t *node)
         node->data[node->size] = '\0';
     else
         node->data[node->capacity - 1] = '\0';
+}
+
+/* Drop an unloaded payload without reading bytes that O_TRUNC discards.
+ * Allocate the empty buffer before changing logical contents on failure. */
+static bool vfs_truncate_data_locked(vfs_node_t *file)
+{
+    if (file->data_unloaded)
+    {
+        char *empty = malloc(64);
+        if (!empty) return false;
+        file->data = empty;
+        file->capacity = 64;
+        file->disk_data_offset = 0;
+        __atomic_store_n(&file->data_unloaded, false, __ATOMIC_RELEASE);
+    }
+    else
+    {
+        if (!ensure_capacity_locked(file, 0)) return false;
+        if (file->size)
+        {
+            memset(file->data, 0, file->size);
+            vfs_mapping_push_locked(file, 0, file->size);
+        }
+    }
+    file->size = 0;
+    file->data[0] = 0;
+    ++file->data_seq;
+    return true;
 }
 
 static void vfs_mark_mount_dirty(vfs_mount_t *mount)
@@ -2072,12 +2175,7 @@ static vfs_node_t *vfs_open_file_internal(vfs_node_t *cwd, const char *path, boo
             vfs_tree_lock_release();
             return NULL;
         }
-        if (file->size) {
-            memset(file->data, 0, file->size);
-            vfs_mapping_push_locked(file, 0, file->size);
-        }
-        file->size = 0;
-        bool ok_trunc = ensure_capacity_locked(file, 0);
+        bool ok_trunc = vfs_truncate_data_locked(file);
         if (!ok_trunc)
         {
             if (error) *error = -ENOMEM;
@@ -2171,6 +2269,12 @@ int vfs_open_legacy_handle(vfs_node_t *cwd, const char *path, bool create, bool 
     if (!out || !path || !*path) return -EINVAL;
     int error;
     *out = vfs_open_file_internal(cwd, path, create, truncate, false, true, exclusive, 0, 0, 0, 0666u, false, false, &error);
+    if (*out && (error = vfs_prepare_data(*out)) != 0)
+    {
+        vfs_node_release_owned(*out);
+        *out = NULL;
+        return error;
+    }
     return *out ? 0 : error;
 }
 
@@ -2392,16 +2496,7 @@ bool vfs_truncate(vfs_node_t *file)
     if (file->size && vfs_mapping_busy_locked(file)) {
         vfs_unlock_node_data(file); return false;
     }
-    if (file->size) {
-        memset(file->data, 0, file->size);
-        vfs_mapping_push_locked(file, 0, file->size);
-    }
-    file->size = 0;
-    bool ok = ensure_capacity_locked(file, 0);
-    if (ok)
-    {
-        file->data[0] = '\0';
-    }
+    bool ok = vfs_truncate_data_locked(file);
     vfs_unlock_node_data(file);
     if (!ok) return false;
     vfs_note_file_dirty(file, 0, 0, true);
@@ -2415,6 +2510,11 @@ int vfs_resize_data(vfs_node_t *file, uint64_t length)
     /* AlixFS chunk lengths are 32-bit and include the name/header. Do not
      * accept a mounted extent that its existing on-disk format cannot hold. */
     if (file->mount && length > UINT32_MAX - VFS_PATH_MAX - 65536u) return -EFBIG;
+    if (length)
+    {
+        int error = vfs_prepare_data(file);
+        if (error) return error;
+    }
     if (file->mount && !vfs_backpressure_wait(file->mount, (size_t)length)) return -EIO;
     vfs_lock_node_data(file);
     if (file->read_cb || file->write_cb)
@@ -2431,18 +2531,24 @@ int vfs_resize_data(vfs_node_t *file, uint64_t length)
     if (length < previous && vfs_mapping_busy_locked(file)) {
         vfs_unlock_node_data(file); return -EBUSY;
     }
-    if (!ensure_capacity_locked(file, (size_t)length))
+    if (!length && !vfs_truncate_data_locked(file))
+    {
+        vfs_unlock_node_data(file);
+        return -ENOMEM;
+    }
+    if (length && !ensure_capacity_locked(file, (size_t)length))
     {
         vfs_unlock_node_data(file);
         return -ENOMEM;
     }
     if (length > previous) memset(file->data + previous, 0, (size_t)length - previous);
-    if (length < previous) {
+    if (length && length < previous) {
         memset(file->data + (size_t)length, 0, previous - (size_t)length);
         vfs_mapping_push_locked(file, (size_t)length, previous - (size_t)length);
     }
     if (length > previous) vfs_mapping_push_locked(file, previous, (size_t)length - previous);
     file->size = (size_t)length;
+    if (length && length != previous) ++file->data_seq;
     ensure_terminator_locked(file);
     vfs_unlock_node_data(file);
     vfs_note_file_dirty(file, previous < length ? previous : (size_t)length,
@@ -2468,6 +2574,7 @@ bool vfs_append(vfs_node_t *file, const char *data, size_t len)
         vfs_unlock_node_data(file);
         return true;
     }
+    if (vfs_prepare_data(file)) return false;
 
     if (file->mount)
     {
@@ -2484,6 +2591,7 @@ bool vfs_append(vfs_node_t *file, const char *data, size_t len)
     vfs_mapping_push_locked(file, file->size, len);
     size_t start = file->size;
     file->size += len;
+    ++file->data_seq;
     ensure_terminator_locked(file);
     vfs_unlock_node_data(file);
     vfs_note_file_dirty(file, start, len, true);
@@ -2517,6 +2625,16 @@ static ssize_t vfs_read_at_internal(vfs_node_t *file, size_t offset, void *buffe
             vfs_touch_atime(file);
         }
         return read_bytes;
+    }
+
+    if (count && __atomic_load_n(&file->data_unloaded, __ATOMIC_ACQUIRE))
+    {
+        spinlock_lock(&file->data_lock);
+        bool at_end = offset >= file->size;
+        spinlock_unlock(&file->data_lock);
+        if (at_end) return 0;
+        int error = vfs_prepare_data(file);
+        if (error) return error;
     }
 
     vfs_lock_node_data(file);
@@ -2617,28 +2735,117 @@ bool vfs_try_stat_data(vfs_node_t *file, vfs_stat_snapshot_t *output)
     return true;
 }
 
+/* Limit work while a syscall caller suppresses preemption. Large namespaces
+ * and any lock/mapping work are handled by the existing protected worker. */
+#define VFS_INLINE_STAT_NODES 256u
+#define VFS_INLINE_STAT_NAME_BYTES 16384u
+
+/* Tree lock held. Never pull mapped writes or invoke a callback here. */
+static bool vfs_try_stat_info_locked(vfs_node_t *node, vfs_stat_info_t *output, size_t *nodes)
+{
+    uint64_t inode = node->object_id;
+    uint64_t device = node->mount ? node->mount->mount_point->object_id : 0;
+    if (!inode || (node->mount && !device)) return false;
+    uint32_t expected = 0;
+    if (!__atomic_compare_exchange_n(&node->data_lock.value, &expected, 1, false,
+                                      __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) return false;
+    if ((node->type != VFS_NODE_FILE && node->type != VFS_NODE_DIR && node->type != VFS_NODE_SYMLINK) ||
+        node->read_cb || node->write_cb || node->mapped_writers)
+    {
+        spinlock_unlock_raw(&node->data_lock);
+        return false;
+    }
+    uint64_t links = node == root || node->parent ? 1 : 0;
+    if (links && node->type == VFS_NODE_DIR)
+    {
+        ++links;
+        for (vfs_node_t *child = node->first_child; child; child = child->next_sibling)
+        {
+            if (!*nodes) { spinlock_unlock_raw(&node->data_lock); return false; }
+            --*nodes;
+            if (child->type == VFS_NODE_DIR) ++links;
+        }
+    }
+    *output = (vfs_stat_info_t){
+        .metadata = { .size_bytes = node->size, .type = node->type,
+                      .atime = node->atime, .mtime = node->mtime, .ctime = node->ctime },
+        .device = device + 1, .inode = inode, .links = links,
+        .uid = node->uid, .gid = node->gid, .permissions = node->permissions,
+    };
+    spinlock_unlock_raw(&node->data_lock);
+    return true;
+}
+
 bool vfs_try_node_stat_info(vfs_node_t *file, vfs_stat_info_t *output)
 {
     if (!file || !output || !spinlock_preempt_disabled()) return false;
     uint32_t expected = 0;
     if (!__atomic_compare_exchange_n(&g_vfs_tree_lock.value, &expected, 1, false,
                                       __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) return false;
-    uint64_t inode = file->object_id;
-    uint64_t device = file->mount ? file->mount->mount_point->object_id : 0;
-    if (!inode || (file->mount && !device) || !vfs_try_lock_regular_data(file))
-    {
-        vfs_tree_lock_release();
-        return false;
-    }
-    *output = (vfs_stat_info_t){
-        .metadata = { .size_bytes = file->size, .type = file->type,
-                      .atime = file->atime, .mtime = file->mtime, .ctime = file->ctime },
-        .device = device + 1, .inode = inode, .links = file == root || file->parent ? 1 : 0,
-        .uid = file->uid, .gid = file->gid, .permissions = file->permissions,
-    };
-    spinlock_unlock_raw(&file->data_lock);
+    size_t nodes = VFS_INLINE_STAT_NODES;
+    bool complete = vfs_try_stat_info_locked(file, output, &nodes);
     vfs_tree_lock_release();
-    return true;
+    return complete;
+}
+
+bool vfs_try_path_stat_info(vfs_node_t *cwd, const char *path, bool follow_final,
+                            uint32_t uid, uint32_t gid, vfs_stat_info_t *output, int *result)
+{
+    /* Preserve the worker's current lookup policy and captured identity. */
+    (void)uid; (void)gid;
+    if (!cwd || !path || !output || !result || !spinlock_preempt_disabled()) return false;
+    size_t length = strnlen(path, VFS_PATH_MAX);
+    if (!length || length == VFS_PATH_MAX)
+    { *result = length ? -ENAMETOOLONG : -ENOENT; return true; }
+    uint32_t expected = 0;
+    if (!__atomic_compare_exchange_n(&g_vfs_tree_lock.value, &expected, 1, false,
+                                      __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) return false;
+    size_t nodes = VFS_INLINE_STAT_NODES, bytes = VFS_INLINE_STAT_NAME_BYTES;
+    vfs_node_t *node = path[0] == '/' ? root : cwd;
+    const char *cursor = skip_separators(path);
+    int error = 0;
+    bool complete = true;
+    while (*cursor)
+    {
+        if (!node || node->type != VFS_NODE_DIR) { error = -ENOTDIR; goto done; }
+        const char *name = cursor;
+        while (*cursor && *cursor != '/') ++cursor;
+        size_t count = (size_t)(cursor - name);
+        if ((count == 1 && name[0] == '.') || (count == 2 && name[0] == '.' && name[1] == '.'))
+        {
+            if (count == 2 && node->parent) node = node->parent;
+            cursor = skip_separators(cursor);
+            continue;
+        }
+        vfs_node_t *child = node->first_child;
+        for (; child; child = child->next_sibling)
+        {
+            if (!nodes) goto deferred;
+            --nodes;
+            if (!child->name) continue;
+            if (count + 1 > bytes) goto deferred;
+            bytes -= count + 1;
+            if (!strncmp(child->name, name, count) && !child->name[count]) break;
+        }
+        if (!child) { error = -ENOENT; goto done; }
+        /* Expansion allocates and can visit another subtree. Let the shared
+         * worker resolver perform it with its existing link-depth/error rules.
+         * A separator follows a link even for no-follow final queries. */
+        if (child->type == VFS_NODE_SYMLINK && (*cursor || follow_final)) goto deferred;
+        bool separator = *cursor != 0;
+        node = child;
+        cursor = skip_separators(cursor);
+        if (separator && !*cursor && node->type != VFS_NODE_DIR)
+        { error = -ENOTDIR; goto done; }
+    }
+    if (!node || !vfs_try_stat_info_locked(node, output, &nodes)) goto deferred;
+    goto done;
+deferred:
+    complete = false;
+done:
+    vfs_tree_lock_release();
+    if (complete) *result = error;
+    return complete;
 }
 
 
@@ -2683,6 +2890,8 @@ static ssize_t vfs_write_at_internal(vfs_node_t *file, size_t offset, const void
     {
         return 0;
     }
+    int load_error = vfs_prepare_data(file);
+    if (load_error) return load_error;
     if (file->mount)
     {
         if (!vfs_backpressure_wait(file->mount, count)) return -EIO;
@@ -2726,6 +2935,7 @@ static ssize_t vfs_write_at_internal(vfs_node_t *file, size_t offset, const void
     }
     ensure_terminator_locked(file);
     bool size_changed = (file->size != previous_size);
+    ++file->data_seq;
     if (position) *position = end;
     vfs_unlock_node_data(file);
     vfs_note_file_dirty(file, offset, count, size_changed);
@@ -2783,6 +2993,11 @@ bool vfs_set_file_callbacks(vfs_node_t *file,
 char *vfs_data(vfs_node_t *file, size_t *size)
 {
     if (!file || file->type != VFS_NODE_FILE)
+    {
+        if (size) *size = 0;
+        return NULL;
+    }
+    if (vfs_prepare_data(file))
     {
         if (size) *size = 0;
         return NULL;
@@ -3002,15 +3217,21 @@ int vfs_rename_path(vfs_node_t *cwd, const char *old_path, const char *new_path)
         vfs_detach_child(target);
         vfs_node_release(target);
     }
+    /* Writeback copies name/parent under data_lock. Publish the rename and
+     * generation together so an old snapshot cannot clear its dirty flags. */
+    vfs_lock_node_data(node);
     uint32_t uid = node->uid, gid = node->gid;
+    char *retired_name = node->name;
     vfs_detach_child(node);
-    free(node->name);
     node->name = new_name;
     new_name = NULL;
     vfs_attach_child(new_parent, node);
     node->uid = uid;
     node->gid = gid;
     node->disk_name_dirty = true;
+    ++node->dirty_seq;
+    vfs_unlock_node_data(node);
+    free(retired_name);
     vfs_mark_meta_dirty(old_parent);
     vfs_mark_meta_dirty(new_parent);
     vfs_mark_meta_dirty(node);
@@ -4082,6 +4303,14 @@ int vfs_file_snapshot_owned(vfs_node_t *file, size_t maximum, unsigned char **da
     if (data) *data = NULL;
     if (size) *size = 0;
     if (!file || !data || !size || !maximum) return -EINVAL;
+    vfs_lock_node_data(file);
+    int invalid = file->type != VFS_NODE_FILE ? -EINVAL :
+        file->read_cb || file->write_cb ? -ENOTSUP :
+        file->size > maximum || file->size == SIZE_MAX ? -EFBIG : 0;
+    vfs_unlock_node_data(file);
+    if (invalid) return invalid;
+    int load_error = vfs_prepare_data(file);
+    if (load_error) return load_error;
     vfs_lock_node_data(file);
     int error = file->type != VFS_NODE_FILE ? -EINVAL :
         file->read_cb || file->write_cb ? -ENOTSUP :

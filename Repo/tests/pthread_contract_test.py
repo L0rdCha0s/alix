@@ -41,6 +41,7 @@ struct mock_timespec { int64_t tv_sec; long tv_nsec; };
 #define SYSCALL_FUTEX_OK 0
 #define SYSCALL_FUTEX_AGAIN (-11)
 #define SYSCALL_THREAD_INFO_MAIN 1u
+#define SYSCALL_THREAD_PRIORITY_QUERY (-1)
 #define SYSCALL_THREAD_INFO_DETACHED 2u
 #define SYSCALL_THREAD_STATE_ZOMBIE 3u
 typedef struct { volatile uint32_t state; } alix_mutex_t;
@@ -92,6 +93,7 @@ static int sys_thread_join(uint64_t,int*);
 static int sys_thread_detach(uint64_t);
 static int sys_thread_info(uint64_t,syscall_thread_info_t*);
 static int sys_thread_set_name(uint64_t,const char*);
+static int sys_thread_priority(uint64_t tid,int priority) { (void)tid;(void)priority;return -38; }
 static int sys_thread_prepare_exit(void) { return prepared_winner; }
 static void sys_thread_exit(int) __attribute__((noreturn));
 static void mock_process_exit(int) __attribute__((noreturn));

@@ -48,7 +48,7 @@ static void vfs_unlock_node_data(vfs_node_t*n){CHECK(data_owned);data_owned=0;CH
 static bool vfs_node_allows_mutation(vfs_node_t*n){CHECK(tree_owned&&data_owned);return n->allow_mutation;}
 static bool alixfs_mount_supports_ownership(bool*backend){CHECK(tree_owned&&data_owned);return backend&&*backend;}
 static uint64_t vfs_now_seconds(void){CHECK(tree_owned&&data_owned);return 100;}
-static void vfs_mark_mount_dirty(vfs_mount_t*m){(void)m;CHECK(tree_owned&&!data_owned);atomic_fetch_add(&dirty_marks,1);}
+static void vfs_queue_dirty_node(vfs_node_t*n){(void)n;CHECK(tree_owned&&!data_owned);atomic_fetch_add(&dirty_marks,1);}
 '''
 code += declaration("vfs_stat_snapshot_t") + declaration("vfs_stat_info_t")
 source = (ROOT / "src/kernel/vfs.c").read_text()

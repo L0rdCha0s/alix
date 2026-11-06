@@ -20,6 +20,7 @@ code = r'''
 #define CLOCK_MONOTONIC 1
 #define CLOCK_PROCESS_CPUTIME_ID 2
 #define CLOCK_THREAD_CPUTIME_ID 3
+#define CLOCK_BOOTTIME 7
 #define _SC_PAGESIZE 1
 typedef int clockid_t;
 typedef int64_t time_t;
@@ -30,6 +31,7 @@ typedef struct {uint64_t runtime_ticks;} thread_t;
 code += wire + "\n"
 code += r'''
 static process_t*process;static thread_t*thread;
+static int64_t sys_monotonic_resolution_ns(void){return -ENOSYS;}
 static unsigned depth,allocations,copies;static uint32_t frequency=100;
 static bool fail_allocation,fail_copy,release_at_unpin;
 static void spinlock_preempt_disable(void){CHECK(!depth);++depth;}

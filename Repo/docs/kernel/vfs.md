@@ -21,10 +21,42 @@ The kernel’s VFS is a heap-backed tree of nodes with optional backing storage 
 - `g_vfs_tree_lock`: protects tree shape (parent/child links, node creation/removal, mount list). It uses an adaptive scheduler-friendly acquisition path because mount loading can poll storage and yield; contenders yield instead of pinning every CPU behind a preempted owner.
 - `node->data_lock`: protects per-file content buffer + dirty tracking fields.
 
+AlixFS regular files larger than 64 KiB start with logical metadata and a saved
+disk payload offset, without a resident data buffer. `vfs_prepare_data` loads an
+owned file on first read, borrowed-buffer access or mapping preparation. Once
+loaded, its buffer remains resident; existing pointer and mapping lifetimes are
+preserved. Metadata operations do not load payloads. Small files and symlinks
+remain eager.
+
+Preparation takes the mount backend gate before the node data lock, snapshots
+the extent/size/generation, then allocates and reads outside data/namespace
+spinlocks. Publication rechecks that snapshot. Concurrent truncation discards the
+old read. Ordinary kernel callers use a registered `IO_VFS_PREPARE_DATA` request
+on protected storage workers, so cancellation cannot strand the gate or heap
+buffer. Workers and pre-service bootstrap can load directly. Legacy descriptor
+open prepares outside namespace/FD locks; private descriptor reads prepare only
+when data is needed. Mapping preparation makes bytes resident before any user
+fault; user faults never wait for disk under VM locks.
+
+Truncation of an unloaded file replaces it with an empty buffer without reading
+discarded bytes. Rename and full writeback can stream an unloaded payload from
+its protected old extent into a private destination in 64 KiB chunks. See the
+[measured Zen cache investigation](../zen-lazy-cache-performance-2026-11-06.md).
+
 Callers generally:
 
 - Take the tree lock for path resolution and structural operations.
 - Take the data lock only around file contents (read/write/truncate).
+
+Path metadata can complete inside the live syscall's bounded preparation guard.
+It tries the tree and data locks once, compares components in the captured kernel
+path without allocating, and snapshots metadata before releasing the tree lock.
+A scan may inspect at most 256 nodes and 16 KiB of compared name bytes; directory
+link counting shares the node budget. Symlink expansion, callback/mapped-writer
+state, first-time identity assignment, exhausted budgets and busy locks return
+without changing the request, then use the protected storage worker. Final
+no-follow symlink metadata and bounded ENOENT/ENOTDIR results can complete inline.
+The existing captured-identity lookup policy and checked user copyout are shared.
 
 ## Path Resolution
 

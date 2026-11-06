@@ -30,7 +30,7 @@ def kernel_test():
 #define SYSCALL_FUTEX_INVALID (-22)
 #define SYSCALL_FUTEX_TIMED_OUT (-110)
 #define ADDRESS ((uintptr_t)0x100001000ULL)
-#define PROCESS_FUTEX_BUCKET_COUNT 64u
+#define PROCESS_FUTEX_BUCKET_COUNT 1024u
 #define SMP_MAX_CPUS 32u
 static uint32_t current_cpu_index(void){return 0;}
 static uint64_t timer_ticks(void){return 123;}
@@ -44,13 +44,15 @@ typedef struct thread {
     wait_queue_t futex_queue;
     uintptr_t futex_address;
     struct thread *futex_bucket_prev, *futex_bucket_next;
-    bool futex_indexed;
+    bool futex_indexed, futex_counted;
     bool futex_waiting, futex_notified, futex_interrupted, signal_pending;
     uint64_t futex_woken_tick;
     bool futex_wake_stamped;
 } thread_t;
 struct process { bool is_user; spinlock_t threads_lock; thread_t *threads;
-                 thread_t *futex_buckets[PROCESS_FUTEX_BUCKET_COUNT]; uint64_t futex_wake_sequence; };
+                 thread_t *futex_buckets[PROCESS_FUTEX_BUCKET_COUNT];
+                 uint32_t futex_waiter_counts[PROCESS_FUTEX_BUCKET_COUNT];
+                 uint64_t futex_wake_sequence; };
 static process_t process, other;
 static thread_t threads[5], outsider;
 static thread_t *current;
@@ -89,6 +91,10 @@ static bool process_memory_read_user_u32(process_t *p, uintptr_t address, uint32
 static void wait_queue_init(wait_queue_t *queue) { queue->wakes = 0; }
 static bool thread_lifetime_active(thread_t *thread) { return thread->live; }
 static uint32_t timer_frequency(void) { return 100; }
+static uint64_t timer_deadline_after_millis(uint64_t milliseconds) {
+    __uint128_t deadline=((__uint128_t)milliseconds*timer_frequency()+999)/1000+timer_ticks();
+    return deadline>UINT64_MAX?UINT64_MAX:(uint64_t)deadline;
+}
 static void wait_queue_wake_all_locked(wait_queue_t *queue)
 { CHECK(scheduler_locked); ++queue->wakes; }
 int process_futex_wake(uintptr_t, uint32_t);
@@ -140,7 +146,7 @@ static void cancel_waiter(thread_t *thread)
     uint64_t flags=scheduler_lock_acquire("fixture_cancel");
     process_futex_cancel_wait_locked(thread);
     scheduler_lock_release(flags);
-    CHECK(!thread->futex_indexed && !thread->futex_waiting && !thread->futex_address);
+    CHECK(!thread->futex_indexed && !thread->futex_counted && !thread->futex_waiting && !thread->futex_address);
     CHECK(!thread->futex_bucket_next && !thread->futex_bucket_prev);
 }
 int main(void)

@@ -150,7 +150,7 @@
     },
     {
       "file": "0012-native-alix-cubeb.patch",
-      "sha256": "f5e51212990ae1bf47c736969e6e55cfa367053c3cc7b72b214278edae34e740",
+      "sha256": "c1d33b2c9c0327b04819d123a6da58689e390c0f5f57ebd2598e6a22d8f616b3",
       "files": [
         {
           "path": "media/libcubeb/src/cubeb.c",
@@ -165,7 +165,7 @@
         {
           "path": "media/libcubeb/src/cubeb_alix.cpp",
           "before": null,
-          "after": "936325ad2d3cc70676cccfbf82565f1b8d0d86a86ca510bda0f10eb741a46519"
+          "after": "8a7684a3f33e2b2d783372bb7aacc788428a5871c9d09f99b153ccd5f42faf4f"
         }
       ]
     },
@@ -228,7 +228,7 @@
     },
     {
       "file": "0015-native-alix-widget-backend.patch",
-      "sha256": "d81664945a36939a8bfaf1afbd1f101e3f5bf16bb6566bcf67acc1afd9548fb6",
+      "sha256": "7f24fa9c1dcc3a9719a071512a748db59a7236e46ff52f7af534f1f15169b981",
       "files": [
         {
           "path": "widget/moz.build",
@@ -273,12 +273,12 @@
         {
           "path": "widget/alix/nsAppShell.cpp",
           "before": null,
-          "after": "1cc8340c9888b6d19aef9f06264ecf1b47168b6f4c02d968b3c1e45d24a7a16c"
+          "after": "729d660d1303b143881c704f45796f88697b44848cc6c5551e70f50c210c2f83"
         },
         {
           "path": "widget/alix/nsAppShell.h",
           "before": null,
-          "after": "15b4d890a9c2f4a765297a1ccdb417b70b7c6664ab36096326aae0487724493a"
+          "after": "f513302cbb7e570c64bcf031e046bfb7584def7e696ae307c3aa93de128e79a2"
         },
         {
           "path": "widget/alix/nsLookAndFeel.cpp",
@@ -308,12 +308,12 @@
         {
           "path": "widget/alix/nsWindow.cpp",
           "before": null,
-          "after": "fd864d4d41cac8387efe497b3fd71a7ce43f46358ed6c0d3ea3dcde6984eee9c"
+          "after": "47d45f494ae4a86900bf760d36167bd757628d7285b4b7a62cfd9a49941010a9"
         },
         {
           "path": "widget/alix/nsWindow.h",
           "before": null,
-          "after": "ca977f3546a7692eb7858330394b7003dd05b45b1a28b8666f62b2d838f8232c"
+          "after": "4c89ee514da5348bee6d94e27fdba2a821e3ab1d3b793ee5fb31b1aab139b6d0"
         },
         {
           "path": "widget/alix/nsUserIdleServiceAlix.h",
@@ -603,12 +603,12 @@
     },
     {
       "file": "0030-native-alix-nspr-scheduler-header.patch",
-      "sha256": "2f17ca0fd63674bccb160d11b294dcc89ccbbc56c4a75123549a09ed76fa6030",
+      "sha256": "55626631a6df5219cbfa319b85fc5bc4fb6ff640fded480adf7aa3288b3b0e7d",
       "files": [
         {
           "path": "nsprpub/pr/src/pthreads/ptthread.c",
           "before": "317b83080ec7dbf1716cf9b8698e3c1a2cfa5fa80716717d4377c3270646efe5",
-          "after": "19e4957e0fef65f22843a7e903d3c7670f8b8613243e1742709653eab9c33dfb"
+          "after": "ed9f3f66e8b58ca7c78ecdb0638ce0c273b99a6a66e711a5001ecd5e0f320777"
         }
       ]
     },
@@ -1300,6 +1300,122 @@
           "after": "18c474c4a4c015d1d2e26bcd6c5b0250bff2629685bbba4d39d671aa98482d90"
         }
       ]
+    },
+    {
+      "file": "0060-alix-retained-software-damage.patch",
+      "sha256": "6623e3222b04b595f7c214f357db2ba0c2ed445984d75ab989b6b8ed5b797783",
+      "files": [
+        {
+          "path": "gfx/webrender_bindings/RenderCompositorSWGL.cpp",
+          "before": "3ab333c878e753532e3e7c81045fd3f94def6d618a1ac9f57f3eb3a267b826c6",
+          "after": "4433121c9e19cda3fb7f4a4fdeba479729362e3c2099345a19c64a6cfec9c20a"
+        },
+        {
+          "path": "gfx/webrender_bindings/RenderCompositorSWGL.h",
+          "before": "1351e36e2e2afc759a1bcf526f5466f29ef1fb025e26e3d89089cc0091e7bf03",
+          "after": "ddfc0d1a2319001d35f8ac164b31caf287961dd481083d9fb1f4884058f7ce32"
+        }
+      ]
+    },
+    {
+      "file": "0061-alix-swgl-vector-copy-intrinsics.patch",
+      "sha256": "d003807f5c666febef6aa48844bebfc5b532c0fd9b0f125e8c970b1de0f5e0b3",
+      "files": [
+        {
+          "path": "gfx/wr/swgl/src/vector_type.h",
+          "before": "fe31b3656c054266d2121d1ce0d62ec41414f7d7846c2c2b5e19872f0f483bad",
+          "after": "8ab240aacac01e7052e5b6052ce39c6761285fb90d7b05a99a5ac45de8c50c56"
+        }
+      ]
+    },
+    {
+      "file": "0062-alix-swgl-skip-empty-corner-masks.patch",
+      "sha256": "3581385a31f5d86b5710b799023bdd292567e1c904a8336fe112fe71414e0c7b",
+      "files": [
+        {
+          "path": "gfx/wr/webrender/res/ellipse.glsl",
+          "before": "146e24fa650fe98cebd015fe49870ec1bb9409901b0e237d2ce2ab83660f80f1",
+          "after": "8228783b4e39fbfbc9811389490174ea1eca9415d54d1c35da348cd509053777"
+        }
+      ]
+    },
+    {
+      "file": "0063-alix-swgl-r8-blur-span.patch",
+      "sha256": "629b9692bb4275e59830c7088fb6442f739312f65d8d4e453679cc567d5fce7f",
+      "files": [
+        {
+          "path": "gfx/wr/webrender/res/cs_blur.glsl",
+          "before": "c09699e50833819023135bea0cd1068e0988bfdca835f93e1aafd5787abb2a1f",
+          "after": "0fd5046c18e4682522f31910cbb0ca09a034f63da131919da0bfbbd7a4945d72"
+        }
+      ]
+    },
+    {
+      "file": "0064-alix-jit-retirement-diagnostics.patch",
+      "sha256": "b0ce1aca8567409c5ed9f488c624382cc83c5b1370ed7d62c60a67b471b8c404",
+      "files": [
+        {
+          "path": "js/src/jit/ExecutableAllocator.cpp",
+          "before": "f92d16f474ce0e9dfbb526550f8774135ac25d3380358c7f0ac6ef9d6446a43c",
+          "after": "88168851785861eeff29993af39635e34808b4f53a05162d2e9bb700723a3459"
+        }
+      ]
+    },
+    {
+      "file": "0065-alix-compositor-priority.patch",
+      "sha256": "15aef48d578f62d20539a0f375c31f9d19ddee3dca94bd5b45939e1504a10df5",
+      "files": [
+        {
+          "path": "gfx/layers/ipc/CompositorThread.cpp",
+          "before": "0341aff719cb358403f0ec6b17e16ffee76e6161db739adb1d3ba1c66fb25ff7",
+          "after": "6fadc168588504962f280d2a93c81755cd82333df5f400778d40170fc579bc4c"
+        }
+      ]
+    },
+    {
+      "file": "0066-alix-swgl-opaque-composite.patch",
+      "sha256": "ed169dff72aac75d7750db837c56814e85d2bfabcb92ea0c13ed11f60a79fe77",
+      "files": [
+        {
+          "path": "gfx/wr/swgl/src/composite.h",
+          "before": "d98fc5c6fa04fa802fc47bf9d1c02f9d2d2840b6af48bb2b7f50c1100b1473c7",
+          "after": "9db4e6b18e462ba91422f081a76ca9140578251fbd542e05b624d0c7f6cda894"
+        }
+      ]
+    },
+    {
+      "file": "0067-alix-software-vsync-priority.patch",
+      "sha256": "d599d810cdac57767ab83b09c12628724fcb9f4900b6877e870190a31f698ecc",
+      "files": [
+        {
+          "path": "gfx/thebes/SoftwareVsyncSource.cpp",
+          "before": "3b785082b95a56ff600b8158066395b9232bf87a323b987b5d2b11e73d394405",
+          "after": "11d6577a5e69d72cd5372a1f2ef3d62da335cb00815a14ea49b0149895086dea"
+        }
+      ]
+    },
+    {
+      "file": "0068-alix-timer-priority.patch",
+      "sha256": "2714fbefe7dcc9842f2494c6eb57409dd00027bbecc4e49fe0f250c1a3c7b96d",
+      "files": [
+        {
+          "path": "xpcom/threads/TimerThread.cpp",
+          "before": "3fcd05c366b4b6313fc821a274842cac5f807f37404e33a01d7863edb6c2b9d8",
+          "after": "f5e7ce9244f9632f35542ec1fcbcdad09d1aa9636059c522d66ad641cd779f87"
+        }
+      ]
+    },
+    {
+      "file": "0069-alix-swgl-rounded-mask-cache.patch",
+      "sha256": "30c856f33f6ca9c882f4de5ad5eae7a7a43d0d9df49d52043d6c2c243dec1a5e",
+      "files": [
+        {
+          "path": "gfx/wr/webrender/src/compositor/sw_compositor.rs",
+          "before": "2028ecf7405f3c73aa9e236ef05c2c745d2384ad222d0329242813dcddaab796",
+          "after": "3c8152f2b96f60296c06afa42ab66dfa6e08034ea2ee86195cc023968c578023"
+        }
+      ],
+      "rust_vendor_cache": false
     }
   ]
 }

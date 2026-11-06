@@ -35,6 +35,7 @@ typedef struct thread
     process_t *process;
     struct thread *process_next;
     bool is_user, exited, pending_destroy;
+    bool vm_syscall_active;
     uint64_t tid;
     void *io_request;
     bool io_interruptible;
@@ -45,6 +46,7 @@ typedef struct thread
     alix_siginfo_t signal_info[ALIX_SIGNAL_COUNT];
     alix_stack_t signal_altstack;
     struct process_signal_frame *signal_frames;
+    struct process_signal_tid_alias *signal_tid_aliases;
     uint64_t signal_sequence;
     uint64_t signal_jump_epoch;
     uint32_t signal_depth;
@@ -273,6 +275,11 @@ static uint64_t timer_frequency(void)
 static uint64_t timer_ticks(void)
 {
     return model_ticks;
+}
+static uint64_t timer_deadline_after_millis(uint64_t milliseconds)
+{
+    /* The modeled clock runs at exactly 1 kHz. */
+    return milliseconds > UINT64_MAX - model_ticks ? UINT64_MAX : model_ticks + milliseconds;
 }
 static bool wait_queue_wait_timeout(wait_queue_t *q, bool (*pred)(void *), void *arg, uint64_t ticks)
 {

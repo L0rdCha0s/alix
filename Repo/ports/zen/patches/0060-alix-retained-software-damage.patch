@@ -1,0 +1,222 @@
+--- a/gfx/webrender_bindings/RenderCompositorSWGL.cpp
++++ b/gfx/webrender_bindings/RenderCompositorSWGL.cpp
+@@ -6,6 +6,14 @@
+ 
+ #include "mozilla/gfx/Logging.h"
+ #include "mozilla/widget/CompositorWidget.h"
++
++#ifdef MOZ_WIDGET_ALIX
++#  include <stdlib.h>
++#  pragma GCC visibility push(default)
++#  include "serial.h"
++#  include <usyscall.h>
++#  pragma GCC visibility pop
++#endif
+ 
+ #ifdef MOZ_WIDGET_GTK
+ #  include "mozilla/WidgetUtilsGtk.h"
+@@ -34,10 +42,17 @@
+     const RefPtr<widget::CompositorWidget>& aWidget, void* aContext)
+     : RenderCompositor(aWidget), mContext(aContext) {
+   MOZ_ASSERT(mContext);
++#ifdef MOZ_WIDGET_ALIX
++  const char* diagnostics = getenv("ALIX_PRESENT_DIAGNOSTICS");
++  mDiagnostics = diagnostics && diagnostics[0] == '1' && !diagnostics[1];
++#endif
+   LOG("RenderCompositorSWGL::RenderCompositorSWGL()");
+ }
+ 
+ RenderCompositorSWGL::~RenderCompositorSWGL() {
++#ifdef MOZ_WIDGET_ALIX
++  ReportFrames();
++#endif
+   LOG("RenderCompositorSWGL::~RenderCompositorSWGL()");
+ 
+   wr_swgl_destroy_context(mContext);
+@@ -55,8 +70,19 @@
+ }
+ 
+ bool RenderCompositorSWGL::BeginFrame() {
++#ifdef MOZ_WIDGET_ALIX
++  if (mDiagnostics) {
++    mFrameStart = sys_monotonic_millis();
++    mCompositeStart = 0;
++    mCompositeCPUValid = false;
++    if (mPreviousFrameStart)
++      mMaxFrameGapMillis =
++          std::max(mMaxFrameGapMillis, mFrameStart - mPreviousFrameStart);
++    mPreviousFrameStart = mFrameStart;
++  }
++#endif
+   mRenderWidgetSize = Some(mWidget->GetClientSize());
+-#ifdef MOZ_WIDGET_GTK
++#if defined(MOZ_WIDGET_GTK) || defined(MOZ_WIDGET_ALIX)
+   if (mLastRenderWidgetSize != mRenderWidgetSize.value()) {
+     mLastRenderWidgetSize = mRenderWidgetSize.value();
+     mRequestFullRender = true;
+@@ -164,6 +190,17 @@
+     wr::ColorF aClearColor, const wr::DeviceIntRect* aDirtyRects,
+     size_t aNumDirtyRects, const wr::DeviceIntRect* aOpaqueRects,
+     size_t aNumOpaqueRects) {
++#ifdef MOZ_WIDGET_ALIX
++  if (mDiagnostics && !mCompositeStart) {
++    mCompositeStart = sys_monotonic_millis();
++    syscall_cpu_clock_t clock{};
++    mCompositeCPUValid =
++        sys_cpu_clock(SYSCALL_USAGE_CLOCK_THREAD, &clock) == 0 &&
++        clock.tick_frequency && !clock.reserved;
++    mCompositeCPUStart = clock.ticks;
++    mCompositeCPUFrequency = clock.tick_frequency;
++  }
++#endif
+   if (mDT) {
+     // Cancel any existing buffers that might accidentally be left from updates
+     CommitMappedBuffer(false);
+@@ -247,6 +284,9 @@
+ void RenderCompositorSWGL::CancelFrame() {
+   CommitMappedBuffer(false);
+   mRenderWidgetSize = Nothing();
++#ifdef MOZ_WIDGET_ALIX
++  mFrameStart = mCompositeStart = 0;
++#endif
+ }
+ 
+ RenderedFrameId RenderCompositorSWGL::EndFrame(
+@@ -255,16 +295,80 @@
+   // those dirty rects exactly the same here so we supply the same exact region
+   // to EndRemoteDrawingInRegion as for StartRemoteDrawingInRegion.
+   RenderedFrameId frameId = GetNextRenderFrameId();
++#ifdef MOZ_WIDGET_ALIX
++  uint64_t beforeCommit = mDiagnostics ? sys_monotonic_millis() : 0;
++  uint64_t compositeCPUMillis = 0;
++  bool validCPU = false;
++  if (mDiagnostics && mCompositeCPUValid) {
++    syscall_cpu_clock_t clock{};
++    if (sys_cpu_clock(SYSCALL_USAGE_CLOCK_THREAD, &clock) == 0 &&
++        clock.tick_frequency == mCompositeCPUFrequency && !clock.reserved &&
++        clock.ticks >= mCompositeCPUStart) {
++      compositeCPUMillis =
++          (clock.ticks - mCompositeCPUStart) * 1000 / clock.tick_frequency;
++      validCPU = true;
++    }
++  }
++#endif
+   CommitMappedBuffer();
++#ifdef MOZ_WIDGET_ALIX
++  if (mDiagnostics && mFrameStart) {
++    uint64_t committed = sys_monotonic_millis();
++    uint64_t composite = mCompositeStart ? mCompositeStart : beforeCommit;
++    uint64_t rasterMillis = composite - mFrameStart;
++    uint64_t compositeMillis = beforeCommit - composite;
++    uint64_t commitMillis = committed - beforeCommit;
++    ++mDiagnosticFrames;
++    mRasterMillis += rasterMillis;
++    mCompositeMillis += compositeMillis;
++    mCommitMillis += commitMillis;
++    if (validCPU) {
++      mCompositeCPUMillis += compositeCPUMillis;
++      ++mCompositeCPUSamples;
++    }
++    if (compositeMillis >= mMaxCompositeMillis)
++      mCPUAtMaxCompositeMillis = validCPU ? compositeCPUMillis : 0;
++    mMaxRasterMillis = std::max(mMaxRasterMillis, rasterMillis);
++    mMaxCompositeMillis = std::max(mMaxCompositeMillis, compositeMillis);
++    mMaxCommitMillis = std::max(mMaxCommitMillis, commitMillis);
++    mFrameStart = mCompositeStart = 0;
++    if (mDiagnosticFrames >= 120)
++      ReportFrames();
++  }
++#endif
+   mRenderWidgetSize = Nothing();
+   return frameId;
+ }
++
++#ifdef MOZ_WIDGET_ALIX
++void RenderCompositorSWGL::ReportFrames() {
++  if (!mDiagnostics || !mDiagnosticFrames)
++    return;
++  serial_printf("[alix-render] now_ms=%llu frames=%llu raster_ms=%llu composite_ms=%llu composite_cpu_ms=%llu cpu_samples=%llu cpu_at_max_composite_ms=%llu commit_ms=%llu max_raster_ms=%llu max_composite_ms=%llu max_commit_ms=%llu max_gap_ms=%llu\n",
++                (unsigned long long)sys_monotonic_millis(),
++                (unsigned long long)mDiagnosticFrames,
++                (unsigned long long)mRasterMillis,
++                (unsigned long long)mCompositeMillis,
++                (unsigned long long)mCompositeCPUMillis,
++                (unsigned long long)mCompositeCPUSamples,
++                (unsigned long long)mCPUAtMaxCompositeMillis,
++                (unsigned long long)mCommitMillis,
++                (unsigned long long)mMaxRasterMillis,
++                (unsigned long long)mMaxCompositeMillis,
++                (unsigned long long)mMaxCommitMillis,
++                (unsigned long long)mMaxFrameGapMillis);
++  mDiagnosticFrames = mRasterMillis = mCompositeMillis = mCommitMillis = 0;
++  mMaxRasterMillis = mMaxCompositeMillis = mMaxCommitMillis = 0;
++  mMaxFrameGapMillis = 0;
++  mCompositeCPUMillis = mCompositeCPUSamples = mCPUAtMaxCompositeMillis = 0;
++}
++#endif
+ 
+ bool RenderCompositorSWGL::RequestFullRender() {
+ #if defined(MOZ_WIDGET_ANDROID)
+   // XXX Add partial present support.
+   return true;
+-#elif defined(MOZ_WIDGET_GTK)
++#elif defined(MOZ_WIDGET_GTK) || defined(MOZ_WIDGET_ALIX)
+   // We're requested to do full render after Resume() on Wayland.
+   if (mRequestFullRender) {
+     mRequestFullRender = false;
+@@ -279,7 +383,7 @@
+ void RenderCompositorSWGL::Pause() {}
+ 
+ bool RenderCompositorSWGL::Resume() {
+-#ifdef MOZ_WIDGET_GTK
++#if defined(MOZ_WIDGET_GTK) || defined(MOZ_WIDGET_ALIX)
+   mRequestFullRender = true;
+ #endif
+   return true;
+@@ -303,6 +407,19 @@
+   // be damaged.
+ #ifdef MOZ_WIDGET_GTK
+   aCaps->redraw_on_invalidation = widget::GdkIsX11Display();
++#elif defined(MOZ_WIDGET_ALIX)
++  // Alix retains the widget draw target and compositor window surfaces.
++  // Allow controlled evaluation of retained invalidations, but preserve the
++  // existing full-redraw default until broader workloads justify changing it.
++  // Retained mode still requests full rendering after resize and resume.
++  const char* force = getenv("ALIX_SWGL_FORCE_FULL_REDRAW");
++  aCaps->redraw_on_invalidation = !(force && force[0] == '0' && !force[1]);
++  const char* diagnostics = getenv("ALIX_SWGL_DIAGNOSTICS");
++  if (diagnostics && diagnostics[0] == '1') {
++    auto size = GetBufferSize();
++    serial_printf("ALIX_SWGL_POLICY,redraw_on_invalidation=%u,width=%d,height=%d\n",
++                  unsigned(aCaps->redraw_on_invalidation), size.width, size.height);
++  }
+ #else
+   aCaps->redraw_on_invalidation = true;
+ #endif
+--- a/gfx/webrender_bindings/RenderCompositorSWGL.h
++++ b/gfx/webrender_bindings/RenderCompositorSWGL.h
+@@ -67,9 +67,21 @@
+   RefPtr<gfx::DataSourceSurface> mSurface;
+   uint8_t* mMappedData = nullptr;
+   int32_t mMappedStride = 0;
+-#ifdef MOZ_WIDGET_GTK
+-  // On Wayland we need to request full render if widget size is changed
+-  // because SW rendering backend reallocates and clears target surface.
++#ifdef MOZ_WIDGET_ALIX
++  bool mDiagnostics = false;
++  uint64_t mFrameStart = 0, mCompositeStart = 0, mPreviousFrameStart = 0,
++           mDiagnosticFrames = 0, mRasterMillis = 0, mCompositeMillis = 0,
++           mCommitMillis = 0, mMaxRasterMillis = 0, mMaxCompositeMillis = 0,
++           mMaxCommitMillis = 0, mMaxFrameGapMillis = 0;
++  bool mCompositeCPUValid = false;
++  uint32_t mCompositeCPUFrequency = 0;
++  uint64_t mCompositeCPUStart = 0, mCompositeCPUMillis = 0,
++           mCompositeCPUSamples = 0, mCPUAtMaxCompositeMillis = 0;
++  void ReportFrames();
++#endif
++#if defined(MOZ_WIDGET_GTK) || defined(MOZ_WIDGET_ALIX)
++  // Retained software targets must be redrawn after a resize or resume.
++  // Reallocation can clear the widget backing surface.
+   LayoutDeviceIntSize mLastRenderWidgetSize;
+   bool mRequestFullRender = false;
+ #endif

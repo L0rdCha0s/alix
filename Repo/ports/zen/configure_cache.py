@@ -12,12 +12,18 @@ def rust_port_revision(series_path):
 
     apply_patches verifies these digests against actual files before this is
     used. Non-Rust changes do not discard otherwise reusable Rust compilation.
+    Ordinary in-tree path crates can opt out: Cargo already tracks their source
+    files. Registry/vendor inputs always invalidate the global token.
     """
     series = json.loads(Path(series_path).read_text())
     inputs = {}
     for entry in series["patches"]:
+        invalidate = entry.get("rust_vendor_cache", True)
+        if not isinstance(invalidate, bool):
+            raise RuntimeError("rust_vendor_cache must be a boolean")
         for item in entry["files"]:
-            if item["path"].startswith("third_party/rust/") or item["path"].endswith(".rs"):
+            if (item["path"].startswith("third_party/rust/") or
+                    (invalidate and item["path"].endswith(".rs"))):
                 inputs[item["path"]] = item["after"]
     fingerprint = hashlib.sha256()
     for name, digest in sorted(inputs.items()):

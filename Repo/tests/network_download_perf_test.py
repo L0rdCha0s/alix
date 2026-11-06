@@ -60,6 +60,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 class Guest:
     def __init__(self, temporary, snapshot, out, pcap, phase, net_backend='user'):
         self.temp, self.out = temporary, out
+        self.phase = phase
         self.log = out / f'{phase}-serial.log'
         self.log.write_text('')
         self.qmp_path = temporary / f'{phase}-qmp.sock'
@@ -137,7 +138,11 @@ class Guest:
         self.send(command if powercut else command + '\recho ' + marker)
         deadline = start + timeout
         saved_at = None
-        pattern = re.compile(r'(?:^|[\r\n])' + re.escape(marker) + r'(?:[\r\n]|$)')
+        # Output writers hold the serial lock per call: another CPU's log can
+        # land between echo's marker write and its separate newline write.
+        # The unique line-start token plus the actual echo retirement below
+        # excludes typed command redraws without demanding that newline.
+        pattern = re.compile(r'(?:^|[\r\n])' + re.escape(marker))
         while time.monotonic() < deadline:
             text = self.text()[offset:]
             if saved_at is None and token != 'root@alix$' and token in text:
@@ -145,20 +150,44 @@ class Guest:
                 if powercut:
                     self.close()
                     return saved_at - start, text
-            if pattern.search(text):
+            completed = pattern.search(text)
+            # The marker is printed before the echo job retires. Sending the
+            # next line in that interval can lose shutdown/input to the old
+            # foreground job. Keep transfer timing at Saved, but gate commands
+            # on the actual retirement and following shell prompt.
+            retired = re.search(r'\[proc\] destroy[^\r\n]*name=echo [^\r\n]*wait_status=0', text[completed.end():]) if completed else None
+            if completed and retired and 'root@alix$' in text[completed.end() + retired.end():]:
                 return (saved_at or time.monotonic()) - start, text
             gui.ensure_guest_healthy(self.runner, self.text())
             time.sleep(.02)
         raise RuntimeError(f'timeout running {command!r}; inspect {self.log}')
 
     def shutdown(self):
+        time.sleep(.05)
         offset = len(self.text())
-        self.send('shutdown')
-        # QEMU can power off before its final serial FIFO is flushed. The
-        # subsequent cold boot/hash is the persistence check, not this text.
-        self.runner.wait(timeout=180)
+        qmp = gui.QmpClient(self.qmp_path)
+        shutdown_event = None
+        try:
+            self.send('shutdown')
+            deadline = time.monotonic() + 180
+            while True:
+                message = qmp._read_message(deadline)
+                if message is None: break
+                if message.get('event') == 'SHUTDOWN':
+                    shutdown_event = message
+                    break
+            self.runner.wait(timeout=15)
+        finally:
+            qmp.close()
         text = self.text()[offset:]
-        if self.runner.returncode != 0 or 'Syncing disks...' not in text or 'failed to sync' in text:
+        evidence = {'runner_status': self.runner.returncode, 'event': shutdown_event,
+                    'serial_sync_marker': 'Syncing disks...' in text,
+                    'serial_sync_failure': 'failed to sync' in text}
+        (self.out / f'{self.phase}-shutdown.json').write_text(json.dumps(evidence, indent=2))
+        # The guest kernel powers off only after vfs_prepare_shutdown succeeds.
+        # Its final UART FIFO can be lost at poweroff. Require guest-originated
+        # QMP shutdown plus the independent cold-boot hashes, not that FIFO.
+        if self.runner.returncode != 0 or not shutdown_event or not shutdown_event.get('data', {}).get('guest') or shutdown_event.get('data', {}).get('reason') != 'guest-shutdown' or 'failed to sync' in text:
             raise RuntimeError('guest shutdown failed to persist filesystem')
         os.close(self.master)
         self.master = -1
@@ -285,6 +314,8 @@ def main():
     parser.add_argument('--net-backend', choices=['user', 'vmnet-shared'], default='user')
     parser.add_argument('--http-bind', help='host address to bind (auto-detect socket_vmnet gateway by default)')
     parser.add_argument('--snapshot', type=Path)
+    parser.add_argument('--data-image', type=Path, default=ROOT / 'data.img',
+                        help='source volume to clone for this run; never booted in place')
     parser.add_argument('--no-build', action='store_true')
     parser.add_argument('--pcap', action='store_true')
     parser.add_argument('--probe', type=Path)
@@ -327,7 +358,9 @@ def main():
                 sound.writeframes(bytes(1920 * 4))
         if args.probe:
             shutil.copy2(args.probe, snapshot / 'http' / 'copy-probe.elf')
-        clone_file(ROOT / 'data.img', temporary / 'data.img')
+        data_source = args.data_image.resolve(strict=True)
+        source_stat = data_source.stat()
+        clone_file(data_source, temporary / 'data.img')
         shutil.copy2(ROOT / 'vendor' / 'OVMF_VARS-1024x768.fd', temporary / 'vars.fd')
         fixtures = {'zip': 'user-elfs.zip', '1m': 'deterministic-1m.bin', '8m': 'deterministic-8m.bin'}
         seed = bytes(range(256)) * 4096
@@ -356,10 +389,18 @@ def main():
         threading.Thread(target=server.serve_forever, daemon=True).start()
         port = server.server_address[1]
         result = {'kernel_sha256': hashlib.sha256((snapshot / 'alix.elf').read_bytes()).hexdigest(),
+                  'source_data_image': str(data_source),
+                  'source_stat_before': {key: getattr(source_stat, key) for key in ('st_ino','st_size','st_mtime_ns')},
                   'pcap_enabled': args.pcap, 'cores': 8, 'accelerator': 'tcg', 'nic': 'igb',
                   'network_backend': args.net_backend, 'http_bind': bind_address, 'startup_waited': True, 'qemu_version': subprocess.check_output(['qemu-system-x86_64', '--version'], text=True).splitlines()[0],
                   'fixtures': expected, 'transfers': [], 'persistence': [], 'http_port': port}
         def save():
+            current_stat = data_source.stat()
+            result['source_stat_after'] = {key: getattr(current_stat, key) for key in ('st_ino','st_size','st_mtime_ns')}
+            result['source_metadata_unchanged'] = result['source_stat_before'] == result['source_stat_after']
+            for phase in ('download', 'reboot'):
+                evidence = out / f'{phase}-shutdown.json'
+                if evidence.exists(): result[phase + '_shutdown'] = json.loads(evidence.read_text())
             result['http_requests'] = [dict(record) for record in Handler.records]
             (out / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
         guest = None

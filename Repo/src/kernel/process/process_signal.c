@@ -923,10 +923,7 @@ int process_signal_sleep(uint32_t milliseconds, uintptr_t remaining_user)
     uint64_t frequency = timer_frequency();
     if (!frequency)
         frequency = 1000;
-    uint64_t ticks = (milliseconds / 1000u) * frequency + ((milliseconds % 1000u) * frequency + 999u) / 1000u;
-    if (!ticks)
-        ticks = 1;
-    uint64_t start = timer_ticks(), deadline = ticks > UINT64_MAX - start ? UINT64_MAX : start + ticks;
+    uint64_t deadline = timer_deadline_after_millis(milliseconds);
     uint64_t lock = scheduler_lock_acquire("signal_sleep_register");
     wait_queue_init(&thread->signal_wait_queue);
     thread->signal_sleep_interrupted = false;

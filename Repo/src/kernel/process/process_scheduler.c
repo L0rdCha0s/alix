@@ -21,6 +21,9 @@
  */
 
 static bool thread_can_run(const thread_t *thread);
+/* Exceptional handoffs only; readable in a stopped-guest profile. */
+uint64_t g_sched_terminal_current_rejections;
+uint64_t g_sched_terminal_switches;
 extern uint8_t __kernel_text_start[];
 void remove_from_run_queue(thread_t *thread);
 static void enqueue_thread_on_cpu(thread_t *thread, uint32_t cpu_index);
@@ -515,8 +518,8 @@ static uint32_t scheduler_age_bonus(const thread_t *thread, uint64_t now_ticks)
     {
         return 0;
     }
-    uint64_t last = __atomic_load_n(&thread->last_scheduled_tick, __ATOMIC_RELAXED);
-    if (last == 0 || now_ticks <= last)
+    uint64_t last = __atomic_load_n(&thread->ready_queue_tick, __ATOMIC_RELAXED);
+    if (now_ticks <= last)
     {
         return 0;
     }
@@ -716,11 +719,33 @@ uint32_t scheduler_select_target_cpu(thread_t *thread)
     if (eligible)
     {
         uint32_t ordinal = thread ? (uint32_t)(thread->tid % eligible) : scheduler_rand32() % eligible;
+        uint32_t preferred = RUN_QUEUE_CPU_INVALID;
         for (uint32_t idx = 0; idx < limit; ++idx)
         {
             if (!scheduler_cpu_online(idx) || (ui_cpu_online && limit > 1 && idx == ui_cpu)) continue;
-            if (ordinal-- == 0) return idx;
+            if (ordinal-- == 0) { preferred = idx; break; }
         }
+        if (__atomic_load_n(&g_sched_idle_placement_enable, __ATOMIC_RELAXED) &&
+            preferred != RUN_QUEUE_CPU_INVALID)
+        {
+            /* This is a placement hint only. Queue locking and the normal
+             * ownership/handoff checks still decide who can run a stack. */
+            for (uint32_t offset = 0; offset < limit; ++offset)
+            {
+                uint32_t idx = (preferred + offset) % limit;
+                if (!scheduler_cpu_online(idx) ||
+                    (ui_cpu_online && limit > 1 && idx == ui_cpu)) continue;
+                thread_t *idle = g_idle_threads[idx];
+                if (idle && __atomic_load_n(&g_current_threads[idx], __ATOMIC_ACQUIRE) == idle &&
+                    __atomic_load_n(&g_run_queues[idx].total, __ATOMIC_RELAXED) == 0)
+                {
+                    if (idx != preferred)
+                        __atomic_add_fetch(&g_sched_idle_placement_redirects, 1, __ATOMIC_RELAXED);
+                    return idx;
+                }
+            }
+        }
+        if (preferred != RUN_QUEUE_CPU_INVALID) return preferred;
     }
 
     /* Fall back to UI CPU if nothing else is online. */
@@ -788,6 +813,7 @@ static void run_queue_push_locked(run_queue_t *queue, thread_t *thread)
         }
     }
 
+    __atomic_store_n(&thread->ready_queue_tick, timer_ticks(), __ATOMIC_RELAXED);
     thread->queue_prev = queue->tails[priority];
     thread->queue_next = NULL;
     thread->run_queue_cpu = queue->cpu_index;
@@ -1624,7 +1650,10 @@ static bool thread_can_run(const thread_t *thread)
     {
         return false;
     }
-    if (!thread_lifetime_active(thread) || thread->pending_destroy)
+    if (!thread_lifetime_active(thread) || thread->pending_destroy || thread->exited ||
+        (thread->process &&
+         (thread->process->state == PROCESS_STATE_ZOMBIE ||
+          __atomic_load_n(&thread->process->lifetime_state, __ATOMIC_ACQUIRE) != PROCESS_LIFETIME_ALIVE)))
     {
         return false;
     }
@@ -2359,6 +2388,7 @@ static void scheduler_finish_switch(void)
         /* The process was killed after the assembly handoff released the
          * scheduler lock but before this CPU completed switch bookkeeping.
          * Never return into the terminated thread. */
+        __atomic_add_fetch(&g_sched_terminal_switches, 1u, __ATOMIC_RELAXED);
         scheduler_schedule(false);
         fatal("terminal thread resumed after context switch");
     }
@@ -2696,8 +2726,22 @@ __attribute__((visibility("default"))) void scheduler_schedule(bool requeue_curr
 
         /* A dead current thread still owns this CPU's stack until the assembly
          * switch completes, so retain it as the outgoing context. */
-        if (current && current->state == THREAD_STATE_ZOMBIE)
+        if (current && !current->is_idle &&
+            (current->exited || current->pending_destroy || !thread_lifetime_active(current) ||
+             current->state == THREAD_STATE_ZOMBIE ||
+             (current->process &&
+              (current->process->state == PROCESS_STATE_ZOMBIE ||
+               __atomic_load_n(&current->process->lifetime_state, __ATOMIC_ACQUIRE) != PROCESS_LIFETIME_ALIVE))))
         {
+            /* A waiter may finish a kernel path after remote termination.
+             * RUNNING alone must never revive it through the no-peer fast
+             * path, including finish_switch's terminal handoff. Retain this
+             * stack's CPU ownership until the ordinary assembly switch. */
+            if (current->state != THREAD_STATE_ZOMBIE)
+                __atomic_add_fetch(&g_sched_terminal_current_rejections, 1u, __ATOMIC_RELAXED);
+            current->state = THREAD_STATE_ZOMBIE;
+            current->wake_pending = false;
+            current->preempt_pending = false;
             requeue_current = false;
         }
 

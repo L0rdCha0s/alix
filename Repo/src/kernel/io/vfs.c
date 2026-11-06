@@ -470,6 +470,32 @@ bool io_vfs_try_execute(io_request_t *request, io_service_result_t *result)
     size_t available = io_request_buffer_size(request) - sizeof(*operation);
     if (operation->reserved || operation->count > available) return false;
     result->description_owned = NULL;
+    if (operation->opcode == IO_VFS_PATH_INFO)
+    {
+        bool times = (operation->flags & SYSCALL_STAT_TIME_FIELDS) != 0;
+        size_t bytes = times ? sizeof(syscall_stat_times_t) : sizeof(syscall_stat_info_t);
+        if (description || !io_request_cwd(request) || operation->count || operation->offset || operation->whence ||
+            operation->flags & ~(SYSCALL_STAT_TIME_FIELDS | SYSCALL_STAT_NOFOLLOW) || available < bytes ||
+            strnlen((const char *)operation->data, available) == available) return false;
+        vfs_stat_info_t metadata;
+        int error = 0;
+        if (!vfs_try_path_stat_info(io_request_cwd(request), (const char *)operation->data,
+            !(operation->flags & SYSCALL_STAT_NOFOLLOW), io_request_uid(request), io_request_gid(request),
+            &metadata, &error)) return false;
+        result->result = error;
+        if (error) return true;
+        io_vfs_stat_info_encode(&metadata, (void *)operation->data);
+        if (times)
+        {
+            syscall_stat_times_t *reply = (void *)operation->data;
+            if (reply->info.atime > INT64_MAX || reply->info.mtime > INT64_MAX || reply->info.ctime > INT64_MAX)
+            { result->result = -EOVERFLOW; return true; }
+            reply->accessed = (syscall_file_timestamp_t){(int64_t)reply->info.atime, 0};
+            reply->modified = (syscall_file_timestamp_t){(int64_t)reply->info.mtime, 0};
+            reply->changed = (syscall_file_timestamp_t){(int64_t)reply->info.ctime, 0};
+        }
+        return true;
+    }
     if (operation->opcode == IO_VFS_READ_DIR)
     {
         if (!description || fd_description_ops(description)->close != io_vfs_directory_close ||
@@ -589,6 +615,13 @@ void io_vfs_execute(io_request_t *request, io_service_result_t *result,
     size_t available = io_request_buffer_size(request) - sizeof(*operation);
     if (!operation || operation->reserved) return;
     fd_description_t *description = io_request_description(request);
+    if (operation->opcode == IO_VFS_PREPARE_DATA)
+    {
+        if (description || operation->flags || operation->whence || operation->count ||
+            operation->offset || available || !io_request_cwd(request)) return;
+        result->result = vfs_prepare_data(io_request_cwd(request));
+        return;
+    }
     if (operation->opcode == IO_VFS_LOG)
     {
         if (description || operation->flags || operation->whence || operation->offset ||

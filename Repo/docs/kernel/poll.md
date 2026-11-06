@@ -20,6 +20,12 @@ description and pins each original file description before submission. The
 protected event worker takes bounded readiness snapshots; it never reads a user
 buffer or retains a caller's process, thread or stack pointer. The original
 description remains pinned if another thread closes/reuses its integer slot.
+The captured vector acquires the descriptor-table lock once for up to 256
+entries, retaining a separate reference for each valid entry, including aliases.
+Invalid entries remain null and become POLLNVAL; reference overflow leaves
+already captured owners in the set for normal cleanup. No readiness callback,
+allocation or final put runs under that lock. The capture observes one table
+state even if another CPU concurrently closes/reuses slots.
 Concurrent-close behavior is otherwise not a portable POSIX synchronization
 mechanism. Destruction releases every pin on the retirement worker, including
 after a killed waiter abandons its request.

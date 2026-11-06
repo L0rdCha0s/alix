@@ -35,8 +35,13 @@ struct vfs_node
     size_t size;
     size_t capacity;
     char *data;
+    /* Large AlixFS payloads start nonresident. data_lock protects publication;
+     * the mount backend gate protects the saved extent across storage reads. */
+    bool data_unloaded;
+    uint64_t disk_data_offset;
     size_t pending_dirty_bytes;
     uint64_t dirty_seq;
+    uint64_t data_seq; /* Increment before releasing data_lock after byte/size mutations. */
     uint64_t last_data_write_tick;
     spinlock_t data_lock;
     struct vfs_mapped_page *mapped_pages;

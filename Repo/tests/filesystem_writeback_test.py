@@ -96,7 +96,16 @@ static bool vfs_logs_enabled(void) { return false; }
 static void serial_printf(const char *fmt, ...) { (void)fmt; }
 static void vfs_log_sync_result(const char *name, const char *status, uint64_t start, size_t bytes)
 { (void)name; (void)status; (void)start; (void)bytes; }
+/* Backend fixture runs the protected/bootstrap materialization path. Native
+ * acceptance retains the real registered caller/cancellation boundary. */
+static bool spinlock_preempt_disabled(void) {return false;}
+static void *thread_current(void) {return NULL;}
+static bool process_current_is_kernel_service(void) {return true;}
+static void *io_vfs_service_current(void) {return NULL;}
+static int io_vfs_prepare_data_kernel(vfs_node_t *node) {(void)node;abort();}
+uint64_t g_vfs_lazy_loads,g_vfs_lazy_load_bytes,g_vfs_lazy_load_failures;
 '''
+    program += function_definition(vfs, "int vfs_prepare_data(") + "\n"
     for signature in ("static bool vfs_mount_flush_tree", "static void vfs_dequeue_clean_node", "static bool vfs_mount_flush_single", "static bool vfs_mount_collect_mapped", "static bool vfs_mount_flush_queued", "static bool vfs_mount_writeback"):
         program += function_definition(vfs, signature) + "\n"
     program += r'''
@@ -133,6 +142,7 @@ static void check_remount(block_device_t *dev, vfs_node_t *expected)
     vfs_node_t *dir = child(root, "newdir"); CHECK(dir, "new parent directory was not persisted");
     vfs_node_t *actual = child(dir, "large.bin"); CHECK(actual, "new file was not linked on remount");
     CHECK(actual->size == expected->size, "persisted length changed");
+    CHECK(!vfs_prepare_data(actual), "remounted payload preparation failed");
     CHECK(!memcmp(actual->data, expected->data, expected->size), "persisted file bytes changed");
     CHECK(actual->atime == expected->atime && actual->uid == expected->uid && actual->permissions == expected->permissions, "metadata update lost");
     free_tree(root); alixfs_mount_destroy(fs);

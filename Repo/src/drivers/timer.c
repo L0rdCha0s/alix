@@ -2,6 +2,9 @@
 #include "io.h"
 #include "interrupts.h"
 #include "spinlock.h"
+#include "acpi.h"
+#include "serial.h"
+#include <stdint.h>
 
 #define PIT_CHANNEL0 0x40
 #define PIT_COMMAND  0x43
@@ -43,6 +46,26 @@ typedef struct
 static volatile uint64_t g_ticks = 0;
 static uint32_t g_frequency_hz = 0;
 static timer_task_t g_tasks[TIMER_MAX_TASKS];
+#define ACPI_PM_FREQUENCY 3579545u
+static spinlock_t g_clock_lock = {0};
+static uint16_t g_pm_port;
+static uint32_t g_pm_mask, g_pm_previous;
+static uint64_t g_pm_cycles;
+static bool g_pm_ready;
+static uint64_t g_timer_delivered_irqs, g_timer_caught_up_ticks, g_timer_max_catchup_ticks;
+static volatile uint64_t g_timer_clock_reads;
+
+static uint64_t timer_clock_cycles(void)
+{
+    uint64_t flags = spinlock_lock_irqsave(&g_clock_lock);
+    uint32_t now = inl(g_pm_port) & g_pm_mask;
+    ++g_timer_clock_reads; /* Serialized here; inspect without logging on the hot path. */
+    g_pm_cycles += (now - g_pm_previous) & g_pm_mask;
+    g_pm_previous = now;
+    uint64_t cycles = g_pm_cycles;
+    spinlock_unlock_irqrestore(&g_clock_lock, flags);
+    return cycles;
+}
 
 static void timer_tasks_reset(void)
 {
@@ -65,6 +88,25 @@ void timer_init(uint32_t frequency_hz)
     g_frequency_hz = frequency_hz;
     g_ticks = 0;
     timer_tasks_reset();
+    g_pm_ready = false;
+    if (acpi_pm_timer_port(&g_pm_port, &g_pm_mask))
+    {
+        uint32_t first = inl(g_pm_port) & g_pm_mask;
+        if (timer_early_delay_us(1000))
+        {
+            uint32_t second = inl(g_pm_port) & g_pm_mask;
+            uint32_t elapsed = (second - first) & g_pm_mask;
+            if (elapsed && elapsed < ACPI_PM_FREQUENCY / 10u)
+            {
+                g_pm_previous = second;
+                g_pm_cycles = 0;
+                g_pm_ready = true;
+            }
+        }
+    }
+    serial_printf("[timer] source=%s port=0x%x bits=%u irq_hz=%u",
+                  g_pm_ready ? "acpi-pm" : "pit", g_pm_ready ? g_pm_port : 0,
+                  g_pm_ready ? (g_pm_mask == UINT32_MAX ? 32u : 24u) : 0u, frequency_hz);
     uint16_t divisor = (uint16_t)(PIT_INPUT_HZ / frequency_hz);
     /* Rate-generator mode supplies one short IRQ pulse per reload period. */
     outb(PIT_COMMAND, 0x34);
@@ -75,7 +117,21 @@ void timer_init(uint32_t frequency_hz)
 
 void timer_on_tick(void)
 {
-    g_ticks++;
+    ++g_timer_delivered_irqs;
+    if (g_pm_ready)
+    {
+        uint64_t cycles = timer_clock_cycles();
+        uint64_t ticks = (cycles / ACPI_PM_FREQUENCY) * g_frequency_hz +
+                         (cycles % ACPI_PM_FREQUENCY) * g_frequency_hz / ACPI_PM_FREQUENCY;
+        if (ticks > g_ticks && ticks - g_ticks > 1)
+        {
+            uint64_t missed = ticks - g_ticks - 1;
+            g_timer_caught_up_ticks += missed;
+            if (missed > g_timer_max_catchup_ticks) g_timer_max_catchup_ticks = missed;
+        }
+        g_ticks = ticks;
+    }
+    else g_ticks++;
 
     /* IRQ0 can interrupt code which already owns a generic kernel spinlock.
      * Timer tasks enter the scheduler, storage and network stacks, so running
@@ -108,6 +164,12 @@ uint64_t timer_ticks(void)
 
 uint64_t timer_monotonic_millis(void)
 {
+    if (g_pm_ready)
+    {
+        uint64_t cycles = timer_clock_cycles();
+        return (cycles / ACPI_PM_FREQUENCY) * 1000u +
+               (cycles % ACPI_PM_FREQUENCY) * 1000u / ACPI_PM_FREQUENCY;
+    }
     uint64_t ticks = timer_ticks();
     uint32_t frequency = timer_frequency();
     if (frequency == 0)
@@ -116,6 +178,46 @@ uint64_t timer_monotonic_millis(void)
     }
     /* Divide first so ordinary uptimes do not overflow ticks * 1000. */
     return (ticks / frequency) * 1000u + ((ticks % frequency) * 1000u) / frequency;
+}
+
+uint64_t timer_monotonic_resolution_ns(void)
+{
+    if (g_pm_ready) return 1000000u;
+    uint64_t frequency = g_frequency_hz;
+    if (!frequency) return 0;
+    uint64_t resolution = (1000000000u + frequency - 1u) / frequency;
+    return resolution < 1000000u ? 1000000u : resolution;
+}
+
+uint64_t timer_deadline_after_millis(uint64_t milliseconds)
+{
+    uint64_t frequency = g_frequency_hz;
+    if (!frequency) return g_ticks == UINT64_MAX ? UINT64_MAX : g_ticks + 1;
+    uint64_t seconds = milliseconds / 1000u, fraction;
+    uint64_t scale = 1000u, base = 0;
+    if (g_pm_ready)
+    {
+        uint64_t cycles = timer_clock_cycles();
+        if (seconds > UINT64_MAX - cycles / ACPI_PM_FREQUENCY) return UINT64_MAX;
+        seconds += cycles / ACPI_PM_FREQUENCY;
+        scale *= ACPI_PM_FREQUENCY;
+        fraction = (cycles % ACPI_PM_FREQUENCY) * 1000u +
+                   (milliseconds % 1000u) * ACPI_PM_FREQUENCY;
+        seconds += fraction / scale;
+        fraction %= scale;
+    }
+    else
+    {
+        base = g_ticks;
+        fraction = milliseconds % 1000u;
+    }
+    if (seconds > UINT64_MAX / frequency) return UINT64_MAX;
+    uint64_t ticks = seconds * frequency;
+    uint64_t partial = (fraction * frequency + scale - 1u) / scale;
+    if (!g_pm_ready) ++partial; /* The current PIT tick may be almost over. */
+    if (partial > UINT64_MAX - ticks) return UINT64_MAX;
+    ticks += partial;
+    return ticks > UINT64_MAX - base ? UINT64_MAX : base + ticks;
 }
 
 uint32_t timer_frequency(void)

@@ -41,7 +41,8 @@ typedef enum
     IO_VFS_MKDIR_MODE,
     IO_VFS_CHMOD_PATH,
     IO_VFS_LOG, IO_VFS_SYMLINK, IO_VFS_ACCESS, IO_VFS_MKFIFO, IO_VFS_TRUNCATE_PATH,
-    IO_VFS_STATVFS, IO_VFS_PATH_STATVFS
+    IO_VFS_STATVFS, IO_VFS_PATH_STATVFS,
+    IO_VFS_PREPARE_DATA /* Internal: retained file in request's generic cwd/context slot. */
 } io_vfs_opcode_t;
 
 /* The complete object lives in io_request_buffer(). All data/path bytes are
@@ -70,6 +71,8 @@ void io_vfs_execute(io_request_t *request, io_service_result_t *result,
                      fd_retirement_queue_t *retirement);
 /* Registered request, bounded preparation guard. Only resident regular-file
  * reads, seeks, metadata and immutable directory-next steps complete here.
+ * Bounded resident pathname metadata also completes without allocation;
+ * symlink expansion, large lookups and lock/mapping work stay on the worker.
  * Directory cursor contention falls back; snapshot open/refresh stay workers.
  * False means no
  * operation occurred and the same request must go to the protected worker. */

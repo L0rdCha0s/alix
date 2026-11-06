@@ -6,6 +6,15 @@ Implementation: `src/kernel/alixfs.c`
 VFS integration: `src/kernel/vfs.c` (mount + writeback orchestration)  
 Public API: `include/alixfs.h`
 
+Mount loads metadata and small payloads eagerly. Regular files larger than
+64 KiB retain their validated logical size and disk data offset until first
+read/mapping use. This changes no on-disk record layout. Metadata-only updates
+keep their existing path; rename/full writeback of an unloaded large file copies
+the old extent through the existing 64 KiB streaming buffer, without allocating
+the file in the kernel heap. The mount gate protects source extents across these
+reads and publication updates the saved offset. See
+[VFS lazy payload ownership](vfs.md) and its native browser evidence.
+
 ## Goals and Scope
 
 AlixFS2 is intentionally small and pragmatic:
@@ -62,7 +71,12 @@ Notes:
   reserved tail space; their original-table pointers are flushed before the
   extension is written, and the new capacity is published last. A volume
   without enough tail space or scratch memory keeps its original capacity.
-- The free list is capped (`ALIXFS2_MAX_FREE_CHUNKS`); if it fills up, additional frees may be dropped (space leak until reformat).
+- The persisted free-span cache is capped (`ALIXFS2_MAX_FREE_CHUNKS`). Before
+  extending the data frontier, allocation recovers gaps from the resident chunk
+  table, validates bounds/non-overlap, and retains the largest 128 gaps in this
+  cache. Omitted gaps remain recoverable on a later scan. Release coalesces both
+  neighbours and returns free tail space to the frontier. This changes no disk
+  record layout and is not a general filesystem repair operation.
 
 ## Chunk Table (`alixfs2_chunk_entry_t`)
 
@@ -200,6 +214,19 @@ Flush flow (typical):
    - the header if dirty (`alixfs_flush_header`)
 
 Design note: payload writes happen before the chunk table entry is persisted, which tends to avoid pointing on-disk metadata at unwritten payload data. This is not a journal, but it is an intentional “data first, metadata later” ordering.
+
+Records containing more than 64 KiB of file data use a private replacement
+extent and a heap-owned 64 KiB output buffer. Header/name/mode are a separate
+small immutable snapshot. Each data slice is copied with the node lock held;
+disk IO runs after unlocking, and no node data pointer survives the unlock.
+If the node generation changes, the unpublished extent is released and the
+snapshot is retried. Only a completed stable snapshot replaces the old chunk
+entry. Concurrent writers can therefore extend a sync's duration. IO/allocation
+failure preserves the old extent and dirty state for retry. Smaller records
+keep the existing bounded full snapshot; metadata-only updates still write only
+the prefix and mode extension. Allocator recovery additionally uses an index
+proportional to allocated chunk entries, sorted with constant-stack kernel
+`qsort`; no full-file temporary allocation is needed.
 
 The mount writeback gate also owns disk-space reclamation. A final VFS node
 release frees its in-memory buffers, then transfers its remaining disk identity

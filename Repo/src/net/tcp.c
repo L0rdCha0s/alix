@@ -78,6 +78,12 @@ static inline void tcp_irq_restore(uint64_t flags)
 #define NET_TCP_DEFAULT_MSS           NET_TCP_MAX_PAYLOAD
 #define NET_TCP_RX_MAX_CAPACITY       (5U * 1024U * 1024U)
 #define NET_TCP_RX_INITIAL_CAPACITY   (64U * 1024U)
+/* Nominal receive-buffer capacity retained across the socket pool. Protected
+ * by tcp_lock, like the buffers themselves; growth is best-effort. */
+uint64_t g_tcp_rx_capacity_bytes;
+uint64_t g_tcp_rx_peak_capacity_bytes;
+uint64_t g_tcp_rx_growths;
+uint64_t g_tcp_rx_growth_failures;
 #define NET_TCP_RX_WAKE_THRESHOLD     (NET_TCP_MAX_PAYLOAD * 4U)
 #define NET_TCP_RX_RESUME_THRESHOLD   (NET_TCP_MAX_PAYLOAD * 16U)
 #define NET_TCP_WINDOW_UPDATE_THRESHOLD (NET_TCP_MAX_PAYLOAD * 16U)
@@ -139,6 +145,9 @@ struct net_tcp_socket
     size_t rx_capacity;
     size_t rx_head;
     bool rx_backpressure;
+    size_t rx_growth_credit;
+    uint64_t rx_growth_activity_tick;
+    uint64_t rx_growth_retry_tick;
     uint16_t advertised_window;
     uint32_t advertised_window_effective;
     uint8_t *tx_frame;
@@ -398,6 +407,7 @@ static void tcp_reset_socket(net_tcp_socket_t *socket)
     tcp_reassembly_clear(socket);
     if (socket->rx_buffer)
     {
+        g_tcp_rx_capacity_bytes -= socket->rx_capacity;
         free(socket->rx_buffer);
     }
     if (socket->tx_frame)
@@ -436,11 +446,10 @@ static bool tcp_init_rx_buffer(net_tcp_socket_t *socket)
     {
         return false;
     }
-    /* An unopened socket has no peer or receive traffic. Reserve a small
-     * buffer there; connect expands it before advertising the normal window.
-     * Do not consume 5 MiB of the fixed kernel heap for every idle descriptor. */
-    size_t capacity = socket->state == TCP_STATE_UNUSED ?
-                      NET_TCP_RX_INITIAL_CAPACITY : NET_TCP_RX_MAX_CAPACITY;
+    /* A connection must not reserve the full 5 MiB limit before receiving any
+     * data. Advertise the actual small buffer; grow only as queued data needs
+     * more room, retaining zero-window backpressure if growth is unavailable. */
+    size_t capacity = NET_TCP_RX_INITIAL_CAPACITY;
     if (socket->rx_buffer && socket->rx_capacity >= capacity)
     {
         return true;
@@ -451,15 +460,73 @@ static bool tcp_init_rx_buffer(net_tcp_socket_t *socket)
     {
         return false;
     }
+    if (socket->rx_buffer) g_tcp_rx_capacity_bytes -= socket->rx_capacity;
     free(socket->rx_buffer);
     socket->rx_buffer = buffer;
     socket->rx_capacity = capacity;
+    g_tcp_rx_capacity_bytes += capacity;
+    if (g_tcp_rx_capacity_bytes > g_tcp_rx_peak_capacity_bytes)
+        g_tcp_rx_peak_capacity_bytes = g_tcp_rx_capacity_bytes;
     socket->rx_head = 0;
     socket->rx_size = 0;
     socket->rx_backpressure = false;
     socket->advertised_window = UINT16_MAX;
     socket->advertised_window_effective = UINT16_MAX;
     return true;
+}
+
+static bool tcp_grow_rx_buffer(net_tcp_socket_t *socket, size_t need)
+{
+    if (!socket->rx_buffer || socket->rx_capacity >= NET_TCP_RX_MAX_CAPACITY ||
+        need > NET_TCP_RX_MAX_CAPACITY) return false;
+    uint64_t now = timer_ticks();
+    if (now < socket->rx_growth_retry_tick) return false;
+    size_t capacity = socket->rx_capacity * 2;
+    if (capacity < need) capacity = need;
+    if (capacity > NET_TCP_RX_MAX_CAPACITY) capacity = NET_TCP_RX_MAX_CAPACITY;
+    if (socket->rx_head)
+    {
+        memmove(socket->rx_buffer, socket->rx_buffer + socket->rx_head, socket->rx_size);
+        socket->rx_head = 0;
+    }
+    uint8_t *buffer = realloc(socket->rx_buffer, capacity);
+    if (!buffer)
+    {
+        uint64_t frequency = timer_frequency();
+        if (!frequency) frequency = 100;
+        socket->rx_growth_retry_tick = now + (frequency + 9) / 10;
+        ++g_tcp_rx_growth_failures;
+        return false;
+    }
+    g_tcp_rx_capacity_bytes += capacity - socket->rx_capacity;
+    if (g_tcp_rx_capacity_bytes > g_tcp_rx_peak_capacity_bytes)
+        g_tcp_rx_peak_capacity_bytes = g_tcp_rx_capacity_bytes;
+    ++g_tcp_rx_growths;
+    socket->rx_buffer = buffer;
+    socket->rx_capacity = capacity;
+    socket->rx_growth_retry_tick = 0;
+    return true;
+}
+
+static void tcp_rx_note_data(net_tcp_socket_t *socket, size_t count)
+{
+    if (socket->rx_capacity >= NET_TCP_RX_MAX_CAPACITY) return;
+    uint64_t now = timer_ticks(), frequency = timer_frequency();
+    if (!frequency) frequency = 100;
+    if (now - socket->rx_growth_activity_tick > frequency) socket->rx_growth_credit = 0;
+    socket->rx_growth_activity_tick = now;
+    /* A fast reader can keep occupancy low while a scaled receive window
+     * limits the sender. Recent delivered traffic also justifies growth in
+     * that case; idle/low-volume connections retain their small reservation. */
+    size_t window_limit = (size_t)UINT16_MAX << socket->local_window_scale;
+    if (socket->window_scaling_active && socket->rx_capacity < window_limit)
+        socket->rx_growth_credit += count;
+    else socket->rx_growth_credit = 0;
+    if (socket->rx_size >= socket->rx_capacity / 2 || socket->rx_growth_credit >= socket->rx_capacity / 2)
+    {
+        (void)tcp_grow_rx_buffer(socket, socket->rx_capacity + 1);
+        socket->rx_growth_credit = 0;
+    }
 }
 
 static bool tcp_init_tx_buffer(net_tcp_socket_t *socket)
@@ -694,6 +761,7 @@ static void tcp_reassembly_drain(net_tcp_socket_t *socket)
         }
         memcpy(socket->rx_buffer + socket->rx_head + socket->rx_size, seg->data, seg->len);
         socket->rx_size += seg->len;
+        tcp_rx_note_data(socket, seg->len);
         socket->recv_next += (uint32_t)seg->len;
         socket->reass_head = seg->next;
         socket->reass_bytes -= seg->len;
@@ -749,7 +817,7 @@ static bool tcp_rx_reserve_space(net_tcp_socket_t *socket, size_t additional)
         }
     }
 
-    return false;
+    return tcp_grow_rx_buffer(socket, socket->rx_size + additional);
 }
 
 static void tcp_rx_consume(net_tcp_socket_t *socket, size_t consumed)
@@ -1258,8 +1326,7 @@ bool net_tcp_socket_connect(net_tcp_socket_t *socket, uint32_t remote_ip, uint16
         return false;
     }
 
-    if ((!socket->rx_buffer || socket->rx_capacity < NET_TCP_RX_MAX_CAPACITY) &&
-        !tcp_init_rx_buffer(socket))
+    if (!tcp_init_rx_buffer(socket))
     {
         tcp_mark_error(socket, ENOMEM, "rx alloc failed");
         goto done;
@@ -2565,6 +2632,7 @@ static void tcp_process_payload(net_tcp_socket_t *socket, uint32_t seq_num,
 
     memcpy(socket->rx_buffer + socket->rx_head + socket->rx_size, payload, payload_len);
     socket->rx_size += payload_len;
+    tcp_rx_note_data(socket, payload_len);
     socket->recv_next += (uint32_t)payload_len;
     tcp_signal_read_event(socket);
     size_t rx_free = 0;

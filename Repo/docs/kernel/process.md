@@ -77,6 +77,14 @@ Per-CPU current pointers (arrays indexed by CPU):
 - `g_current_processes[SMP_MAX_CPUS]`
 - `g_idle_threads[SMP_MAX_CPUS]`
 
+Run-current shortcuts and queue eligibility reject thread exit/destruction and
+owning-process termination even if a completing kernel wait left the thread's
+state enum RUNNING. Terminal callers retain stack/CPU ownership until the usual
+assembly handoff; they cannot return through the no-peer shortcut. Optional
+stopped-guest profiles expose `g_sched_terminal_current_rejections` and
+`g_sched_terminal_switches`, plus thread/process lifetime and per-CPU handoff
+state. See [the Zen retirement investigation](../zen-memory-pressure-2026-11-06.md).
+
 ## Translation Unit Layout
 
 The files under `src/kernel/process/` are compiled as separate translation units. Shared implementation contracts are declared in `include/process_internal.h`; `src/kernel/process.c` remains only as a historical compatibility stub and is excluded by the build.
@@ -202,7 +210,7 @@ Preemption is driven by the timer interrupt and a “schedule IPI” broadcast:
 - Schedule IPI handler: `src/kernel/smp.c:smp_handle_schedule_ipi`
   - Also calls `process_on_timer_tick(frame)`
 
-`process_on_timer_tick` (in `process_api.c`) decrements the current thread’s time slice and, when it expires, forces the interrupted context to route through a preemption trampoline:
+`process_on_timer_tick` (in `process_api.c`) charges the current thread’s time slice from elapsed timer ticks since dispatch and, when it expires, forces the interrupted context to route through a preemption trampoline. Wakeup IPIs use this same handler but do not consume additional time within the same tick:
 
 - **Kernel-mode threads**: rewrite `frame->rip` to `process_preempt_trampoline` (`src/arch/x86/process_preempt.S`)
 - **User-mode threads**: rewrite `frame->rip` to a user-mapped preemption stub at `USER_PREEMPT_STUB_BASE` (bytes live in `g_user_preempt_stub` in `process_common.c` and are mapped into each user process)
@@ -218,7 +226,7 @@ The timer tick counter advances even when the interrupted context has a generic 
 - Process teardown uses the lock order scheduler → process thread list → subsidiary queues. Thread resources are deferred until no CPU or queue references them. During a context switch, `g_switch_out_threads[cpu]` remains published as a hazard pointer until outgoing-thread bookkeeping, join wakeups, and scheduler-locked deferred reclamation have completed. Final process teardown severs every `thread->process` link under the same scheduler lock before freeing the address space.
 - Sleeping uses a global sleep list and a periodic wake check: `sleep_queue_wake_due(timer_ticks())`.
 
-Process-private futex waits use 64 address-keyed buckets owned by the process.
+Process-private futex waits use 1,024 address-keyed buckets owned by the process.
 Wake examines only the matching bucket, rather than every process thread.
 Scheduler locking still serializes the expected-value check, registration and
 notification, including wake before the thread enters its wait queue. Hash
@@ -234,12 +242,21 @@ under the global scheduler lock. On contention it snapshots a process-private
 wake sequence, releases scheduler ownership and obtains one checked scalar read.
 After reacquiring the scheduler lock, an unchanged sequence allows that value to
 serve as the comparison point. A crossing wake invalidates it and retries with
-fresh data. Every valid process futex wake increments the sequence, including
-an empty wake. This closes the load-to-registration gap without repeatedly
+fresh data. Wakes with possible waiters increment the sequence under scheduler
+ownership. This closes the load-to-registration gap without repeatedly
 competing for a second memory-lock acquisition. No physical alias survives the
 checked read. Thread termination, faults and pending signals are checked before
 registration. Coarse wake-to-resume counters by CPU use native timer ticks;
 they do not provide nanosecond clock accuracy.
+
+Each waiter publishes a count in its process-private hash bucket before reading
+the user word, including during the unlocked checked-read interval. Unlink,
+failure, timeout and termination release that count. A waker orders its preceding
+user store with a full barrier before checking the count. A zero count permits
+return without taking the global scheduler lock; the paired barriers prevent
+the waker and waiter from both missing each other's publication. Nonzero counts
+retain the locked wake/epoch path. The browser evaluator's
+`--futex-empty-locked` option disables this optimization for matched comparisons.
 
 ## SMP Safety Notes
 
@@ -266,6 +283,11 @@ context hashing does not require rewriting or invalidating kernel stack page
 permissions; that repair runs only with the optional page-protection diagnostics.
 Global orphan maintenance is coalesced to one sweep per timer tick instead of
 scanning the process list on every CPU's context switch.
+
+Runnable aging starts at `ready_queue_tick`, recorded when a thread enters a
+run queue. Time spent blocked does not earn an aging bonus. Previously the
+last dispatch timestamp let a long-sleeping thread wake with the maximum bonus,
+competing with timing-sensitive work despite having just become runnable.
 
 UI-priority threads, including the compositor and USB input pollers, receive at most one timer
 tick per quantum (10 ms at 100 Hz), including when the normal quantum is raised

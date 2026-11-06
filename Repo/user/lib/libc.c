@@ -35,6 +35,11 @@ int *__errno_location(void)
 #define SIZE_MAX_VALUE ((size_t)-1)
 #define LIBC_MAX_PASSWD_BYTES (64u * 1024u)
 #define USER_HEAP_LARGE_THRESHOLD ((size_t)(64u * 1024u * 1024u))
+#define USER_HEAP_SMALL_BIN_SHIFT 10u
+#define USER_HEAP_SMALL_BIN_LIMIT (1UL << USER_HEAP_SMALL_BIN_SHIFT)
+#define USER_HEAP_SMALL_BIN_COUNT (USER_HEAP_SMALL_BIN_LIMIT / ALIGNMENT)
+#define USER_HEAP_BIN_COUNT (USER_HEAP_SMALL_BIN_COUNT + 64u)
+#define USER_HEAP_BITMAP_WORDS ((USER_HEAP_BIN_COUNT + 63u) / 64u)
 #define ENABLE_USER_MEM_DEBUG_LOGS 1
 
 typedef struct heap_block
@@ -50,7 +55,8 @@ static heap_block_t *g_heap_head = NULL;
 static heap_block_t *g_heap_tail = NULL;
 static uintptr_t g_heap_committed_end;
 static alix_mutex_t g_heap_lock;
-static heap_block_t *g_heap_free_bins[64];
+static heap_block_t *g_heap_free_bins[USER_HEAP_BIN_COUNT];
+static uint64_t g_heap_free_bin_bitmap[USER_HEAP_BITMAP_WORDS];
 _Static_assert(sizeof(heap_block_t) % ALIGNMENT == 0, "heap payload alignment");
 
 typedef struct
@@ -317,7 +323,10 @@ static size_t align_size(size_t size)
 
 static unsigned free_bin_index(size_t size)
 {
-    return size ? 63u - (unsigned)__builtin_clzll((unsigned long long)size) : 0;
+    if (size <= USER_HEAP_SMALL_BIN_LIMIT)
+        return size ? (unsigned)((size - 1u) / ALIGNMENT) : 0;
+    return USER_HEAP_SMALL_BIN_COUNT - USER_HEAP_SMALL_BIN_SHIFT +
+           63u - (unsigned)__builtin_clzll((unsigned long long)size);
 }
 
 static void free_bin_insert(heap_block_t *block)
@@ -327,14 +336,18 @@ static void free_bin_insert(heap_block_t *block)
     block->free_next = g_heap_free_bins[index];
     if (block->free_next) block->free_next->free_prev = block;
     g_heap_free_bins[index] = block;
+    g_heap_free_bin_bitmap[index / 64u] |= (uint64_t)1 << (index & 63u);
 }
 
 static void free_bin_remove(heap_block_t *block)
 {
+    unsigned index = free_bin_index(block->size);
     if (block->free_prev) block->free_prev->free_next = block->free_next;
-    else g_heap_free_bins[free_bin_index(block->size)] = block->free_next;
+    else g_heap_free_bins[index] = block->free_next;
     if (block->free_next) block->free_next->free_prev = block->free_prev;
     block->free_next = block->free_prev = NULL;
+    if (!g_heap_free_bins[index])
+        g_heap_free_bin_bitmap[index / 64u] &= ~((uint64_t)1 << (index & 63u));
 }
 
 /* The incoming block is free but has not yet entered a bin. */
@@ -428,14 +441,22 @@ static void coalesce(heap_block_t *block)
 
 static heap_block_t *find_free_block(size_t size)
 {
-    for (unsigned index = free_bin_index(size); index < 64; ++index)
+    unsigned first = free_bin_index(size);
+    for (unsigned word = first / 64u; word < USER_HEAP_BITMAP_WORDS; ++word)
     {
-        for (heap_block_t *block = g_heap_free_bins[index]; block; block = block->free_next)
+        uint64_t mask = g_heap_free_bin_bitmap[word];
+        if (word == first / 64u) mask &= ~(uint64_t)0 << (first & 63u);
+        while (mask)
         {
-            if (block->size >= size)
+            unsigned index = word * 64u + (unsigned)__builtin_ctzll(mask);
+            mask &= mask - 1u;
+            for (heap_block_t *block = g_heap_free_bins[index]; block; block = block->free_next)
             {
-                free_bin_remove(block);
-                return block;
+                if (block->size >= size)
+                {
+                    free_bin_remove(block);
+                    return block;
+                }
             }
         }
     }
@@ -4943,7 +4964,8 @@ static int libc_cpu_clock(clockid_t clock, syscall_cpu_clock_t *snapshot)
 
 int clock_gettime(clockid_t clock, struct timespec *value)
 {
-    if (clock < CLOCK_REALTIME || clock > CLOCK_THREAD_CPUTIME_ID) { errno = EINVAL; return -1; }
+    if ((clock < CLOCK_REALTIME || clock > CLOCK_THREAD_CPUTIME_ID) && clock != CLOCK_BOOTTIME)
+    { errno = EINVAL; return -1; }
     if (!value) { errno = EFAULT; return -1; }
     if (clock == CLOCK_PROCESS_CPUTIME_ID || clock == CLOCK_THREAD_CPUTIME_ID)
     {
@@ -4956,7 +4978,8 @@ int clock_gettime(clockid_t clock, struct timespec *value)
                                 snapshot.tick_frequency);
         return 0;
     }
-    uint64_t milliseconds = clock == CLOCK_MONOTONIC ? sys_monotonic_millis() : sys_time_millis();
+    uint64_t milliseconds = (clock == CLOCK_MONOTONIC || clock == CLOCK_BOOTTIME) ?
+        sys_monotonic_millis() : sys_time_millis();
     value->tv_sec = (time_t)(milliseconds / 1000u);
     value->tv_nsec = (long)((milliseconds % 1000u) * 1000000u);
     return 0;
@@ -4964,12 +4987,23 @@ int clock_gettime(clockid_t clock, struct timespec *value)
 
 int clock_getres(clockid_t clock, struct timespec *value)
 {
-    if (clock < CLOCK_REALTIME || clock > CLOCK_THREAD_CPUTIME_ID) { errno = EINVAL; return -1; }
+    if ((clock < CLOCK_REALTIME || clock > CLOCK_THREAD_CPUTIME_ID) && clock != CLOCK_BOOTTIME)
+    { errno = EINVAL; return -1; }
     if (!value) return 0;
+    if (clock == CLOCK_MONOTONIC || clock == CLOCK_BOOTTIME)
+    {
+        int64_t resolution = sys_monotonic_resolution_ns();
+        if (resolution > 0 && resolution <= 1000000000)
+        {
+            value->tv_sec = resolution / 1000000000;
+            value->tv_nsec = resolution % 1000000000;
+            return 0;
+        }
+    }
     syscall_cpu_clock_t snapshot = {0};
     if (libc_cpu_clock(clock, &snapshot)) return -1;
     uint64_t nanoseconds = (1000000000ull + snapshot.tick_frequency - 1) / snapshot.tick_frequency;
-    if ((clock == CLOCK_REALTIME || clock == CLOCK_MONOTONIC) && nanoseconds < 1000000u)
+    if ((clock == CLOCK_REALTIME || clock == CLOCK_MONOTONIC || clock == CLOCK_BOOTTIME) && nanoseconds < 1000000u)
         nanoseconds = 1000000u;
     value->tv_sec = (time_t)(nanoseconds / 1000000000u);
     value->tv_nsec = (long)(nanoseconds % 1000000000u);

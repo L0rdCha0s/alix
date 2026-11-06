@@ -21,8 +21,9 @@ void process_configure_timer(void)
     if (!ticks) ticks = 1;
     if (ticks > UINT32_MAX) ticks = UINT32_MAX;
     __atomic_store_n(&g_time_slice_ticks, (uint32_t)ticks, __ATOMIC_RELEASE);
-    serial_printf("[sched] timer_ready hz=%u normal_ms=%u ticks=%u ui_ticks=1",
-                  frequency, PROCESS_TIME_SLICE_DEFAULT_MS, (uint32_t)ticks);
+    serial_printf("[sched] timer_ready hz=%u normal_ms=%u ticks=%u ui_ticks=%u",
+                  frequency, PROCESS_TIME_SLICE_DEFAULT_MS, (uint32_t)ticks,
+                  scheduler_ui_time_slice_ticks());
 }
 
 /*

@@ -53,6 +53,46 @@ int io_vfs_service_snapshot(io_service_status_t *out)
     return service ? io_service_snapshot(service, out) : -ENOSYS;
 }
 
+static void io_vfs_release_prepared_node(void *node)
+{
+    vfs_node_release_owned(node);
+}
+
+int io_vfs_prepare_data_kernel(vfs_node_t *node)
+{
+    if (!node || spinlock_preempt_disabled()) return -EINVAL;
+    io_service_t *service = io_vfs_service_current();
+    if (!service) return -ENOSYS;
+    spinlock_preempt_disable();
+    io_request_t *request = NULL;
+    int result = io_service_request_create(service, sizeof(io_vfs_operation_t), 0, 0, &request);
+    if (!result)
+    {
+        vfs_node_retain(node);
+        result = io_request_bind(request, NULL, node, io_vfs_release_prepared_node);
+        if (result) vfs_node_release(node); /* Input owner prevents final teardown. */
+        if (!result) result = process_io_register_current(request);
+        if (result) io_request_waiter_abandon(request);
+        else
+        {
+            ((io_vfs_operation_t *)io_request_buffer(request))->opcode = IO_VFS_PREPARE_DATA;
+            result = io_service_submit(service, request);
+            if (result) (void)process_io_finish_current(true);
+        }
+    }
+    spinlock_preempt_enable();
+    if (result) return result;
+    io_request_status_t status;
+    result = process_io_wait_current(&status);
+    spinlock_preempt_disable();
+    io_request_t *completed = NULL;
+    if (!result) result = process_io_result_current(&completed, &status);
+    if (!result) result = (int)status.result;
+    (void)process_io_finish_current(result != 0);
+    spinlock_preempt_enable();
+    return result;
+}
+
 /* All temporary ownership is either transferred into the registered request
  * or unwound by deferred put/abandon before the preparation guard is dropped. */
 static int io_vfs_prepare(const char *path, bool user_path, uint32_t opcode, size_t capacity,

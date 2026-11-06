@@ -457,6 +457,11 @@ uint64_t sys_monotonic_millis(void)
     return (uint64_t)syscall0(SYSCALL_MONOTONIC_MILLIS);
 }
 
+int64_t sys_monotonic_resolution_ns(void)
+{
+    return syscall0(SYSCALL_MONOTONIC_RESOLUTION_NS);
+}
+
 uintptr_t sys_thread_get_tls(void)
 {
     return (uintptr_t)syscall0(SYSCALL_THREAD_GET_TLS);
@@ -540,6 +545,11 @@ int sys_thread_info(uint64_t tid, syscall_thread_info_t *info)
 int sys_thread_set_name(uint64_t tid, const char *name)
 {
     return (int)syscall2(SYSCALL_THREAD_SET_NAME, (long)tid, (long)name);
+}
+
+int sys_thread_priority(uint64_t tid, int priority)
+{
+    return (int)syscall2(SYSCALL_THREAD_PRIORITY, (long)tid, (long)priority);
 }
 
 int sys_thread_prepare_exit(void)

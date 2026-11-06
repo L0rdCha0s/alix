@@ -2,7 +2,8 @@
 
 /*
  * Process-private, 32-bit address waits. The expected-value check and waiter
- * publication are serialized with wake by the scheduler lock. A wake marks
+ * publication are serialized with queued wakes by the scheduler lock. An empty
+ * wake uses the registration count published before that check. A wake marks
  * the heap-owned thread before touching its queue, so a wake in the interval
  * before wait_queue_wait() enqueues cannot be lost.
  *
@@ -19,6 +20,8 @@ uint64_t g_futex_wake_candidates;
 uint64_t g_futex_woken;
 uint64_t g_futex_memory_busy_retries;
 uint64_t g_futex_slow_read_reused, g_futex_epoch_retries;
+uint32_t g_futex_empty_wake_fast_enabled = 1;
+uint64_t g_futex_empty_wakes_avoided;
 /* Coarse clock accounting, never a claim of per-wake nanosecond accuracy. */
 uint64_t g_futex_resume_count[SMP_MAX_CPUS], g_futex_resume_ticks[SMP_MAX_CPUS];
 uint64_t g_futex_resume_max_ticks[SMP_MAX_CPUS];
@@ -29,24 +32,44 @@ static size_t futex_bucket(uintptr_t address)
            (PROCESS_FUTEX_BUCKET_COUNT - 1u);
 }
 
+static void futex_count_locked(thread_t *thread, uintptr_t address)
+{
+    if (thread->futex_counted) return;
+    thread->futex_address = address;
+    /* Publish before reading the user word; pair with the empty wake's
+     * store-to-load barrier before checking this count. */
+    __atomic_add_fetch(&thread->process->futex_waiter_counts[futex_bucket(address)],
+                       1u, __ATOMIC_SEQ_CST);
+    thread->futex_counted = true;
+}
+
 /* Every bucket/link operation uses the scheduler lock. The process owns the
  * bucket heads and the thread owns its intrusive links throughout a wait. */
 static void futex_unlink_locked(thread_t *thread)
 {
-    if (!thread->futex_indexed) return;
-    if (thread->futex_bucket_prev)
-        thread->futex_bucket_prev->futex_bucket_next = thread->futex_bucket_next;
-    else
-        thread->process->futex_buckets[futex_bucket(thread->futex_address)] = thread->futex_bucket_next;
-    if (thread->futex_bucket_next)
-        thread->futex_bucket_next->futex_bucket_prev = thread->futex_bucket_prev;
+    if (thread->futex_indexed)
+    {
+        if (thread->futex_bucket_prev)
+            thread->futex_bucket_prev->futex_bucket_next = thread->futex_bucket_next;
+        else
+            thread->process->futex_buckets[futex_bucket(thread->futex_address)] = thread->futex_bucket_next;
+        if (thread->futex_bucket_next)
+            thread->futex_bucket_next->futex_bucket_prev = thread->futex_bucket_prev;
+    }
     thread->futex_bucket_prev = NULL;
     thread->futex_bucket_next = NULL;
     thread->futex_indexed = false;
+    if (thread->futex_counted)
+    {
+        __atomic_sub_fetch(&thread->process->futex_waiter_counts[futex_bucket(thread->futex_address)],
+                           1u, __ATOMIC_RELEASE);
+        thread->futex_counted = false;
+    }
 }
 
 static void futex_register_locked(thread_t *thread, uintptr_t address)
 {
+    futex_count_locked(thread, address);
     size_t bucket = futex_bucket(address);
     thread->futex_address = address;
     thread->futex_bucket_prev = NULL;
@@ -96,18 +119,21 @@ int process_futex_wait(uintptr_t address, uint32_t expected, uint32_t timeout_ms
         flags = scheduler_lock_acquire("futex_wait_register");
         if (thread->exited || thread->pending_destroy || !thread_lifetime_active(thread))
         {
+            process_futex_cancel_wait_locked(thread);
             scheduler_lock_release(flags);
             return SYSCALL_FUTEX_INTERRUPTED;
         }
         bool busy = false;
+        futex_count_locked(thread, address);
         if (process_memory_try_read_user_u32(process, address, &value, &busy)) break;
         if (!busy)
         {
+            process_futex_cancel_wait_locked(thread);
             scheduler_lock_release(flags);
             return SYSCALL_FUTEX_FAULT;
         }
         ++g_futex_memory_busy_retries;
-        uint64_t wake_sequence = process->futex_wake_sequence;
+        uint64_t wake_sequence = __atomic_load_n(&process->futex_wake_sequence, __ATOMIC_ACQUIRE);
         scheduler_lock_release(flags);
         /* Obtain a checked scalar outside scheduler serialization. Retain no
          * physical alias after memory_lock is released. A stable wake sequence
@@ -119,15 +145,17 @@ int process_futex_wait(uintptr_t address, uint32_t expected, uint32_t timeout_ms
         flags = scheduler_lock_acquire("futex_wait_validate");
         if (thread->exited || thread->pending_destroy || !thread_lifetime_active(thread))
         {
+            process_futex_cancel_wait_locked(thread);
             scheduler_lock_release(flags);
             return SYSCALL_FUTEX_INTERRUPTED;
         }
         if (!valid)
         {
+            process_futex_cancel_wait_locked(thread);
             scheduler_lock_release(flags);
             return SYSCALL_FUTEX_FAULT;
         }
-        if (process->futex_wake_sequence == wake_sequence)
+        if (__atomic_load_n(&process->futex_wake_sequence, __ATOMIC_ACQUIRE) == wake_sequence)
         {
             ++g_futex_slow_read_reused;
             break;
@@ -137,16 +165,19 @@ int process_futex_wait(uintptr_t address, uint32_t expected, uint32_t timeout_ms
     }
     if (value != expected)
     {
+        process_futex_cancel_wait_locked(thread);
         scheduler_lock_release(flags);
         return SYSCALL_FUTEX_AGAIN;
     }
     if (process_signal_pending_locked(thread))
     {
+        process_futex_cancel_wait_locked(thread);
         scheduler_lock_release(flags);
         return SYSCALL_FUTEX_INTERRUPTED;
     }
     if (timeout_ms == 0)
     {
+        process_futex_cancel_wait_locked(thread);
         scheduler_lock_release(flags);
         return SYSCALL_FUTEX_TIMED_OUT;
     }
@@ -165,14 +196,10 @@ int process_futex_wait(uintptr_t address, uint32_t expected, uint32_t timeout_ms
     }
     else
     {
-        uint64_t frequency = timer_frequency();
-        uint64_t ticks = (timeout_ms / 1000u) * frequency +
-                         ((timeout_ms % 1000u) * frequency + 999u) / 1000u;
-        if (ticks == 0)
-        {
-            ticks = 1;
-        }
-        (void)wait_queue_wait_timeout(&thread->futex_queue, futex_notified, thread, ticks);
+        uint64_t deadline = timer_deadline_after_millis(timeout_ms);
+        uint64_t now = timer_ticks();
+        if (deadline > now)
+            (void)wait_queue_wait_timeout(&thread->futex_queue, futex_notified, thread, deadline - now);
     }
 
     flags = scheduler_lock_acquire("futex_wait_finish");
@@ -205,9 +232,19 @@ int process_futex_wake(uintptr_t address, uint32_t max_waiters)
         return SYSCALL_FUTEX_INVALID;
     }
 
+    __atomic_add_fetch(&g_futex_wake_calls, 1u, __ATOMIC_RELAXED);
+    if (__atomic_load_n(&g_futex_empty_wake_fast_enabled, __ATOMIC_RELAXED))
+    {
+        __atomic_thread_fence(__ATOMIC_SEQ_CST);
+        if (!max_waiters || !__atomic_load_n(&process->futex_waiter_counts[futex_bucket(address)],
+                                            __ATOMIC_SEQ_CST))
+        {
+            __atomic_add_fetch(&g_futex_empty_wakes_avoided, 1u, __ATOMIC_RELAXED);
+            return 0;
+        }
+    }
     uint64_t flags = scheduler_lock_acquire("futex_wake");
-    ++g_futex_wake_calls;
-    ++process->futex_wake_sequence;
+    __atomic_add_fetch(&process->futex_wake_sequence, 1u, __ATOMIC_RELEASE);
     uint32_t count = 0;
     for (thread_t *thread = process->futex_buckets[futex_bucket(address)];
          thread && count < max_waiters && count < 0x7FFFFFFFu;

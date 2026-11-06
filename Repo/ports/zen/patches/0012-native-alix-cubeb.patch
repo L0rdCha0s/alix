@@ -71,7 +71,7 @@
      or CONFIG["MOZ_OPENSL"]
 --- /dev/null
 +++ b/media/libcubeb/src/cubeb_alix.cpp
-@@ -0,0 +1,730 @@
+@@ -0,0 +1,733 @@
 +/*
 + * Copyright 2026 Alix contributors
 + * This file is made available under the ISC-style license in libcubeb/LICENSE.
@@ -417,6 +417,9 @@
 +}
 +static void * mixer_entry(void * argument) {
 +  CUBEB_REGISTER_THREAD("cubeb-alix");
++  pthread_t self = pthread_self();
++  (void)pthread_setname_np(self, "cubeb-alix");
++  (void)pthread_setpriority_np(self, PTHREAD_PRIORITY_HIGH_NP);
 +  cubeb * context = static_cast<cubeb *>(argument);
 +  pthread_mutex_lock(&context->mutex);
 +  while (!context->shutting) {

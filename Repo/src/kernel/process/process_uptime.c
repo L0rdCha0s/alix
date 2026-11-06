@@ -1,8 +1,6 @@
 #include "process_internal.h"
 
-/* Convert elapsed ticks rather than absolute boot time: short-lived processes
- * retain an accurate uptime even after the absolute ns counter would overflow.
- * Frequency is fixed by timer_init before user processes are created. */
+/* Convert elapsed clock units rather than an absolute nanosecond timestamp. */
 static uint64_t process_uptime_ticks_to_ns(uint64_t ticks, uint32_t frequency)
 {
     if (frequency == 0) return 0;
@@ -21,10 +19,9 @@ uint64_t process_current_uptime_ns(void)
      * scalar values survive the guard; no process/stack pointer escapes. */
     spinlock_preempt_disable();
     process_t *process = current_process_local();
-    uint64_t start = process ? process->started_monotonic_ticks : 0;
-    uint64_t now = timer_ticks();
-    uint32_t frequency = timer_frequency();
+    uint64_t start = process ? process->started_monotonic_millis : 0;
+    uint64_t now = timer_monotonic_millis();
     bool valid = process != NULL && now >= start;
     spinlock_preempt_enable();
-    return valid ? process_uptime_ticks_to_ns(now - start, frequency) : 0;
+    return valid ? process_uptime_ticks_to_ns(now - start, 1000) : 0;
 }

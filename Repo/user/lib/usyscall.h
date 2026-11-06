@@ -67,6 +67,7 @@ ssize_t sys_cpu_snapshot(syscall_cpu_stats_t *buffer, size_t capacity);
 int64_t sys_memory_pages(uint32_t selector);
 uint64_t sys_time_millis(void);
 uint64_t sys_monotonic_millis(void);
+int64_t sys_monotonic_resolution_ns(void);
 uint64_t sys_process_uptime_ns(void);
 int sys_resource_usage(int which, syscall_resource_usage_t *output, size_t bytes);
 int sys_cpu_clock(int which, syscall_cpu_clock_t *output);
@@ -100,6 +101,8 @@ int sys_thread_detach(uint64_t tid);
 ssize_t sys_getrandom(void *buffer, size_t length, uint32_t flags);
 int sys_thread_info(uint64_t tid, syscall_thread_info_t *info);
 int sys_thread_set_name(uint64_t tid, const char *name);
+/* QUERY returns the base priority class; setting a class returns zero. */
+int sys_thread_priority(uint64_t tid, int priority);
 int sys_thread_prepare_exit(void);
 int32_t sys_getpid(void);
 int64_t sys_thread_create(uintptr_t entry,

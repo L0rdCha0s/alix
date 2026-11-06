@@ -30,6 +30,9 @@ void alixfs_mount_destroy(alixfs_mount_t *fs);
 
 /* Load filesystem metadata from disk and populate `mount->mount_point` subtree. */
 bool alixfs_mount_load(alixfs_mount_t *fs, struct vfs_mount *mount);
+/* Read an owned file payload while the caller owns the mount backend gate.
+ * No VFS data/namespace spinlock may span this operation. */
+bool alixfs_mount_read_data(alixfs_mount_t *fs, uint64_t offset, void *buffer, size_t length);
 
 /* Flush dirty nodes in a subtree (invoked by VFS writeback). */
 bool alixfs_mount_flush_nodes(alixfs_mount_t *fs,

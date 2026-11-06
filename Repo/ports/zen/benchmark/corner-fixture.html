@@ -1,0 +1,25 @@
+<style>
+#alix-corner-fixture { position:fixed;right:40px;top:200px;width:640px;height:320px;
+  display:grid;grid-template-columns:repeat(4,1fr);grid-template-rows:repeat(2,136px);
+  gap:16px;padding:16px;box-sizing:border-box;background:rgb(17,34,51);
+  contain:layout style paint;z-index:2147483645;--bend:0px }
+#alix-corner-fixture > div { overflow:hidden;
+  border-radius:calc(32px + var(--bend)) 54px 38px 46px / 28px 48px 56px 36px;
+  background:rgb(218,64,113);border:4px solid rgb(32,190,160);box-sizing:border-box }
+#alix-corner-fixture > div > div { width:100%;height:100%;
+  background:linear-gradient(135deg,rgb(218,64,113),rgb(245,180,60)) }
+#alix-corner-fixture > div:nth-child(n+5) { box-shadow:0 3px 5px 2px rgba(0,0,0,.6) }
+#alix-corner-fixture > div:nth-child(6) { transform:translate(.375px,.25px) }
+#alix-corner-fixture > div:nth-child(7) { transform:perspective(400px) rotateY(20deg) }
+#alix-corner-fixture > div:nth-child(8) { transform:rotate(7deg) }
+</style>
+<div id="alix-corner-fixture" aria-hidden="true">
+  <div style="corner-shape:round"><div></div></div>
+  <div style="corner-shape:superellipse(2)"><div></div></div>
+  <div style="corner-shape:superellipse(0)"><div></div></div>
+  <div style="corner-shape:superellipse(-1)"><div></div></div>
+  <div style="corner-shape:superellipse(.5)"><div></div></div>
+  <div style="corner-shape:superellipse(3)"><div></div></div>
+  <div style="corner-shape:superellipse(-2)"><div></div></div>
+  <div style="corner-shape:round superellipse(2) superellipse(-1) superellipse(0)"><div></div></div>
+</div>

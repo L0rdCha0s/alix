@@ -26,6 +26,20 @@
 #define ALIXFS2_VERSION_LEGACY 2u
 #define ALIXFS2_MAX_FREE_CHUNKS 128u
 #define ALIXFS2_DEFAULT_NODE_CAPACITY 65536u
+#define ALIXFS_WRITEBACK_CHUNK_BYTES (64u * 1024u)
+#define ALIXFS_EAGER_FILE_BYTES (64u * 1024u)
+uint64_t g_alixfs_deferred_files, g_alixfs_deferred_bytes;
+
+/* Failure-only diagnostics: distinguish transient heap pressure from disk
+ * capacity and device failures without adding work to successful writeback. */
+uint64_t g_alixfs_snapshot_alloc_failures = 0;
+uint64_t g_alixfs_snapshot_failed_bytes = 0;
+uint64_t g_alixfs_chunk_alloc_failures = 0;
+uint64_t g_alixfs_node_write_failures = 0;
+uint64_t g_alixfs_streamed_nodes = 0;
+uint64_t g_alixfs_streamed_bytes = 0;
+uint64_t g_alixfs_stream_retries = 0;
+uint64_t g_alixfs_free_rebuilds = 0;
 
 /*
  * On-disk structures (packed).
@@ -309,6 +323,23 @@ static bool alixfs_device_read(block_device_t *device,
     return alixfs_device_io(device, sector_size, offset, buffer, len, false);
 }
 
+bool alixfs_mount_read_data(alixfs_mount_t *fs, uint64_t offset, void *buffer, size_t length)
+{
+    if (!fs || (!buffer && length) || !fs->sector_size ||
+        fs->device->sector_count > UINT64_MAX / fs->sector_size) return false;
+    uint64_t bytes = fs->device->sector_count * fs->sector_size;
+    if (offset > bytes || length > bytes - offset) return false;
+    for (size_t copied = 0; copied < length; )
+    {
+        size_t count = length - copied;
+        if (count > ALIXFS_WRITEBACK_CHUNK_BYTES) count = ALIXFS_WRITEBACK_CHUNK_BYTES;
+        if (!alixfs_device_read(fs->device, fs->sector_size, offset + copied,
+                               (char *)buffer + copied, count)) return false;
+        copied += count;
+    }
+    return true;
+}
+
 static bool alixfs_device_write(block_device_t *device,
                                 size_t sector_size,
                                 uint64_t offset,
@@ -336,6 +367,70 @@ static inline void alixfs_clear_chunk_dirty(alixfs_mount_t *fs, uint32_t id)
     fs->chunk_dirty_bitmap[id / 8] &= (uint8_t)~(1u << (id % 8));
 }
 
+static int alixfs_compare_chunks(const void *left, const void *right)
+{
+    uint64_t a = ((const alixfs2_free_chunk_t *)left)->offset;
+    uint64_t b = ((const alixfs2_free_chunk_t *)right)->offset;
+    return (a > b) - (a < b);
+}
+
+/* The bounded persisted free list is a cache, not the source of ownership.
+ * Recover omitted holes from the resident chunk table before extending the
+ * data frontier. Only call before reserving a private writeback extent, while
+ * the mount's backend gate is owned. Validate every span before changing it. */
+static bool alixfs_rebuild_free_chunks(alixfs_mount_t *fs)
+{
+    size_t count = 0;
+    for (uint32_t id = 0; id < fs->header.node_capacity; ++id)
+        if (fs->chunks[id].capacity) ++count;
+    alixfs2_free_chunk_t *used = count ? malloc(count * sizeof(*used)) : NULL;
+    if (count && !used) return false;
+    uint64_t bytes = (uint64_t)fs->device->sector_count * fs->sector_size;
+    size_t at = 0;
+    for (uint32_t id = 0; id < fs->header.node_capacity; ++id)
+    {
+        alixfs2_chunk_entry_t *entry = &fs->chunks[id];
+        if (!entry->capacity) continue;
+        if (entry->length > entry->capacity || entry->offset < fs->header.data_region_offset ||
+            entry->offset > bytes || entry->capacity > bytes - entry->offset)
+        { free(used); return false; }
+        used[at++] = (alixfs2_free_chunk_t){entry->offset, entry->capacity};
+    }
+    qsort(used, count, sizeof(*used), alixfs_compare_chunks);
+    uint64_t cursor = fs->header.data_region_offset;
+    for (size_t i = 0; i < count; ++i)
+    {
+        if (used[i].offset < cursor) { free(used); return false; }
+        cursor = used[i].offset + used[i].length;
+    }
+    fs->header.data_region_size = cursor - fs->header.data_region_offset;
+    fs->header.free_chunk_count = 0;
+    cursor = fs->header.data_region_offset;
+    for (size_t i = 0; i < count; ++i)
+    {
+        if (used[i].offset > cursor)
+        {
+            alixfs2_free_chunk_t gap = {cursor, used[i].offset - cursor};
+            uint32_t slot = fs->header.free_chunk_count;
+            bool append = slot < ALIXFS2_MAX_FREE_CHUNKS;
+            if (append) ++fs->header.free_chunk_count;
+            else
+            {
+                slot = 0;
+                for (uint32_t j = 1; j < ALIXFS2_MAX_FREE_CHUNKS; ++j)
+                    if (fs->header.free_chunks[j].length < fs->header.free_chunks[slot].length) slot = j;
+            }
+            if (append || gap.length > fs->header.free_chunks[slot].length)
+                fs->header.free_chunks[slot] = gap;
+        }
+        cursor = used[i].offset + used[i].length;
+    }
+    free(used);
+    fs->header_dirty = true;
+    __atomic_add_fetch(&g_alixfs_free_rebuilds, 1, __ATOMIC_RELAXED);
+    return true;
+}
+
 static bool alixfs_chunk_allocate(alixfs_mount_t *fs,
                                   size_t need,
                                   uint64_t *offset,
@@ -353,30 +448,41 @@ static bool alixfs_chunk_allocate(alixfs_mount_t *fs,
         return false;
     }
     size_t aligned = alixfs_align_size(need, fs->sector_size);
-    for (uint32_t i = 0; i < fs->header.free_chunk_count; ++i)
+    if (aligned > UINT32_MAX)
     {
-        alixfs2_free_chunk_t *chunk = &fs->header.free_chunks[i];
-        if (chunk->length >= aligned)
+        __atomic_add_fetch(&g_alixfs_chunk_alloc_failures, 1, __ATOMIC_RELAXED);
+        return false;
+    }
+    for (unsigned pass = 0; pass < 2; ++pass)
+    {
+        for (uint32_t i = 0; i < fs->header.free_chunk_count; ++i)
         {
-            *offset = chunk->offset;
-            *capacity = (uint32_t)aligned;
-            chunk->offset += aligned;
-            chunk->length -= aligned;
-            if (chunk->length == 0 && i + 1 < fs->header.free_chunk_count)
+            alixfs2_free_chunk_t *chunk = &fs->header.free_chunks[i];
+            if (chunk->length >= aligned)
             {
-                memmove(&fs->header.free_chunks[i],
-                        &fs->header.free_chunks[i + 1],
-                        (fs->header.free_chunk_count - i - 1) * sizeof(alixfs2_free_chunk_t));
-                fs->header.free_chunk_count--;
+                *offset = chunk->offset;
+                *capacity = (uint32_t)aligned;
+                chunk->offset += aligned;
+                chunk->length -= aligned;
+                if (chunk->length == 0)
+                {
+                    if (i + 1 < fs->header.free_chunk_count)
+                        memmove(&fs->header.free_chunks[i],
+                            &fs->header.free_chunks[i + 1],
+                            (fs->header.free_chunk_count - i - 1) * sizeof(alixfs2_free_chunk_t));
+                    fs->header.free_chunk_count--;
+                }
+                fs->header_dirty = true;
+                return true;
             }
-            fs->header_dirty = true;
-            return true;
         }
+        if (pass == 0 && !alixfs_rebuild_free_chunks(fs)) return false;
     }
     uint64_t start = fs->header.data_region_offset + fs->header.data_region_size;
     uint64_t bytes = (uint64_t)fs->device->sector_count * fs->sector_size;
     if (start + aligned > bytes)
     {
+        __atomic_add_fetch(&g_alixfs_chunk_alloc_failures, 1, __ATOMIC_RELAXED);
         return false;
     }
     *offset = start;
@@ -398,30 +504,31 @@ static void alixfs_chunk_release(alixfs_mount_t *fs, uint64_t offset, uint32_t l
     {
         return;
     }
-    uint64_t aligned_len = alixfs_align_u64(length, fs->sector_size);
-    for (uint32_t i = 0; i < fs->header.free_chunk_count; ++i)
+    uint64_t start = offset;
+    uint64_t end = offset + alixfs_align_u64(length, fs->sector_size);
+    /* Merge both neighbours, including chains, rather than leaving adjacent
+     * entries that exhaust the bounded free table during streamed replacement. */
+    for (uint32_t i = 0; i < fs->header.free_chunk_count; )
     {
-        alixfs2_free_chunk_t *chunk = &fs->header.free_chunks[i];
-        uint64_t end = chunk->offset + chunk->length;
-        if (end == offset)
+        alixfs2_free_chunk_t chunk = fs->header.free_chunks[i];
+        if (chunk.offset + chunk.length == start || end == chunk.offset)
         {
-            chunk->length += aligned_len;
-            fs->header_dirty = true;
-            return;
+            if (chunk.offset < start) start = chunk.offset;
+            if (chunk.offset + chunk.length > end) end = chunk.offset + chunk.length;
+            fs->header.free_chunks[i] = fs->header.free_chunks[--fs->header.free_chunk_count];
+            i = 0;
         }
-        if (offset + aligned_len == chunk->offset)
-        {
-            chunk->offset = offset;
-            chunk->length += aligned_len;
-            fs->header_dirty = true;
-            return;
-        }
+        else ++i;
     }
-    if (fs->header.free_chunk_count < ALIXFS2_MAX_FREE_CHUNKS)
+    if (end == fs->header.data_region_offset + fs->header.data_region_size)
     {
-        alixfs2_free_chunk_t *chunk = &fs->header.free_chunks[fs->header.free_chunk_count++];
-        chunk->offset = offset;
-        chunk->length = aligned_len;
+        fs->header.data_region_size = start - fs->header.data_region_offset;
+        fs->header_dirty = true;
+    }
+    else if (fs->header.free_chunk_count < ALIXFS2_MAX_FREE_CHUNKS)
+    {
+        fs->header.free_chunks[fs->header.free_chunk_count++] =
+            (alixfs2_free_chunk_t){ .offset = start, .length = end - start };
         fs->header_dirty = true;
     }
 }
@@ -568,6 +675,10 @@ static bool alixfs_serialize_node(vfs_node_t *node,
     uint8_t *buffer = (uint8_t *)malloc(total);
     if (!buffer)
     {
+        __atomic_store_n(&g_alixfs_snapshot_failed_bytes, total, __ATOMIC_RELAXED);
+        if (__atomic_add_fetch(&g_alixfs_snapshot_alloc_failures, 1, __ATOMIC_RELAXED) == 1)
+            serial_printf("[alixfs] snapshot allocation failed bytes=0x%016llX node=%s",
+                          (unsigned long long)total, node->name ? node->name : "(root)");
         return false;
     }
     size_t offset = 0;
@@ -619,7 +730,9 @@ static bool alixfs_serialize_node(vfs_node_t *node,
         memcpy(buffer + offset, node->name, name_len);
         offset += name_len;
     }
-    if (!metadata_only && data_len > 0 && node->data)
+    if (!metadata_only && data_len > 0 && !node->data)
+    { free(buffer); return false; }
+    if (!metadata_only && data_len > 0)
     {
         memcpy(buffer + offset, node->data, data_len);
     }
@@ -628,6 +741,69 @@ static bool alixfs_serialize_node(vfs_node_t *node,
     *mode = (alixfs_mode_disk_t){ .magic = ALIXFS_MODE_MAGIC, .version = 1, .permissions = node->permissions & 0777u };
     *out_buf = buffer;
     *out_len = total;
+    return true;
+}
+
+/* A large record is staged in a new extent. Never retain a node data pointer
+ * after unlocking it or hold its spinlock across disk IO. A changed generation
+ * discards the private extent and retries, preserving the old published record.
+ * Header/name/mode are immutable heap snapshots; only file bytes need the lock. */
+static bool alixfs_write_stream(alixfs_mount_t *fs, vfs_node_t *node,
+                               uint64_t offset, const uint8_t *metadata,
+                               size_t metadata_len, size_t data_len,
+                               size_t stored_len, uint64_t sequence,
+                               uint8_t *scratch, bool *stale)
+{
+    size_t prefix = metadata_len - sizeof(alixfs_mode_disk_t);
+    size_t data_end = prefix + data_len;
+    *stale = false;
+    for (size_t position = 0; position < stored_len; )
+    {
+        size_t count = stored_len - position;
+        if (count > ALIXFS_WRITEBACK_CHUNK_BYTES) count = ALIXFS_WRITEBACK_CHUNK_BYTES;
+        size_t end = position + count;
+        if (position < prefix)
+        {
+            size_t stop = end < prefix ? end : prefix;
+            memcpy(scratch, metadata + position, stop - position);
+        }
+        size_t begin = position > prefix ? position : prefix;
+        size_t stop = end < data_end ? end : data_end;
+        spinlock_lock(&node->data_lock);
+        if (node->data_seq != sequence || node->size != data_len)
+        {
+            *stale = true;
+            spinlock_unlock(&node->data_lock);
+            return true;
+        }
+        bool unloaded = node->data_unloaded;
+        uint64_t source_offset = node->disk_data_offset;
+        if (!unloaded && !node->data)
+        {
+            spinlock_unlock(&node->data_lock);
+            return false;
+        }
+        if (!unloaded && begin < stop)
+            memcpy(scratch + begin - position, node->data + begin - prefix, stop - begin);
+        spinlock_unlock(&node->data_lock);
+        /* Rename/full sync of an untouched file copies the old extent into
+         * the private destination in bounded chunks. The mount gate keeps
+         * that source extent alive; never read storage under data_lock. */
+        if (unloaded && begin < stop &&
+            !alixfs_mount_read_data(fs, source_offset + begin - prefix,
+                                   scratch + begin - position, stop - begin)) return false;
+        if (end > data_end)
+        {
+            begin = position > data_end ? position : data_end;
+            memcpy(scratch + begin - position, metadata + prefix + begin - data_end, end - begin);
+        }
+        if (!alixfs_device_write(fs->device, fs->sector_size, offset + position, scratch, count))
+            return false;
+        position = end;
+    }
+    spinlock_lock(&node->data_lock);
+    *stale = node->data_seq != sequence || node->size != data_len;
+    spinlock_unlock(&node->data_lock);
     return true;
 }
 
@@ -644,12 +820,17 @@ static bool alixfs_write_node(alixfs_mount_t *fs, vfs_node_t *node, bool force_a
         return true;
     }
 
+retry:
+    ;
     uint8_t *payload = NULL;
+    uint8_t *scratch = NULL;
     size_t payload_len = 0;
     uint32_t node_id = UINT32_MAX;
     uint64_t dirty_seq = 0;
+    uint64_t data_seq = 0;
     size_t pending_bytes = 0;
     bool metadata_only = false;
+    bool streamed = false;
 
     spinlock_lock(&node->data_lock);
     vfs_mapping_pull_locked(node);
@@ -669,6 +850,7 @@ static bool alixfs_write_node(alixfs_mount_t *fs, vfs_node_t *node, bool force_a
     }
 
     dirty_seq = node->dirty_seq;
+    data_seq = node->data_seq;
     pending_bytes = node->pending_dirty_bytes;
     if (!alixfs_assign_node_id(fs, node))
     {
@@ -688,42 +870,71 @@ static bool alixfs_write_node(alixfs_mount_t *fs, vfs_node_t *node, bool force_a
     /* Timestamp/ownership changes must not copy and rewrite an unchanged file. */
     metadata_only = !force_all && !node->disk_data_dirty && !node->disk_name_dirty &&
         entry->capacity > 0 && entry->length == stored_len;
+    streamed = !metadata_only && data_len > ALIXFS_WRITEBACK_CHUNK_BYTES;
 
-    if (!alixfs_serialize_node(node, fs->header.version, metadata_only, &payload, &payload_len))
+    if (!alixfs_serialize_node(node, fs->header.version, metadata_only || streamed, &payload, &payload_len))
     {
         spinlock_unlock(&node->data_lock);
         return false;
     }
     spinlock_unlock(&node->data_lock);
+    if (streamed)
+    {
+        scratch = malloc(ALIXFS_WRITEBACK_CHUNK_BYTES);
+        if (!scratch)
+        {
+            __atomic_add_fetch(&g_alixfs_snapshot_alloc_failures, 1, __ATOMIC_RELAXED);
+            __atomic_store_n(&g_alixfs_snapshot_failed_bytes, ALIXFS_WRITEBACK_CHUNK_BYTES, __ATOMIC_RELAXED);
+            free(payload);
+            return false;
+        }
+    }
 
     size_t aligned = alixfs_align_size(stored_len, fs->sector_size);
     uint64_t next_offset = entry->offset;
     uint32_t next_capacity = entry->capacity;
     bool relocated = false;
-    if (entry->capacity < aligned)
+    if (streamed || entry->capacity < aligned)
     {
         if (!alixfs_chunk_allocate(fs, aligned, &next_offset, &next_capacity))
         {
+            free(scratch);
             free(payload);
             return false;
         }
         relocated = true;
     }
-    if (!alixfs_device_write(fs->device,
+    bool stale = false;
+    bool written = streamed ? alixfs_write_stream(fs, node, next_offset, payload, payload_len,
+                                                data_len, stored_len, data_seq, scratch, &stale) :
+        alixfs_device_write(fs->device,
                               fs->sector_size,
                               next_offset,
                               payload,
-                              metadata_only ? payload_len - sizeof(alixfs_mode_disk_t) : payload_len) ||
-        (metadata_only && !alixfs_device_write(fs->device, fs->sector_size,
+                              metadata_only ? payload_len - sizeof(alixfs_mode_disk_t) : payload_len) &&
+        (!metadata_only || alixfs_device_write(fs->device, fs->sector_size,
             next_offset + stored_len - sizeof(alixfs_mode_disk_t),
-            payload + payload_len - sizeof(alixfs_mode_disk_t), sizeof(alixfs_mode_disk_t))))
+            payload + payload_len - sizeof(alixfs_mode_disk_t), sizeof(alixfs_mode_disk_t)));
+    free(scratch);
+    if (!written || stale)
     {
+        if (!written) __atomic_add_fetch(&g_alixfs_node_write_failures, 1, __ATOMIC_RELAXED);
         if (relocated)
         {
             alixfs_chunk_release(fs, next_offset, next_capacity);
         }
         free(payload);
+        if (stale)
+        {
+            __atomic_add_fetch(&g_alixfs_stream_retries, 1, __ATOMIC_RELAXED);
+            goto retry;
+        }
         return false;
+    }
+    if (streamed)
+    {
+        __atomic_add_fetch(&g_alixfs_streamed_nodes, 1, __ATOMIC_RELAXED);
+        __atomic_add_fetch(&g_alixfs_streamed_bytes, stored_len, __ATOMIC_RELAXED);
     }
     if (relocated)
     {
@@ -738,6 +949,7 @@ static bool alixfs_write_node(alixfs_mount_t *fs, vfs_node_t *node, bool force_a
     }
 
     spinlock_lock(&node->data_lock);
+    node->disk_data_offset = next_offset + stored_len - data_len - sizeof(alixfs_mode_disk_t);
     if (node->dirty_seq == dirty_seq)
     {
         node->dirty = false;
@@ -1251,6 +1463,11 @@ bool alixfs_mount_load(alixfs_mount_t *fs, vfs_mount_t *mount)
         {
             continue;
         }
+        uint64_t device_bytes;
+        if (__builtin_mul_overflow(fs->device->sector_count, (uint64_t)fs->sector_size, &device_bytes) ||
+            entry->length > entry->capacity || entry->offset > device_bytes ||
+            entry->capacity > device_bytes - entry->offset)
+        { alixfs_load_abort(fs, load); return false; }
         uint8_t *buffer = (uint8_t *)malloc(node_header_size);
         if (!buffer)
         {
@@ -1381,7 +1598,15 @@ bool alixfs_mount_load(alixfs_mount_t *fs, vfs_mount_t *mount)
         /* Old disks may contain the former mount-point spelling. Retain the
          * caller's mount point name, but always skip those on-disk bytes. */
         offset += disk_common.name_len;
-        if ((node->type == VFS_NODE_FILE || node->type == VFS_NODE_SYMLINK) &&
+        node->disk_data_offset = entry->offset + offset;
+        if (node->type == VFS_NODE_FILE && disk_common.data_len > ALIXFS_EAGER_FILE_BYTES)
+        {
+            node->size = disk_common.data_len;
+            node->data_unloaded = true;
+            __atomic_add_fetch(&g_alixfs_deferred_files, 1, __ATOMIC_RELAXED);
+            __atomic_add_fetch(&g_alixfs_deferred_bytes, disk_common.data_len, __ATOMIC_RELAXED);
+        }
+        else if ((node->type == VFS_NODE_FILE || node->type == VFS_NODE_SYMLINK) &&
             disk_common.data_len > 0)
         {
             if (!alixfs_ensure_capacity(node, disk_common.data_len))

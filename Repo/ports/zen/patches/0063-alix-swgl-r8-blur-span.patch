@@ -1,0 +1,26 @@
+--- a/gfx/wr/webrender/res/cs_blur.glsl
++++ b/gfx/wr/webrender/res/cs_blur.glsl
+@@ -223,13 +223,18 @@
+     swgl_commitGaussianBlurRGBA8(sColor0, uv, vUvClampRect, vOffsetScale.x != 0.0,
+                                  vSupport.x, vGaussCoefficients);
+ }
+-    #else
++    #endif
++// COLOR_TARGET is also bound to R8 shadow targets by WebRender.
+ void swgl_drawSpanR8() {
++    #ifdef WR_FEATURE_COLOR_TARGET
++    if (vSupport.y != EDGE_MODE_DUPLICATE) {
++        return;
++    }
++    #endif
+     vec2 uv = mix(vUvRect.xy, vUvRect.zw, vUv);
+     swgl_commitGaussianBlurR8(sColor0, uv, vUvClampRect, vOffsetScale.x != 0.0,
+                               vSupport.x, vGaussCoefficients);
+ }
+-    #endif
+-#endif
+-
+-#endif
++#endif
++
++#endif

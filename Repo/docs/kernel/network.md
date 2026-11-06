@@ -62,6 +62,15 @@ The TCP implementation is client-oriented:
 - Per-socket RX ring buffer with backpressure thresholds.
 - Retransmit and ARP retry timing based on `timer_ticks()`.
 
+Connected sockets initially retain 64 KiB of receive storage and grow on actual
+traffic/occupancy up to 5 MiB. Negotiated scaled windows can grow with sustained
+traffic even when a fast reader keeps occupancy low. Advertisements remain
+bounded by allocated space. Failed optional growth preserves the connection and
+buffer, with a 100 ms retry interval. TCP-lock-protected `g_tcp_rx_*` counters
+record current/peak capacity and successful/failed growth. See the
+[Zen memory investigation](../zen-memory-pressure-2026-11-06.md) for the captured
+5 MiB connect-allocation failures and before/after bulk checks.
+
 FD integration:
 
 - `net_tcp_socket_open` allocates an FD via `fd_allocate(&g_tcp_fd_ops, socket)`.

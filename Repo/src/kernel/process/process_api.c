@@ -479,7 +479,7 @@ void process_yield(void)
     scheduler_schedule(true);
 }
 
-void process_sleep_ticks(uint64_t ticks)
+static void process_sleep_ticks_impl(uint64_t ticks, bool absolute)
 {
     /* A lock owner cannot block, but ordinary sleepers must register under the
      * same scheduler lock used by termination and remote timer wakeups. */
@@ -504,7 +504,13 @@ void process_sleep_ticks(uint64_t ticks)
     }
 
     uint64_t now = timer_ticks();
-    uint64_t wake_tick = ticks > UINT64_MAX - now ? UINT64_MAX : now + ticks;
+    uint64_t wake_tick = absolute ? ticks : ticks > UINT64_MAX - now ? UINT64_MAX : now + ticks;
+    if (wake_tick <= now)
+    {
+        scheduler_lock_release(flags);
+        process_yield();
+        return;
+    }
     thread->state = THREAD_STATE_BLOCKED;
     thread->sleep_until_tick = wake_tick;
     thread->wake_pending = false;
@@ -518,20 +524,15 @@ void process_sleep_ticks(uint64_t ticks)
     scheduler_schedule(false);
 }
 
+void process_sleep_ticks(uint64_t ticks)
+{
+    process_sleep_ticks_impl(ticks, false);
+}
+
 void process_sleep_ms(uint32_t ms)
 {
-    uint32_t freq = timer_frequency();
-    if (freq == 0)
-    {
-        process_sleep_ticks(1);
-        return;
-    }
-    uint64_t ticks = ((uint64_t)ms * (uint64_t)freq + 999ULL) / 1000ULL;
-    if (ticks == 0)
-    {
-        ticks = 1;
-    }
-    process_sleep_ticks(ticks);
+    if (!ms) process_sleep_ticks(1);
+    else process_sleep_ticks_impl(timer_deadline_after_millis(ms), true);
 }
 
 void process_destroy_marked(process_t *process)
@@ -972,6 +973,12 @@ process_t *process_current(void)
     return current_process_local();
 }
 
+bool process_current_is_kernel_service(void)
+{
+    process_t *process = current_process_local();
+    return process && process->kernel_service;
+}
+
 thread_t *thread_current(void)
 {
     return current_thread_local();
@@ -1191,11 +1198,7 @@ bool wait_queue_wait_timeout(wait_queue_t *queue,
     uint64_t deadline = 0;
     if (timeout_ticks > 0)
     {
-        deadline = now + timeout_ticks;
-        if (deadline <= now)
-        {
-            deadline = now + 1;
-        }
+        deadline = timeout_ticks > UINT64_MAX - now ? UINT64_MAX : now + timeout_ticks;
     }
 
     uint64_t flags = cpu_save_flags();
@@ -1972,6 +1975,41 @@ int process_user_thread_set_name(uint64_t tid, const char *name)
     return result;
 }
 
+int process_user_thread_priority(uint64_t tid, int priority)
+{
+    thread_t *current = current_thread_local();
+    process_t *proc = current ? current->process : NULL;
+    if (!current || !current->is_user || !proc || !proc->is_user ||
+        priority < SYSCALL_THREAD_PRIORITY_QUERY || priority > SYSCALL_THREAD_PRIORITY_HIGH)
+        return -22;
+    if (!tid) tid = current->tid;
+    uint64_t flags = scheduler_lock_acquire("user_thread_priority");
+    spinlock_lock(&proc->threads_lock);
+    thread_t *target = proc->threads;
+    while (target && target->tid != tid) target = target->process_next;
+    int result = -3;
+    if (proc->state != PROCESS_STATE_ZOMBIE &&
+        __atomic_load_n(&proc->lifetime_state, __ATOMIC_ACQUIRE) == PROCESS_LIFETIME_ALIVE &&
+        target && target->is_user && !target->pending_destroy && !target->exited &&
+        target->state != THREAD_STATE_ZOMBIE && thread_lifetime_active(target))
+    {
+        if (priority == SYSCALL_THREAD_PRIORITY_QUERY)
+            result = target->base_priority <= THREAD_PRIORITY_BACKGROUND ? SYSCALL_THREAD_PRIORITY_BACKGROUND :
+                     target->base_priority >= THREAD_PRIORITY_HIGH ? SYSCALL_THREAD_PRIORITY_HIGH :
+                     SYSCALL_THREAD_PRIORITY_NORMAL;
+        else
+        {
+            thread_priority_t native = priority == SYSCALL_THREAD_PRIORITY_BACKGROUND ? THREAD_PRIORITY_BACKGROUND :
+                                       priority == SYSCALL_THREAD_PRIORITY_HIGH ? THREAD_PRIORITY_HIGH : THREAD_PRIORITY_NORMAL;
+            thread_set_base_priority_locked(target, native);
+            result = 0;
+        }
+    }
+    spinlock_unlock(&proc->threads_lock);
+    scheduler_lock_release(flags);
+    return result;
+}
+
 int process_user_thread_prepare_exit(void)
 {
     thread_t *current = current_thread_local();
@@ -2529,7 +2567,14 @@ void process_on_timer_tick(interrupt_frame_t *frame)
 
     if (thread->time_slice_remaining > 0)
     {
-        thread->time_slice_remaining--;
+        /* Wakeup IPIs share this handler with the timer broadcast. They can
+         * arrive many times within one tick, so an interrupt is not a unit of
+         * CPU time. Charge the slice from its dispatch timestamp instead. */
+        uint64_t now = timer_ticks();
+        uint64_t started = __atomic_load_n(&thread->last_scheduled_tick, __ATOMIC_RELAXED);
+        uint64_t elapsed = now >= started ? now - started : 0;
+        uint32_t quantum = scheduler_thread_time_slice_ticks(thread);
+        thread->time_slice_remaining = elapsed >= quantum ? 0 : quantum - (uint32_t)elapsed;
     }
 
     if (thread->time_slice_remaining > 0)

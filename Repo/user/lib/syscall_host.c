@@ -402,6 +402,14 @@ uint64_t sys_monotonic_millis(void)
     return (uint64_t)now.tv_sec * 1000u + (uint64_t)now.tv_nsec / 1000000u;
 }
 
+int64_t sys_monotonic_resolution_ns(void)
+{
+    struct timespec resolution;
+    if (clock_getres(CLOCK_MONOTONIC, &resolution)) return -1;
+    int64_t ns = (int64_t)resolution.tv_sec * 1000000000 + resolution.tv_nsec;
+    return ns > 1000000 ? ns : 1000000;
+}
+
 uintptr_t sys_thread_get_tls(void)
 {
     errno = ENOSYS;
@@ -481,6 +489,12 @@ int sys_thread_info(uint64_t tid, syscall_thread_info_t *info)
 int sys_thread_set_name(uint64_t tid, const char *name)
 {
     (void)tid; (void)name;
+    return -ENOSYS;
+}
+
+int sys_thread_priority(uint64_t tid, int priority)
+{
+    (void)tid; (void)priority;
     return -ENOSYS;
 }
 

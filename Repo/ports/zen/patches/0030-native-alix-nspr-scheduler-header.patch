@@ -1,12 +1,47 @@
 --- a/nsprpub/pr/src/pthreads/ptthread.c
 +++ b/nsprpub/pr/src/pthreads/ptthread.c
-@@ -15,6 +15,9 @@
+@@ -15,6 +15,15 @@
  #include "prpdce.h"
  
  #include <pthread.h>
 +#if defined(ALIX)
 +#include <sched.h>
++static int pt_AlixPriority(PRThreadPriority priority)
++{
++    return priority == PR_PRIORITY_LOW ? PTHREAD_PRIORITY_BACKGROUND_NP :
++           priority == PR_PRIORITY_NORMAL ? PTHREAD_PRIORITY_NORMAL_NP :
++           PTHREAD_PRIORITY_HIGH_NP;
++}
 +#endif
  #include <unistd.h>
  #include <string.h>
  #include <signal.h>
+@@ -174,6 +183,9 @@
+         PR_ASSERT(pthread_equal(thred->id, id));
+     }
+ 
++#ifdef ALIX
++    (void)pthread_setpriority_np(id, pt_AlixPriority(thred->priority));
++#endif
+ #ifdef _PR_NICE_PRIORITY_SCHEDULING
+     thred->tid = tid;
+     PR_NotifyAllCondVar(pt_book.cv);
+@@ -657,7 +669,17 @@
+         newPri = PR_PRIORITY_LAST;
+     }
+ 
+-#if _POSIX_THREAD_PRIORITY_SCHEDULING > 0
++#if defined(ALIX)
++    PR_Lock(pt_book.ml);
++    rv = pthread_setpriority_np(thred->id, pt_AlixPriority(newPri));
++    thred->priority = newPri;
++    PR_Unlock(pt_book.ml);
++    if (rv != 0) {
++        PR_LOG(_pr_thread_lm, PR_LOG_MIN,
++               ("PR_SetThreadPriority: native priority error %d", rv));
++    }
++    return;
++#elif _POSIX_THREAD_PRIORITY_SCHEDULING > 0
+     if (EPERM != pt_schedpriv) {
+         int policy;
+         struct sched_param schedule;

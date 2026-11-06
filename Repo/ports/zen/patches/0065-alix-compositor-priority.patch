@@ -1,0 +1,13 @@
+--- a/gfx/layers/ipc/CompositorThread.cpp
++++ b/gfx/layers/ipc/CompositorThread.cpp
+@@ -107,6 +107,10 @@
+     return nullptr;
+   }
+ 
++#ifdef MOZ_WIDGET_ALIX
++  static_cast<nsThread*>(compositorThread.get())
++      ->SetPriority(nsISupportsPriority::PRIORITY_HIGH);
++#endif
+   ImageBridgeParent::Setup();
+ 
+   return compositorThread.forget();

@@ -160,6 +160,36 @@ not download the browser automatically during a normal `make` or boot.
 
 ### Runtime performance measurements
 
+The [6 November runtime refresh](zen-runtime-refresh-2026-11-06.md) confirms
+that the actual executable consumers now contain the current identity cache,
+with 99.938% fewer raw thread-ID dispatches in a counted browser sequence.
+Input latency still has cold spikes. `zen-package` now checks the Gecko build
+and its DSO startup dependency before packaging; use a fresh
+`ZEN_BROWSER_PACKAGE_DIR` when preserving an existing published archive.
+
+
+Targeted scheduling, actor IPC, layout, canvas, font, allocation and input-stage
+diagnostics are described in [Zen performance diagnostics](zen-performance-diagnostics-2026-11-05.md).
+The [software-rendering investigation](zen-software-rendering-2026-11-06.md)
+uses clock-calibrated input stages and live render-thread contexts to identify
+external fixed-width copies in SWGL pixel loops, with a rebuilt native fix and
+separate redraw-policy evaluation.
+The [corner-mask pass](zen-corner-mask-performance-2026-11-06.md) measures the next
+renderer fix, bounded AlixFS writeback and corrected kernel-heap accounting.
+The [lazy-cache pass](zen-lazy-cache-performance-2026-11-06.md) addresses the
+profile-heavy heap-exhaustion gate with demand-loaded AlixFS payloads, native
+multi-page/install/resize runs and independent filesystem-integrity evidence.
+The [shader-math pass](zen-shader-math-performance-2026-11-06.md) verifies live
+instruction bytes against matching symbols and traces first-profile update
+effects. Its controlled shader experiment did not establish an end-to-end gain,
+so the prior shader sources and published package remain active.
+The subsequent [R8 blur fix](zen-r8-blur-performance-2026-11-06.md) identifies a
+missing callback in the color shader used for R8 shadow targets. Its rebuilt
+package passed native pixel/lifecycle comparisons and is now the default archive.
+The [HTML5 media investigation](zen-html5-media-2026-11-06.md) records the native
+decoder-routing and playback crashes, their source fixes, and the separate
+playback acceptance gates.
+
 `ports/zen/benchmark_browser.py` boots through `run-via-agent.sh`, cloning an
 already installed disk into a disposable image. It snapshots the kernel and
 loader, creates a unique profile under `/root` on the cloned AlixFS volume,
